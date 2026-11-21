@@ -28,7 +28,7 @@ import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
 import { api, extractErrorMessage } from '@/services/api'
-import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
+import { copyToClipboard, maskToken } from '@/utils/privacy'
 import {
   formatDateTime,
   formatResetCountdown,
@@ -93,7 +93,7 @@ const groupOptions = computed(() => [
 ])
 
 const refreshTokenValue = computed(() => props.account?.token?.refreshToken?.trim() ?? '')
-const refreshTokenRevealed = computed(() => showRefreshToken.value && !appStore.settings.privacyMode)
+const refreshTokenRevealed = computed(() => showRefreshToken.value)
 const displayedRefreshToken = computed(() => {
   const rt = refreshTokenValue.value
   if (!rt) return ''
@@ -146,7 +146,7 @@ function syncFormFromAccount(acc: Account | null, resetVisibility: boolean) {
     return
   }
   formGroupId.value = acc.groupId ?? ''
-  formLoginAccount.value = getCustomLoginAccount(acc)
+  formLoginAccount.value = getCustomLoginAccount(acc) || acc.email
   formNotes.value = acc.notes ?? ''
   formPassword.value = acc.accountPassword ?? ''
   formTwoFactorSecret.value = acc.twoFactorSecret ?? ''
@@ -305,7 +305,7 @@ async function handleSaveDetails() {
       twoFactorSecret: formTwoFactorSecret.value,
     })
     formGroupId.value = updated.groupId ?? ''
-    formLoginAccount.value = getCustomLoginAccount(updated)
+    formLoginAccount.value = getCustomLoginAccount(updated) || updated.email
     formNotes.value = updated.notes ?? ''
     formPassword.value = updated.accountPassword ?? ''
     formTwoFactorSecret.value = updated.twoFactorSecret ?? ''
@@ -371,7 +371,7 @@ async function openValidationUrl(url: string) {
             style="background-color: var(--success)"
           />
           <h2 class="text-sm font-semibold truncate" style="color: var(--text-primary)">
-            {{ maskEmail(account.email, appStore.settings.privacyMode) }}
+            {{ account.email }}
           </h2>
           <button
             type="button"
@@ -560,7 +560,7 @@ async function openValidationUrl(url: string) {
           />
         </div>
 
-        <!-- 登录账号（与登录密码分开填写与展示） -->
+        <!-- 登录账号（直接明文显示，未自定义时默认展示账号邮箱） -->
         <div>
           <div class="flex items-center justify-between gap-2 mb-1">
             <label for="detail-login-account-input" class="block text-[11.5px]" style="color: var(--text-muted)">
@@ -571,7 +571,7 @@ async function openValidationUrl(url: string) {
               class="text-[10.5px] truncate"
               style="color: var(--text-muted)"
             >
-              默认同邮箱，可自定义
+              默认同邮箱，可修改
             </span>
           </div>
           <div class="flex items-center gap-1.5">
@@ -585,9 +585,11 @@ async function openValidationUrl(url: string) {
                 v-model="formLoginAccount"
                 type="text"
                 autocomplete="off"
-                :placeholder="`默认同邮箱：${maskEmail(account.email, appStore.settings.privacyMode)}`"
+                autocorrect="off"
+                autocapitalize="none"
+                spellcheck="false"
+                :placeholder="`默认同邮箱：${account.email}`"
                 class="w-full pl-8 pr-2.5 py-1.5 text-xs rounded-lg border font-mono-num"
-                :class="{ 'privacy-disc': appStore.settings.privacyMode && Boolean(formLoginAccount) }"
                 style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
               />
             </div>
@@ -605,7 +607,7 @@ async function openValidationUrl(url: string) {
           </div>
         </div>
 
-        <!-- 登录密码（独立填写与脱敏展示） -->
+        <!-- 登录密码（默认隐藏，始终允许点击小眼睛按钮切换显示） -->
         <div>
           <label for="detail-password-input" class="block text-[11.5px] mb-1" style="color: var(--text-muted)">
             登录密码
@@ -619,7 +621,7 @@ async function openValidationUrl(url: string) {
               <input
                 id="detail-password-input"
                 v-model="formPassword"
-                :type="showPassword && !appStore.settings.privacyMode ? 'text' : 'password'"
+                :type="showPassword ? 'text' : 'password'"
                 autocomplete="off"
                 placeholder="可选，记录登录密码"
                 class="w-full pl-8 pr-8 py-1.5 text-xs rounded-lg border font-mono-num"
@@ -627,14 +629,14 @@ async function openValidationUrl(url: string) {
               />
               <button
                 type="button"
-                :disabled="appStore.settings.privacyMode"
-                :title="appStore.settings.privacyMode ? '全局隐私模式已开启' : showPassword ? '隐藏密码' : '显示密码'"
+                :aria-pressed="showPassword"
+                :title="showPassword ? '隐藏密码' : '显示密码'"
                 aria-label="切换密码显示"
-                class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 cursor-pointer transition-colors hover:opacity-80"
                 style="color: var(--text-muted)"
                 @click="showPassword = !showPassword"
               >
-                <EyeOff v-if="showPassword && !appStore.settings.privacyMode" class="w-3.5 h-3.5" />
+                <EyeOff v-if="showPassword" class="w-3.5 h-3.5" />
                 <Eye v-else class="w-3.5 h-3.5" />
               </button>
             </div>
@@ -814,14 +816,9 @@ async function openValidationUrl(url: string) {
           <div class="flex items-center gap-1 shrink-0">
             <button
               type="button"
-              :disabled="!refreshTokenValue || appStore.settings.privacyMode"
-              :title="
-                appStore.settings.privacyMode
-                  ? '全局隐私模式已开启'
-                  : refreshTokenRevealed
-                    ? '隐藏 Refresh Token'
-                    : '显示完整 Refresh Token'
-              "
+              :disabled="!refreshTokenValue"
+              :aria-pressed="refreshTokenRevealed"
+              :title="refreshTokenRevealed ? '隐藏 Refresh Token' : '显示完整 Refresh Token'"
               aria-label="切换 Refresh Token 脱敏状态"
               class="p-1.5 rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
               style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-secondary)"
@@ -1085,9 +1082,3 @@ async function openValidationUrl(url: string) {
     </aside>
   </Transition>
 </template>
-
-<style scoped>
-.privacy-disc {
-  -webkit-text-security: disc;
-}
-</style>
