@@ -244,7 +244,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
                   @click="appStore.switchToAccount(acc.id)"
                 >
                   <ArrowRightLeft class="w-3 h-3 shrink-0" />
-                  <span>{{ appStore.currentAccountId === acc.id ? '已激活' : '切换' }}</span>
+                  <span>{{ appStore.currentAccountId === acc.id ? '当前' : '切换' }}</span>
                 </button>
               </div>
             </td>
