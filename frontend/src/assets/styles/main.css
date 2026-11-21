@@ -12,6 +12,7 @@
   --bg-active: #e5edff;
 
   --border-subtle: #e5e7eb;
+  --border-hairline: #eef1f5;
   --border-strong: #d1d5db;
 
   --text-primary: #0f172a;
@@ -53,6 +54,7 @@
   --bg-active: rgba(59, 130, 246, 0.18);
 
   --border-subtle: #262c38;
+  --border-hairline: #212734;
   --border-strong: #363f50;
 
   --text-primary: #f1f5f9;

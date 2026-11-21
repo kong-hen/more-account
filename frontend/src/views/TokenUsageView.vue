@@ -359,7 +359,7 @@ function kindLabel(kind: string): string {
                   <th class="py-2.5 px-4 text-right whitespace-nowrap">最近活动</th>
                 </tr>
               </thead>
-              <tbody class="divide-y" style="border-color: var(--border-subtle)">
+              <tbody class="divide-y divide-[var(--border-hairline)]">
                 <tr
                   v-for="item in conversations?.items ?? []"
                   :key="item.conversationId"

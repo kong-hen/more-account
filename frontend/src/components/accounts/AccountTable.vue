@@ -100,7 +100,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
             <th class="py-2.5 pl-2.5 pr-3 text-right whitespace-nowrap">操作</th>
           </tr>
         </thead>
-        <tbody class="divide-y text-xs" style="border-color: var(--border-subtle)">
+        <tbody class="divide-y divide-[var(--border-hairline)] text-xs">
           <tr
             v-for="acc in accounts"
             :key="acc.id"

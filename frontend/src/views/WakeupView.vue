@@ -324,7 +324,7 @@ function openUrl(url: string) {
                   <th class="py-2.5 px-4 text-right whitespace-nowrap">耗时</th>
                 </tr>
               </thead>
-              <tbody class="divide-y" style="border-color: var(--border-subtle)">
+              <tbody class="divide-y divide-[var(--border-hairline)]">
                 <tr v-for="item in wakeupStore.history" :key="item.id">
                   <td class="py-3 px-4 font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-muted)">
                     {{ formatDateTime(item.timestamp) }}
