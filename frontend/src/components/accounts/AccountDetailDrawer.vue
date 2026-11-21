@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 右侧悬浮账号详情抽屉（不挤压主工作区）：
-// 包含切号动作、刷新与立即唤醒测试、实时 2FA TOTP 30s 圆环动态码、登录账号与密码分离编辑展示、Refresh Token 默认脱敏展示、备注、所属分组与全量模型配额明细。
+// 包含切号动作、刷新与立即唤醒测试、实时 2FA TOTP 30s 圆环动态码、登录账号与密码分离编辑展示、Refresh Token 默认脱敏展示、备注、所属分组与三大分类额度总览。
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   X,
@@ -36,7 +36,6 @@ import {
   isAccountAbnormal,
   mergeAccountModels,
   summarizeQuotaCategories,
-  type MergedModelQuota,
 } from '@/utils/quota'
 import type { Account, TotpCodeResult } from '@/types/models'
 
@@ -90,18 +89,12 @@ const displayedRefreshToken = computed(() => {
   return refreshTokenRevealed.value ? rt : maskToken(rt)
 })
 const quotaCategories = computed(() => summarizeQuotaCategories(props.account))
-const mergedModels = computed(() => mergeAccountModels(props.account))
 
 function quotaValueStyle(percentage: number) {
   const tone = getQuotaTone(percentage)
   if (tone === 'danger') return { color: 'var(--danger-text)' }
   if (tone === 'warning') return { color: 'var(--warning-text)' }
   return { color: 'var(--text-primary)' }
-}
-
-function formatMergedModelTooltip(m: MergedModelQuota): string {
-  if (m.variants.length <= 1) return m.baseId
-  return m.variants.map((v) => `${v.name} (${v.percentage}%)`).join('\n')
 }
 
 function getEffectiveLoginAccount(acc: Account): string {
@@ -241,7 +234,7 @@ async function handleSaveDetails() {
 async function handleQuickWakeup() {
   if (!props.account) return
   const defaultModel =
-    mergedModels.value[0]?.canonicalModelId ||
+    mergeAccountModels(props.account)[0]?.canonicalModelId ||
     props.account.quota?.models?.[0]?.name ||
     'gemini-3.8-flash-high'
   await wakeupStore.runSingleTest({
@@ -832,41 +825,6 @@ async function openValidationUrl(url: string) {
           style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
         >
           暂无额度数据，请点击上方「刷新配额」获取。
-        </div>
-      </section>
-
-      <!-- 模型配额明细（独立展示各模型，仅合并同一模型的不同思考深度，不附加额外后缀） -->
-      <section v-if="mergedModels.length" class="space-y-2.5">
-        <div class="flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold" style="color: var(--text-primary)">
-            模型明细 ({{ mergedModels.length }})
-          </h3>
-        </div>
-
-        <div class="space-y-2">
-          <div
-            v-for="m in mergedModels"
-            :key="m.key"
-            class="p-2.5 rounded-xl border space-y-1.5"
-            style="border-color: var(--border-subtle); background-color: var(--bg-app)"
-          >
-            <div class="flex items-center justify-between gap-2 text-xs">
-              <span class="font-medium truncate" style="color: var(--text-primary)" :title="formatMergedModelTooltip(m)">
-                {{ m.displayName }}
-              </span>
-              <span class="font-mono-num font-semibold shrink-0" style="color: var(--text-primary)">
-                {{ m.percentage }}%
-              </span>
-            </div>
-
-            <QuotaBar :percentage="m.percentage" />
-            <div class="flex items-center justify-between gap-2 text-[11px]" style="color: var(--text-muted)">
-              <span class="font-mono-num truncate min-w-0" :title="formatMergedModelTooltip(m)">{{ m.baseId }}</span>
-              <span class="tabular-nums shrink-0">
-                {{ m.resetTime ? `重置 ${formatResetCountdown(m.resetTime)}` : '未返回重置时间' }}
-              </span>
-            </div>
-          </div>
         </div>
       </section>
 
