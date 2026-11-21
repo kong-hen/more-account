@@ -84,25 +84,25 @@ function kindLabel(kind: string): string {
 <template>
   <div class="flex-1 min-w-0 h-full flex overflow-hidden">
     <section class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
-      <!-- 顶栏 -->
+      <!-- 顶栏（稳居单行，窄窗口下不换行移位） -->
       <header
-        class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between flex-wrap gap-x-3 gap-y-2.5"
+        class="wails-drag shrink-0 px-5 pt-5 pb-4 border-b flex items-center justify-between gap-3"
         style="border-color: var(--border-subtle); background-color: var(--bg-app)"
       >
-        <div class="wails-no-drag flex items-center gap-3 min-w-0">
-          <h1 class="text-base font-semibold tracking-tight whitespace-nowrap" style="color: var(--text-primary)">
+        <div class="wails-no-drag flex items-center gap-2.5 min-w-0">
+          <h1 class="text-base font-semibold tracking-tight whitespace-nowrap shrink-0" style="color: var(--text-primary)">
             Token 用量统计
           </h1>
           <span
             v-if="overview"
-            class="text-[11.5px] font-mono-num whitespace-nowrap"
+            class="text-[11.5px] font-mono-num truncate min-w-0"
             style="color: var(--text-muted)"
           >
             {{ overview.conversationCount }} 对话 · {{ overview.turnCount }} 轮
           </span>
         </div>
 
-        <div class="wails-no-drag flex items-center flex-wrap gap-2">
+        <div class="wails-no-drag flex items-center gap-1.5 shrink-0">
           <!-- 时间范围分段 -->
           <div
             class="h-8 inline-flex items-center p-0.5 rounded-lg border shrink-0"
@@ -112,7 +112,7 @@ function kindLabel(kind: string): string {
               v-for="p in presets"
               :key="p.id"
               type="button"
-              class="px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap cursor-pointer transition-colors"
+              class="px-2 py-1 rounded-md text-xs font-medium whitespace-nowrap cursor-pointer transition-colors"
               :style="
                 usageStore.query.preset === p.id
                   ? { backgroundColor: 'var(--bg-active)', color: 'var(--accent)' }
@@ -127,7 +127,7 @@ function kindLabel(kind: string): string {
           <button
             type="button"
             :disabled="usageStore.syncing"
-            class="h-8 inline-flex items-center gap-1.5 px-3 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
+            class="h-8 inline-flex items-center gap-1.5 px-2.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
             style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
             @click="usageStore.sync(false)"
           >

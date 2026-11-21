@@ -48,10 +48,10 @@ async function handleClear() {
 <template>
   <section class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
     <header
-      class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between flex-wrap gap-x-3 gap-y-2.5"
+      class="wails-drag shrink-0 px-5 pt-5 pb-4 border-b flex items-center justify-between gap-3"
       style="border-color: var(--border-subtle); background-color: var(--bg-app)"
     >
-      <div class="wails-no-drag flex items-center gap-3">
+      <div class="wails-no-drag flex items-center gap-2.5 min-w-0">
         <h1 class="text-base font-semibold tracking-tight whitespace-nowrap" style="color: var(--text-primary)">
           切号历史
         </h1>
@@ -63,7 +63,7 @@ async function handleClear() {
         </span>
       </div>
 
-      <div class="wails-no-drag flex items-center flex-wrap gap-2">
+      <div class="wails-no-drag flex items-center gap-1.5 shrink-0">
         <div
           class="h-8 inline-flex items-center p-0.5 rounded-lg border shrink-0"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface)"

@@ -88,11 +88,11 @@ function openUrl(url: string) {
   <section class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
     <!-- 顶栏 -->
     <header
-      class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between flex-wrap gap-x-3 gap-y-2.5"
+      class="wails-drag shrink-0 px-5 pt-5 pb-4 border-b flex items-center justify-between gap-3"
       style="border-color: var(--border-subtle); background-color: var(--bg-app)"
     >
-      <div class="wails-no-drag flex items-center flex-wrap gap-3">
-        <h1 class="text-base font-semibold tracking-tight whitespace-nowrap" style="color: var(--text-primary)">
+      <div class="wails-no-drag flex items-center gap-2.5 min-w-0">
+        <h1 class="text-base font-semibold tracking-tight whitespace-nowrap shrink-0" style="color: var(--text-primary)">
           定时唤醒
         </h1>
 
@@ -129,7 +129,7 @@ function openUrl(url: string) {
         </div>
       </div>
 
-      <div class="wails-no-drag flex items-center flex-wrap gap-2">
+      <div class="wails-no-drag flex items-center gap-1.5 shrink-0">
         <!-- 调度器总开关 -->
         <button
           type="button"

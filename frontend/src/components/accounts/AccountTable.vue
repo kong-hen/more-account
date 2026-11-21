@@ -77,7 +77,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
             class="border-b text-[11.5px] font-medium"
             style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
           >
-            <th class="py-2.5 pl-4 pr-2 w-10">
+            <th class="py-2.5 pl-3 pr-2 w-9">
               <button
                 type="button"
                 aria-label="全选或取消全选"
@@ -92,12 +92,12 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
                 <Check v-if="allSelected" class="w-3 h-3" />
               </button>
             </th>
-            <th class="py-2.5 px-3 whitespace-nowrap">账号</th>
-            <th class="py-2.5 px-3 whitespace-nowrap">分组</th>
-            <th class="py-2.5 px-3 whitespace-nowrap">等级</th>
-            <th class="py-2.5 px-3 min-w-[260px] whitespace-nowrap">额度概览（5h / 周）</th>
-            <th class="py-2.5 px-3 whitespace-nowrap">最近重置</th>
-            <th class="py-2.5 px-3 text-right pr-4 whitespace-nowrap">操作</th>
+            <th class="py-2.5 px-2.5 whitespace-nowrap">账号</th>
+            <th class="py-2.5 px-2.5 whitespace-nowrap">分组</th>
+            <th class="py-2.5 px-2.5 whitespace-nowrap">等级</th>
+            <th class="py-2.5 px-2.5 min-w-[205px] whitespace-nowrap">额度概览（5h / 周）</th>
+            <th class="py-2.5 px-2.5 whitespace-nowrap">最近重置</th>
+            <th class="py-2.5 pl-2.5 pr-3 text-right whitespace-nowrap">操作</th>
           </tr>
         </thead>
         <tbody class="divide-y text-xs" style="border-color: var(--border-subtle)">
@@ -112,7 +112,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
             "
             @click="emit('open-detail', acc)"
           >
-            <td class="py-3 pl-4 pr-2" @click.stop>
+            <td class="py-3 pl-3 pr-2" @click.stop>
               <button
                 type="button"
                 aria-label="选择账号"
@@ -128,7 +128,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
               </button>
             </td>
 
-            <td class="py-3 px-3">
+            <td class="py-3 px-2.5">
               <div class="flex items-center gap-2 min-w-0">
                 <span
                   class="w-2 h-2 rounded-full shrink-0"
@@ -143,7 +143,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
                 />
                 <div class="min-w-0">
                   <div class="font-medium flex items-center gap-1.5" style="color: var(--text-primary)">
-                    <span class="truncate max-w-[220px]">
+                    <span class="truncate max-w-[165px] xl:max-w-[220px]">
                       {{ maskEmail(acc.email, appStore.settings.privacyMode) }}
                     </span>
                     <ShieldCheck
@@ -153,14 +153,14 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
                       title="已配置 2FA 动态码"
                     />
                   </div>
-                  <div v-if="acc.notes" class="text-[11px] truncate max-w-[220px]" style="color: var(--text-muted)">
+                  <div v-if="acc.notes" class="text-[11px] truncate max-w-[165px] xl:max-w-[220px]" style="color: var(--text-muted)">
                     {{ acc.notes }}
                   </div>
                 </div>
               </div>
             </td>
 
-            <td class="py-3 px-3 whitespace-nowrap">
+            <td class="py-3 px-2.5 whitespace-nowrap">
               <span
                 v-if="acc.groupId && appStore.groupMap.get(acc.groupId)"
                 class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] whitespace-nowrap"
@@ -175,7 +175,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
               <span v-else class="text-[11px] whitespace-nowrap" style="color: var(--text-muted)">未分组</span>
             </td>
 
-            <td class="py-3 px-3 whitespace-nowrap">
+            <td class="py-3 px-2.5 whitespace-nowrap">
               <span
                 v-if="getTierLabel(acc) !== 'UNKNOWN'"
                 class="px-1.5 py-0.5 rounded text-[10.5px] font-semibold"
@@ -186,7 +186,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
               <span v-else style="color: var(--text-muted)">—</span>
             </td>
 
-            <td class="py-3 px-3">
+            <td class="py-3 px-2.5">
               <div v-if="isAccountAbnormal(acc)" class="inline-flex items-center gap-1 text-[11.5px] font-medium whitespace-nowrap" style="color: var(--danger-text)">
                 <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
                 <span>{{ acc.disabled ? '令牌失效' : '状态异常' }}</span>
@@ -215,11 +215,11 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
               <span v-else class="text-[11px] whitespace-nowrap" style="color: var(--text-muted)">未拉取</span>
             </td>
 
-            <td class="py-3 px-3 font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-muted)">
+            <td class="py-3 px-2.5 font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-muted)">
               {{ formatResetCountdown(getEarliestResetTime(acc)) }}
             </td>
 
-            <td class="py-3 pl-3 pr-4 text-right whitespace-nowrap" @click.stop>
+            <td class="py-3 pl-2.5 pr-3 text-right whitespace-nowrap" @click.stop>
               <div class="inline-flex items-center gap-1.5">
                 <button
                   type="button"

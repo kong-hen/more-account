@@ -102,12 +102,12 @@ function setSort(val: string) {
 
 <template>
   <section class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
-    <!-- 顶部宽松单行操作栏（含 macOS 拖拽兼容区，窄窗口下优雅折行且按钮不竖排变形） -->
+    <!-- 顶部单行操作栏（含 macOS 拖拽兼容区，通过弹性搜索框保证在 1024px 最小宽度下也稳居单行不折行移位） -->
     <header
-      class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between flex-wrap gap-x-4 gap-y-2.5"
+      class="wails-drag shrink-0 px-5 pt-5 pb-4 border-b flex items-center justify-between gap-3"
       style="border-color: var(--border-subtle); background-color: var(--bg-app)"
     >
-      <div class="wails-no-drag flex items-center gap-3 min-w-0">
+      <div class="wails-no-drag flex items-center gap-2 min-w-0 shrink">
         <h1 class="text-base font-semibold tracking-tight truncate" style="color: var(--text-primary)">
           {{ currentGroupTitle }}
         </h1>
@@ -119,9 +119,9 @@ function setSort(val: string) {
         </span>
       </div>
 
-      <div class="wails-no-drag flex items-center flex-wrap gap-2">
-        <!-- 紧凑搜索框 -->
-        <div class="relative w-44 lg:w-52">
+      <div class="wails-no-drag flex-1 min-w-0 flex items-center justify-end gap-1.5">
+        <!-- 弹性搜索框：宽屏展开至 208px，窄屏平滑收缩以保证整条顶栏不换行移位 -->
+        <div class="relative flex-1 min-w-[120px] max-w-[208px]">
           <Search
             class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
             style="color: var(--text-muted)"
@@ -130,7 +130,7 @@ function setSort(val: string) {
             v-model="appStore.searchQuery"
             type="search"
             placeholder="搜索邮箱、备注或分组..."
-            class="w-full h-8 pl-8 pr-3 text-xs rounded-lg border"
+            class="w-full h-8 pl-8 pr-2.5 text-xs rounded-lg border"
             style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
           />
         </div>
@@ -139,7 +139,7 @@ function setSort(val: string) {
         <div ref="filterWrapRef" class="relative shrink-0">
           <button
             type="button"
-            class="h-8 inline-flex items-center gap-1.5 px-3 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+            class="h-8 inline-flex items-center gap-1.5 px-2.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
             :style="
               appStore.activeFilterCount > 0
                 ? { borderColor: 'var(--accent)', backgroundColor: 'var(--accent-soft)', color: 'var(--accent)' }
@@ -250,7 +250,7 @@ function setSort(val: string) {
           aria-label="排序方式"
           :model-value="appStore.sortBy"
           :options="sortOptions"
-          class="w-[126px]"
+          class="w-[114px] shrink-0"
           @update:model-value="setSort"
         />
 
@@ -293,7 +293,7 @@ function setSort(val: string) {
         <button
           type="button"
           :disabled="appStore.refreshingAll || appStore.accounts.length === 0"
-          class="h-8 inline-flex items-center gap-1.5 px-3 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+          class="h-8 inline-flex items-center gap-1.5 px-2.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
           @click="appStore.refreshAllAccounts"
         >
@@ -310,7 +310,7 @@ function setSort(val: string) {
         <!-- 添加账号主按钮 -->
         <button
           type="button"
-          class="h-8 inline-flex items-center gap-1.5 px-3.5 text-xs font-medium rounded-lg text-white whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+          class="h-8 inline-flex items-center gap-1.5 px-3 text-xs font-medium rounded-lg text-white whitespace-nowrap shrink-0 cursor-pointer transition-colors"
           style="background-color: var(--accent)"
           @click="emit('open-add')"
         >
@@ -323,7 +323,7 @@ function setSort(val: string) {
     <!-- 激活的筛选条件胶囊（仅当存在激活筛选时出现，保持平时极致清爽） -->
     <div
       v-if="appStore.activeFilterCount > 0"
-      class="shrink-0 px-6 py-2 border-b flex items-center flex-wrap gap-2 text-xs"
+      class="shrink-0 px-5 py-2 border-b flex items-center flex-wrap gap-2 text-xs"
       style="border-color: var(--border-subtle); background-color: var(--bg-surface)"
     >
       <span style="color: var(--text-muted)">当前筛选：</span>
@@ -374,7 +374,7 @@ function setSort(val: string) {
     <!-- 多选批量操作条（仅勾选 ≥1 项时显示） -->
     <div
       v-if="appStore.selectedAccountIds.length > 0"
-      class="shrink-0 px-6 py-2.5 border-b flex items-center justify-between flex-wrap gap-x-3 gap-y-2 text-xs"
+      class="shrink-0 px-5 py-2.5 border-b flex items-center justify-between flex-wrap gap-x-3 gap-y-2 text-xs"
       style="border-color: var(--accent-border); background-color: var(--accent-soft)"
     >
       <div class="flex items-center gap-2.5 shrink-0">
@@ -450,7 +450,7 @@ function setSort(val: string) {
     </div>
 
     <!-- 主内容滚动区 -->
-    <div class="flex-1 min-h-0 overflow-y-auto custom-scroll p-6">
+    <div class="flex-1 min-h-0 overflow-y-auto custom-scroll p-5">
       <!-- 空状态 -->
       <div
         v-if="appStore.filteredAccounts.length === 0"
