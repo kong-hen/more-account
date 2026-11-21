@@ -33,7 +33,8 @@ import {
   formatResetCountdown,
   getTierLabel,
   isAccountAbnormal,
-  mergeAccountModels,
+  mergeAccountBillingPools,
+  type BillingQuotaPool,
   type MergedModelQuota,
 } from '@/utils/quota'
 import type { Account, TotpCodeResult } from '@/types/models'
@@ -87,11 +88,21 @@ const displayedRefreshToken = computed(() => {
   if (!rt) return ''
   return refreshTokenRevealed.value ? rt : maskToken(rt)
 })
-const mergedModels = computed(() => mergeAccountModels(props.account))
+const billingPools = computed(() => mergeAccountBillingPools(props.account))
 
 function formatMergedModelTooltip(m: MergedModelQuota): string {
-  if (m.variants.length <= 1) return m.baseId
+  if (m.variants.length <= 1) return `${m.baseId} · ${m.percentage}%`
   return m.variants.map((v) => `${v.depthLabel}: ${v.name} (${v.percentage}%)`).join('\n')
+}
+
+function formatPoolTooltip(pool: BillingQuotaPool): string {
+  return pool.models
+    .map((m) =>
+      m.variants.length > 1
+        ? `${m.displayName} [${m.variants.map((v) => v.depthLabel).join('/')}] (${m.percentage}%)`
+        : `${m.displayName} (${m.percentage}%)`,
+    )
+    .join('\n')
 }
 
 function getEffectiveLoginAccount(acc: Account): string {
@@ -716,51 +727,53 @@ async function openValidationUrl(url: string) {
         </div>
       </section>
 
-      <!-- 模型配额明细（自动合并同一模型的不同思考深度） -->
+      <!-- 模型配额明细（自动合并同一模型的思考深度与共享计费池） -->
       <section class="space-y-2.5">
         <div class="flex items-center justify-between gap-2">
           <h3 class="text-xs font-semibold" style="color: var(--text-primary)">
-            模型配额 ({{ mergedModels.length }})
+            模型配额 ({{ billingPools.length }})
           </h3>
           <span v-if="account.quota?.lastUpdated" class="text-[11px] tabular-nums shrink-0" style="color: var(--text-muted)">
             更新于 {{ formatDateTime(account.quota.lastUpdated) }}
           </span>
         </div>
 
-        <div v-if="mergedModels.length" class="space-y-2.5">
+        <div v-if="billingPools.length" class="space-y-2.5">
           <div
-            v-for="m in mergedModels"
-            :key="m.key"
+            v-for="pool in billingPools"
+            :key="pool.key"
             class="p-2.5 rounded-xl border space-y-1.5"
             style="border-color: var(--border-subtle); background-color: var(--bg-app)"
           >
             <div class="flex items-center justify-between gap-2 text-xs">
-              <span class="font-medium truncate" style="color: var(--text-primary)" :title="formatMergedModelTooltip(m)">
-                {{ m.displayName }}
+              <span class="font-medium truncate" style="color: var(--text-primary)" :title="formatPoolTooltip(pool)">
+                {{ pool.label }}
               </span>
               <span class="font-mono-num font-semibold shrink-0" style="color: var(--text-primary)">
-                {{ m.percentage }}%
+                {{ pool.percentage }}%
               </span>
             </div>
 
-            <!-- 合并多个思考深度时展示对应深度标签（若不同深度剩余额度不同则附带各自百分比） -->
-            <div v-if="m.variants.length > 1" class="flex items-center flex-wrap gap-1">
+            <!-- 展示池内包含的共享计费模型（以及思考深度） -->
+            <div v-if="pool.models.length > 1 || pool.models[0]?.variants.length > 1" class="flex items-center flex-wrap gap-1">
               <span
-                v-for="v in m.variants"
-                :key="v.name"
-                class="px-1.5 py-0.5 rounded text-[10px] font-medium font-mono-num"
+                v-for="m in pool.models"
+                :key="m.key"
+                class="px-1.5 py-0.5 rounded text-[10px] font-medium"
                 style="background-color: var(--bg-subtle); color: var(--text-secondary)"
-                :title="`${v.name} · ${v.percentage}%`"
+                :title="formatMergedModelTooltip(m)"
               >
-                {{ v.depthLabel }}<template v-if="m.hasMixedPercentages"> {{ v.percentage }}%</template>
+                {{ m.displayName }}<template v-if="m.variants.length > 1"> ({{ m.variants.map((v) => v.depthLabel).join('/') }})</template><template v-if="pool.hasMixedPercentages"> {{ m.percentage }}%</template>
               </span>
             </div>
 
-            <QuotaBar :percentage="m.percentage" />
+            <QuotaBar :percentage="pool.percentage" />
             <div class="flex items-center justify-between gap-2 text-[11px]" style="color: var(--text-muted)">
-              <span class="font-mono-num truncate min-w-0" :title="formatMergedModelTooltip(m)">{{ m.baseId }}</span>
+              <span class="truncate min-w-0" :title="formatPoolTooltip(pool)">
+                {{ pool.models.length > 1 ? `共享计费 · ${pool.models.length} 个模型` : pool.models[0]?.baseId }}
+              </span>
               <span class="tabular-nums shrink-0">
-                {{ m.resetTime ? `重置 ${formatResetCountdown(m.resetTime)}` : '未返回重置时间' }}
+                {{ pool.resetTime ? `重置 ${formatResetCountdown(pool.resetTime)}` : '未返回重置时间' }}
               </span>
             </div>
           </div>

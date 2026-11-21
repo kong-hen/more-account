@@ -159,6 +159,7 @@ func isTrackedModel(name, displayName string) bool {
 		strings.Contains(combined, "argon") ||
 		strings.Contains(combined, "carbon") ||
 		strings.Contains(combined, "hydrogen") ||
+		strings.Contains(combined, "neon") ||
 		strings.Contains(combined, "gpt")
 }
 

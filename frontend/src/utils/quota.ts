@@ -29,6 +29,16 @@ export interface MergedModelQuota {
   variants: MergedModelVariant[]
 }
 
+export interface BillingQuotaPool {
+  key: string
+  label: string
+  percentage: number
+  resetTime: string
+  hasMixedPercentages: boolean
+  isSharedPool: boolean
+  models: MergedModelQuota[]
+}
+
 const ID_DEPTH_SUFFIX_RE = /(?:[-_])(thinking|minimal|low|medium|med|high|xhigh|extra[-_]?high|max)$/i
 const DISPLAY_PAREN_DEPTH_RE =
   /\s*[（(]\s*((?:thinking|minimal|low|medium|med|high|xhigh|extra\s*high|max)(?:\s*[-/,·&\s]+\s*(?:thinking|minimal|low|medium|med|high|xhigh|extra\s*high|max))*)\s*[)）]\s*$/i
@@ -243,7 +253,91 @@ export function mergeAccountModels(account: Account | null | undefined): MergedM
   return mergeModelList(account?.quota?.models ?? [])
 }
 
-// 将 CloudCode 返回的模型列表按主系列归纳，用于卡片和表格简洁展示。
+function classifyBillingPool(m: MergedModelQuota): { key: string; label: string; order: number; isSharedPool: boolean } {
+  const lower = `${m.baseId} ${m.displayName} ${m.variants.map((v) => v.name).join(' ')}`.toLowerCase()
+
+  if (lower.includes('claude') || lower.includes('gpt') || lower.includes('3p-')) {
+    return { key: 'pool:claude-gpt', label: 'Claude / GPT 共享额度', order: 2, isSharedPool: true }
+  }
+  if (lower.includes('flash') || lower.includes('neon') || lower.includes('hydrogen')) {
+    return { key: 'pool:gemini-flash', label: 'Gemini Flash / Neon / Hydrogen', order: 3, isSharedPool: true }
+  }
+  if (lower.includes('carbon')) {
+    return { key: 'pool:gemini-carbon', label: 'Gemini 4 Carbon', order: 4, isSharedPool: true }
+  }
+  if (lower.includes('argon')) {
+    return { key: 'pool:gemini-argon', label: 'Gemini 4 Argon', order: 5, isSharedPool: true }
+  }
+  if ((lower.includes('gemini') || lower.includes('pro')) && !lower.includes('image')) {
+    return { key: 'pool:gemini-pro', label: 'Gemini Pro 共享额度', order: 1, isSharedPool: true }
+  }
+  return { key: `model:${m.key}`, label: m.displayName, order: 99, isSharedPool: false }
+}
+
+// 先按同模型合并思考深度，再将共享计费额度的模型归并为同一计费池（如 Neon / Flash / Hydrogen、Claude / GPT）。
+export function mergeBillingPools(models: ModelQuota[]): BillingQuotaPool[] {
+  const mergedModels = mergeModelList(models)
+  if (mergedModels.length === 0) return []
+
+  const pools = new Map<string, { label: string; order: number; isSharedPool: boolean; items: MergedModelQuota[] }>()
+
+  for (const item of mergedModels) {
+    const info = classifyBillingPool(item)
+    const existing = pools.get(info.key)
+    if (existing) {
+      existing.items.push(item)
+    } else {
+      pools.set(info.key, {
+        label: info.label,
+        order: info.order,
+        isSharedPool: info.isSharedPool,
+        items: [item],
+      })
+    }
+  }
+
+  const result: BillingQuotaPool[] = []
+  for (const [key, pool] of pools.entries()) {
+    let minPct = 100
+    let earliestReset = ''
+    const firstPct = pool.items[0].percentage
+    let hasMixedPercentages = false
+
+    for (const item of pool.items) {
+      if (item.percentage < minPct) minPct = item.percentage
+      if (item.hasMixedPercentages || item.percentage !== firstPct) {
+        hasMixedPercentages = true
+      }
+      if (item.resetTime && (!earliestReset || item.resetTime < earliestReset)) {
+        earliestReset = item.resetTime
+      }
+    }
+
+    result.push({
+      key,
+      label: pool.items.length === 1 && !pool.isSharedPool ? pool.items[0].displayName : pool.label,
+      percentage: minPct,
+      resetTime: earliestReset,
+      hasMixedPercentages,
+      isSharedPool: pool.isSharedPool,
+      models: pool.items,
+    })
+  }
+
+  result.sort((a, b) => {
+    const orderA = pools.get(a.key)?.order ?? 99
+    const orderB = pools.get(b.key)?.order ?? 99
+    if (orderA !== orderB) return orderA - orderB
+    return a.label.localeCompare(b.label)
+  })
+  return result
+}
+
+export function mergeAccountBillingPools(account: Account | null | undefined): BillingQuotaPool[] {
+  return mergeBillingPools(account?.quota?.models ?? [])
+}
+
+// 将 CloudCode 返回的模型列表按共享计费系列归纳，用于卡片和表格简洁展示。
 export function summarizeModelGroups(account: Account): ModelGroupQuotaSummary[] {
   const models = mergeAccountModels(account)
   if (models.length === 0) return []
@@ -255,18 +349,21 @@ export function summarizeModelGroups(account: Account): ModelGroupQuotaSummary[]
     let key = 'other'
     let label = '其他模型'
 
-    if (lower.includes('claude')) {
-      key = 'claude'
-      label = 'Claude'
-    } else if (lower.includes('flash') || lower.includes('hydrogen')) {
+    if (lower.includes('claude') || lower.includes('gpt') || lower.includes('3p-')) {
+      key = 'claude-gpt'
+      label = 'Claude / GPT'
+    } else if (lower.includes('flash') || lower.includes('neon') || lower.includes('hydrogen')) {
       key = 'gemini-flash'
-      label = 'Gemini Flash'
-    } else if (lower.includes('gemini') || lower.includes('argon') || lower.includes('carbon')) {
+      label = 'Gemini Flash 系'
+    } else if (lower.includes('carbon')) {
+      key = 'gemini-carbon'
+      label = 'Gemini 4 Carbon'
+    } else if (lower.includes('argon')) {
+      key = 'gemini-argon'
+      label = 'Gemini 4 Argon'
+    } else if (lower.includes('gemini')) {
       key = 'gemini-pro'
       label = 'Gemini Pro'
-    } else if (lower.includes('gpt')) {
-      key = 'gpt'
-      label = 'GPT'
     }
 
     const existing = buckets.get(key)
@@ -277,7 +374,7 @@ export function summarizeModelGroups(account: Account): ModelGroupQuotaSummary[]
     }
   }
 
-  const order = ['gemini-pro', 'claude', 'gemini-flash', 'gpt', 'other']
+  const order = ['gemini-pro', 'claude-gpt', 'gemini-flash', 'gemini-carbon', 'gemini-argon', 'other']
   const result: ModelGroupQuotaSummary[] = []
 
   for (const key of order) {
