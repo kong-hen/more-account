@@ -86,33 +86,33 @@ function kindLabel(kind: string): string {
     <section class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
       <!-- 顶栏 -->
       <header
-        class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between gap-3 flex-wrap"
+        class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between flex-wrap gap-x-3 gap-y-2.5"
         style="border-color: var(--border-subtle); background-color: var(--bg-app)"
       >
-        <div class="wails-no-drag flex items-center gap-3">
-          <h1 class="text-base font-semibold tracking-tight" style="color: var(--text-primary)">
+        <div class="wails-no-drag flex items-center gap-3 min-w-0">
+          <h1 class="text-base font-semibold tracking-tight whitespace-nowrap" style="color: var(--text-primary)">
             Token 用量统计
           </h1>
           <span
             v-if="overview"
-            class="text-[11.5px] font-mono-num"
+            class="text-[11.5px] font-mono-num whitespace-nowrap"
             style="color: var(--text-muted)"
           >
             {{ overview.conversationCount }} 对话 · {{ overview.turnCount }} 轮
           </span>
         </div>
 
-        <div class="wails-no-drag flex items-center gap-2">
+        <div class="wails-no-drag flex items-center flex-wrap gap-2">
           <!-- 时间范围分段 -->
           <div
-            class="inline-flex p-0.5 rounded-lg border"
+            class="h-8 inline-flex items-center p-0.5 rounded-lg border shrink-0"
             style="border-color: var(--border-subtle); background-color: var(--bg-surface)"
           >
             <button
               v-for="p in presets"
               :key="p.id"
               type="button"
-              class="px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer transition-colors"
+              class="px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap cursor-pointer transition-colors"
               :style="
                 usageStore.query.preset === p.id
                   ? { backgroundColor: 'var(--bg-active)', color: 'var(--accent)' }
@@ -127,7 +127,7 @@ function kindLabel(kind: string): string {
           <button
             type="button"
             :disabled="usageStore.syncing"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
+            class="h-8 inline-flex items-center gap-1.5 px-3 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
             style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
             @click="usageStore.sync(false)"
           >
@@ -139,7 +139,7 @@ function kindLabel(kind: string): string {
             type="button"
             title="忽略文件指纹缓存全量重建"
             :disabled="usageStore.syncing"
-            class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
+            class="h-8 inline-flex items-center gap-1.5 px-2.5 rounded-lg border text-xs whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
             style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-secondary)"
             @click="usageStore.sync(true)"
           >
@@ -150,7 +150,7 @@ function kindLabel(kind: string): string {
       </header>
 
       <!-- 主内容滚动区 -->
-      <div class="flex-1 overflow-y-auto custom-scroll p-6 space-y-5">
+      <div class="flex-1 min-h-0 overflow-y-auto custom-scroll p-6 space-y-5">
         <div
           v-if="usageStore.error"
           class="p-3.5 rounded-xl text-xs"
@@ -317,8 +317,8 @@ function kindLabel(kind: string): string {
               <h3 class="text-xs font-semibold" style="color: var(--text-primary)">对话消耗明细</h3>
             </div>
 
-            <div class="flex items-center gap-2">
-              <div class="relative w-48">
+            <div class="flex items-center flex-wrap gap-2">
+              <div class="relative w-48 max-w-full">
                 <Search
                   class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
                   style="color: var(--text-muted)"
@@ -327,7 +327,7 @@ function kindLabel(kind: string): string {
                   :value="usageStore.query.search"
                   type="search"
                   placeholder="搜索对话标题或工作区..."
-                  class="w-full pl-8 pr-2.5 py-1 text-xs rounded-lg border"
+                  class="w-full h-7 pl-8 pr-2.5 text-xs rounded-lg border"
                   style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-primary)"
                   @input="setSearch(($event.target as HTMLInputElement).value)"
                 />
@@ -338,7 +338,7 @@ function kindLabel(kind: string): string {
                 aria-label="筛选对话类型"
                 size="sm"
                 :options="kindOptions"
-                class="w-28"
+                class="w-28 shrink-0"
                 @update:model-value="setKind"
               />
             </div>
@@ -351,12 +351,12 @@ function kindLabel(kind: string): string {
                   class="border-b text-[11px]"
                   style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
                 >
-                  <th class="py-2.5 px-4">对话</th>
-                  <th class="py-2.5 px-3">类型</th>
-                  <th class="py-2.5 px-3">工作区</th>
-                  <th class="py-2.5 px-3">主力模型</th>
-                  <th class="py-2.5 px-3 text-right">总消耗</th>
-                  <th class="py-2.5 px-4 text-right">最近活动</th>
+                  <th class="py-2.5 px-4 whitespace-nowrap">对话</th>
+                  <th class="py-2.5 px-3 whitespace-nowrap">类型</th>
+                  <th class="py-2.5 px-3 whitespace-nowrap">工作区</th>
+                  <th class="py-2.5 px-3 whitespace-nowrap">主力模型</th>
+                  <th class="py-2.5 px-3 text-right whitespace-nowrap">总消耗</th>
+                  <th class="py-2.5 px-4 text-right whitespace-nowrap">最近活动</th>
                 </tr>
               </thead>
               <tbody class="divide-y" style="border-color: var(--border-subtle)">
@@ -374,7 +374,7 @@ function kindLabel(kind: string): string {
                       {{ item.preview }}
                     </div>
                   </td>
-                  <td class="py-2.5 px-3">
+                  <td class="py-2.5 px-3 whitespace-nowrap">
                     <span
                       class="px-1.5 py-0.5 rounded text-[10.5px] font-medium"
                       style="background-color: var(--bg-subtle); color: var(--text-secondary)"
@@ -388,10 +388,10 @@ function kindLabel(kind: string): string {
                   <td class="py-2.5 px-3 truncate max-w-[160px]" style="color: var(--text-secondary)">
                     {{ item.primaryModelDisplayName }}
                   </td>
-                  <td class="py-2.5 px-3 text-right font-mono-num font-semibold" style="color: var(--text-primary)">
+                  <td class="py-2.5 px-3 text-right font-mono-num font-semibold whitespace-nowrap" style="color: var(--text-primary)">
                     {{ formatTokenCount(item.exact.totalTokens + item.estimated.totalTokens) }}
                   </td>
-                  <td class="py-2.5 px-4 text-right font-mono-num text-[11px]" style="color: var(--text-muted)">
+                  <td class="py-2.5 px-4 text-right font-mono-num text-[11px] whitespace-nowrap" style="color: var(--text-muted)">
                     {{ formatDateTime(item.lastModifiedTime) }}
                   </td>
                 </tr>
@@ -407,7 +407,7 @@ function kindLabel(kind: string): string {
           <!-- 分页控件 -->
           <div
             v-if="conversations && conversations.totalPages > 1"
-            class="px-4 py-2.5 border-t flex items-center justify-between text-xs"
+            class="px-4 py-2.5 border-t flex items-center justify-between flex-wrap gap-2 text-xs"
             style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
           >
             <span class="tabular-nums">共 {{ conversations.total }} 条，第 {{ conversations.page }} / {{ conversations.totalPages }} 页</span>

@@ -88,21 +88,21 @@ function openUrl(url: string) {
   <section class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
     <!-- 顶栏 -->
     <header
-      class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between gap-3 flex-wrap"
+      class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between flex-wrap gap-x-3 gap-y-2.5"
       style="border-color: var(--border-subtle); background-color: var(--bg-app)"
     >
-      <div class="wails-no-drag flex items-center gap-3">
-        <h1 class="text-base font-semibold tracking-tight" style="color: var(--text-primary)">
+      <div class="wails-no-drag flex items-center flex-wrap gap-3">
+        <h1 class="text-base font-semibold tracking-tight whitespace-nowrap" style="color: var(--text-primary)">
           定时唤醒
         </h1>
 
         <div
-          class="inline-flex p-0.5 rounded-lg border"
+          class="h-8 inline-flex items-center p-0.5 rounded-lg border shrink-0"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface)"
         >
           <button
             type="button"
-            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer"
+            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap cursor-pointer"
             :style="
               activeTab === 'tasks'
                 ? { backgroundColor: 'var(--bg-active)', color: 'var(--accent)' }
@@ -115,7 +115,7 @@ function openUrl(url: string) {
           </button>
           <button
             type="button"
-            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer"
+            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap cursor-pointer"
             :style="
               activeTab === 'history'
                 ? { backgroundColor: 'var(--bg-active)', color: 'var(--accent)' }
@@ -129,11 +129,11 @@ function openUrl(url: string) {
         </div>
       </div>
 
-      <div class="wails-no-drag flex items-center gap-2.5">
+      <div class="wails-no-drag flex items-center flex-wrap gap-2">
         <!-- 调度器总开关 -->
         <button
           type="button"
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer transition-colors"
+          class="h-8 inline-flex items-center gap-1.5 px-3 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors"
           :style="
             wakeupStore.state.enabled
               ? { borderColor: 'var(--success)', backgroundColor: 'var(--success-soft)', color: 'var(--success-text)' }
@@ -148,7 +148,7 @@ function openUrl(url: string) {
         <button
           v-if="activeTab === 'tasks'"
           type="button"
-          class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium text-white cursor-pointer"
+          class="h-8 inline-flex items-center gap-1.5 px-3.5 rounded-lg text-xs font-medium text-white whitespace-nowrap shrink-0 cursor-pointer"
           style="background-color: var(--accent)"
           @click="openCreateTask"
         >
@@ -159,7 +159,7 @@ function openUrl(url: string) {
         <button
           v-else-if="wakeupStore.history.length > 0"
           type="button"
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer hover:bg-[var(--danger-soft)]"
+          class="h-8 inline-flex items-center gap-1.5 px-3 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--danger-soft)]"
           style="border-color: var(--border-subtle); color: var(--danger-text); background-color: var(--bg-surface)"
           @click="clearHistoryConfirm = true"
         >
@@ -170,7 +170,7 @@ function openUrl(url: string) {
     </header>
 
     <!-- 内容区 -->
-    <div class="flex-1 overflow-y-auto custom-scroll p-6">
+    <div class="flex-1 min-h-0 overflow-y-auto custom-scroll p-6">
       <!-- 任务列表 Tab -->
       <template v-if="activeTab === 'tasks'">
         <div
@@ -258,18 +258,18 @@ function openUrl(url: string) {
             </div>
 
             <div
-              class="pt-3 border-t flex items-center justify-between gap-2"
+              class="pt-3 border-t flex items-center justify-between flex-wrap gap-2"
               style="border-color: var(--border-subtle)"
             >
-              <span class="text-[11px] font-mono-num" style="color: var(--text-muted)">
+              <span class="text-[11px] font-mono-num truncate min-w-0" style="color: var(--text-muted)">
                 {{ task.lastRunAt ? `上次运行：${formatDateTime(task.lastRunAt)}` : '尚未执行过' }}
               </span>
 
-              <div class="flex items-center gap-1.5">
+              <div class="flex items-center gap-1.5 shrink-0">
                 <button
                   type="button"
                   :disabled="wakeupStore.runningTaskId === task.id"
-                  class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
+                  class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
                   style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
                   @click="wakeupStore.runTaskNow(task.id)"
                 >
@@ -316,12 +316,12 @@ function openUrl(url: string) {
                   class="border-b text-[11px]"
                   style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
                 >
-                  <th class="py-2.5 px-4">时间</th>
-                  <th class="py-2.5 px-3">来源</th>
-                  <th class="py-2.5 px-3">账号</th>
-                  <th class="py-2.5 px-3">模型</th>
-                  <th class="py-2.5 px-3">结果 / 回复</th>
-                  <th class="py-2.5 px-4 text-right">耗时</th>
+                  <th class="py-2.5 px-4 whitespace-nowrap">时间</th>
+                  <th class="py-2.5 px-3 whitespace-nowrap">来源</th>
+                  <th class="py-2.5 px-3 whitespace-nowrap">账号</th>
+                  <th class="py-2.5 px-3 whitespace-nowrap">模型</th>
+                  <th class="py-2.5 px-3 whitespace-nowrap">结果 / 回复</th>
+                  <th class="py-2.5 px-4 text-right whitespace-nowrap">耗时</th>
                 </tr>
               </thead>
               <tbody class="divide-y" style="border-color: var(--border-subtle)">
@@ -337,10 +337,10 @@ function openUrl(url: string) {
                       {{ item.triggerType === 'scheduled' ? (item.taskName || '定时任务') : '手动测试' }}
                     </span>
                   </td>
-                  <td class="py-3 px-3 font-medium" style="color: var(--text-primary)">
+                  <td class="py-3 px-3 font-medium max-w-[200px] truncate whitespace-nowrap" style="color: var(--text-primary)">
                     {{ maskEmail(item.accountEmail, appStore.settings.privacyMode) }}
                   </td>
-                  <td class="py-3 px-3 font-mono-num text-[11.5px]" style="color: var(--text-secondary)">
+                  <td class="py-3 px-3 font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-secondary)">
                     {{ item.model }}
                   </td>
                   <td class="py-3 px-3 max-w-[280px]">
@@ -365,7 +365,7 @@ function openUrl(url: string) {
                       </button>
                     </div>
                   </td>
-                  <td class="py-3 px-4 text-right font-mono-num text-[11.5px]" style="color: var(--text-muted)">
+                  <td class="py-3 px-4 text-right font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-muted)">
                     {{ item.durationMs }}ms
                   </td>
                 </tr>

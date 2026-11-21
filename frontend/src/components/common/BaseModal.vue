@@ -118,7 +118,7 @@ function handleNativeClose() {
     </header>
 
     <div
-      class="px-5 py-4 overflow-y-auto custom-scroll"
+      class="px-5 py-4 min-h-0 overflow-y-auto custom-scroll"
       :style="{ maxHeight: $slots.footer ? 'calc(100vh - 180px)' : 'calc(100vh - 128px)' }"
     >
       <slot />

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 应用根组件：装配三栏工作台（左栏导航与自建分组树 + 中栏主视图 + 右栏账号详情抽屉）及全部模态弹窗。
+// 应用根组件：装配三栏工作台（左栏导航与自建分组树 + 中栏主视图 + 右侧悬浮详情抽屉）及全部模态弹窗。
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import AccountsView from '@/views/AccountsView.vue'
@@ -14,11 +14,13 @@ import SettingsModal from '@/components/settings/SettingsModal.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ToastContainer from '@/components/common/ToastContainer.vue'
 import { useAppStore } from '@/stores/appStore'
+import { useTokenUsageStore } from '@/stores/tokenUsageStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
 import { onWailsEvent } from '@/services/api'
 import type { Account, AccountGroup } from '@/types/models'
 
 const appStore = useAppStore()
+const usageStore = useTokenUsageStore()
 const wakeupStore = useWakeupStore()
 
 const addModalOpen = ref(false)
@@ -40,6 +42,9 @@ function handleGlobalKeydown(e: KeyboardEvent) {
   if (document.querySelector('dialog[open]')) return
   if (appStore.activeDetailAccountId) {
     appStore.activeDetailAccountId = null
+  }
+  if (usageStore.detailOpen) {
+    usageStore.closeConversationDetail()
   }
 }
 
@@ -116,7 +121,7 @@ async function confirmDeleteGroup() {
           @request-delete="requestDeleteAccounts"
         />
 
-        <!-- 右栏：可收起 376px 账号详情抽屉 -->
+        <!-- 右侧悬浮账号详情抽屉：脱离文档流覆盖在主视图上方，不挤压原有布局 -->
         <AccountDetailDrawer
           :account="appStore.activeDetailAccount"
           @close="appStore.activeDetailAccountId = null"

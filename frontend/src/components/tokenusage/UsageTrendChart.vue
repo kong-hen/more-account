@@ -87,14 +87,14 @@ function barSegments(b: UsageTrendBucket) {
     <div v-else class="relative pt-2">
       <!-- 悬浮明细提示条 -->
       <div
-        class="min-h-[26px] mb-2 flex items-center justify-between text-[11.5px] px-2.5 py-1 rounded-lg"
+        class="min-h-[26px] mb-2 flex items-center justify-between flex-wrap gap-x-3 gap-y-1 text-[11.5px] px-2.5 py-1 rounded-lg"
         style="background-color: var(--bg-app); color: var(--text-secondary)"
       >
         <template v-if="hoveredBucket">
           <span class="font-medium font-mono-num" style="color: var(--text-primary)">
             {{ hoveredBucket.key }} · {{ hoveredBucket.conversationCount }} 对话 / {{ hoveredBucket.turnCount }} 轮
           </span>
-          <span class="font-mono-num flex items-center gap-3">
+          <span class="font-mono-num flex items-center flex-wrap gap-x-3 gap-y-0.5">
             <span>总计 {{ formatExactNumber(hoveredBucket.exact.totalTokens + hoveredBucket.estimatedTotalTokens) }}</span>
             <span>输入 {{ formatTokenCount(hoveredBucket.exact.inputTokens) }}</span>
             <span>输出 {{ formatTokenCount(hoveredBucket.exact.outputTokens) }}</span>

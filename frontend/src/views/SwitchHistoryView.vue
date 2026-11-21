@@ -48,24 +48,24 @@ async function handleClear() {
 <template>
   <section class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
     <header
-      class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between gap-3"
+      class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between flex-wrap gap-x-3 gap-y-2.5"
       style="border-color: var(--border-subtle); background-color: var(--bg-app)"
     >
       <div class="wails-no-drag flex items-center gap-3">
-        <h1 class="text-base font-semibold tracking-tight" style="color: var(--text-primary)">
+        <h1 class="text-base font-semibold tracking-tight whitespace-nowrap" style="color: var(--text-primary)">
           切号历史
         </h1>
         <span
-          class="px-2 py-0.5 rounded-full text-xs font-mono-num"
+          class="px-2 py-0.5 rounded-full text-xs font-mono-num shrink-0"
           style="background-color: var(--bg-subtle); color: var(--text-muted)"
         >
           {{ items.length }}
         </span>
       </div>
 
-      <div class="wails-no-drag flex items-center gap-2">
+      <div class="wails-no-drag flex items-center flex-wrap gap-2">
         <div
-          class="inline-flex p-0.5 rounded-lg border"
+          class="h-8 inline-flex items-center p-0.5 rounded-lg border shrink-0"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface)"
         >
           <button
@@ -76,7 +76,7 @@ async function handleClear() {
             ]"
             :key="opt.id"
             type="button"
-            class="px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer"
+            class="px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap cursor-pointer"
             :style="
               statusFilter === opt.id
                 ? { backgroundColor: 'var(--bg-active)', color: 'var(--accent)' }
@@ -90,7 +90,7 @@ async function handleClear() {
 
         <button
           type="button"
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer hover:bg-[var(--bg-hover)]"
+          class="h-8 inline-flex items-center gap-1.5 px-3 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)]"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
           @click="refresh"
         >
@@ -101,7 +101,7 @@ async function handleClear() {
         <button
           v-if="appStore.switchHistory.length > 0"
           type="button"
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer hover:bg-[var(--danger-soft)]"
+          class="h-8 inline-flex items-center gap-1.5 px-3 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--danger-soft)]"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--danger-text)"
           @click="clearConfirmOpen = true"
         >
@@ -111,7 +111,7 @@ async function handleClear() {
       </div>
     </header>
 
-    <div class="flex-1 overflow-y-auto custom-scroll p-6">
+    <div class="flex-1 min-h-0 overflow-y-auto custom-scroll p-6">
       <div
         v-if="items.length === 0"
         class="h-full min-h-[320px] flex flex-col items-center justify-center text-center"
@@ -140,12 +140,12 @@ async function handleClear() {
                 class="border-b text-[11px]"
                 style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
               >
-                <th class="py-2.5 px-4">切换时间</th>
-                <th class="py-2.5 px-3">目标账号</th>
-                <th class="py-2.5 px-3">目标客户端</th>
-                <th class="py-2.5 px-3">模式</th>
-                <th class="py-2.5 px-3">状态与诊断</th>
-                <th class="py-2.5 px-4 text-right">耗时</th>
+                <th class="py-2.5 px-4 whitespace-nowrap">切换时间</th>
+                <th class="py-2.5 px-3 whitespace-nowrap">目标账号</th>
+                <th class="py-2.5 px-3 whitespace-nowrap">目标客户端</th>
+                <th class="py-2.5 px-3 whitespace-nowrap">模式</th>
+                <th class="py-2.5 px-3 whitespace-nowrap">状态与诊断</th>
+                <th class="py-2.5 px-4 text-right whitespace-nowrap">耗时</th>
               </tr>
             </thead>
             <tbody class="divide-y" style="border-color: var(--border-subtle)">
@@ -153,10 +153,10 @@ async function handleClear() {
                 <td class="py-3 px-4 font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-muted)">
                   {{ formatDateTime(item.timestamp) }}
                 </td>
-                <td class="py-3 px-3 font-medium" style="color: var(--text-primary)">
+                <td class="py-3 px-3 font-medium max-w-[220px] truncate whitespace-nowrap" style="color: var(--text-primary)">
                   {{ maskEmail(item.targetEmail, appStore.settings.privacyMode) }}
                 </td>
-                <td class="py-3 px-3">
+                <td class="py-3 px-3 whitespace-nowrap">
                   <span
                     class="px-2 py-0.5 rounded-md text-[11px]"
                     style="background-color: var(--bg-subtle); color: var(--text-secondary)"
@@ -164,13 +164,13 @@ async function handleClear() {
                     {{ targetLabel(item.targetClient) }}
                   </span>
                 </td>
-                <td class="py-3 px-3 text-[11.5px]" style="color: var(--text-secondary)">
+                <td class="py-3 px-3 text-[11.5px] whitespace-nowrap" style="color: var(--text-secondary)">
                   {{ item.launched ? '切换并重启' : '仅写入凭据' }}
                 </td>
                 <td class="py-3 px-3 max-w-[320px]">
                   <div
                     v-if="item.success && !item.errorMessage"
-                    class="inline-flex items-center gap-1.5 font-medium"
+                    class="inline-flex items-center gap-1.5 font-medium whitespace-nowrap"
                     style="color: var(--success-text)"
                   >
                     <CheckCircle2 class="w-3.5 h-3.5 shrink-0" />
@@ -193,7 +193,7 @@ async function handleClear() {
                     </span>
                   </div>
                 </td>
-                <td class="py-3 px-4 text-right font-mono-num text-[11.5px]" style="color: var(--text-muted)">
+                <td class="py-3 px-4 text-right font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-muted)">
                   {{ item.durationMs }}ms
                 </td>
               </tr>

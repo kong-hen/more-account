@@ -68,12 +68,12 @@ const allSelected = computed(
                 <Check v-if="allSelected" class="w-3 h-3" />
               </button>
             </th>
-            <th class="py-2.5 px-3">账号</th>
-            <th class="py-2.5 px-3">分组</th>
-            <th class="py-2.5 px-3">等级</th>
-            <th class="py-2.5 px-3 min-w-[200px]">核心配额</th>
-            <th class="py-2.5 px-3">最近重置</th>
-            <th class="py-2.5 px-3 text-right pr-4">操作</th>
+            <th class="py-2.5 px-3 whitespace-nowrap">账号</th>
+            <th class="py-2.5 px-3 whitespace-nowrap">分组</th>
+            <th class="py-2.5 px-3 whitespace-nowrap">等级</th>
+            <th class="py-2.5 px-3 min-w-[200px] whitespace-nowrap">核心配额</th>
+            <th class="py-2.5 px-3 whitespace-nowrap">最近重置</th>
+            <th class="py-2.5 px-3 text-right pr-4 whitespace-nowrap">操作</th>
           </tr>
         </thead>
         <tbody class="divide-y text-xs" style="border-color: var(--border-subtle)">
@@ -136,22 +136,22 @@ const allSelected = computed(
               </div>
             </td>
 
-            <td class="py-3 px-3">
+            <td class="py-3 px-3 whitespace-nowrap">
               <span
                 v-if="acc.groupId && appStore.groupMap.get(acc.groupId)"
-                class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px]"
+                class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] whitespace-nowrap"
                 style="background-color: var(--bg-subtle); color: var(--text-secondary)"
               >
                 <span
-                  class="w-1.5 h-1.5 rounded-full"
+                  class="w-1.5 h-1.5 rounded-full shrink-0"
                   :style="{ backgroundColor: appStore.groupMap.get(acc.groupId)?.color }"
                 />
                 {{ appStore.groupMap.get(acc.groupId)?.name }}
               </span>
-              <span v-else class="text-[11px]" style="color: var(--text-muted)">未分组</span>
+              <span v-else class="text-[11px] whitespace-nowrap" style="color: var(--text-muted)">未分组</span>
             </td>
 
-            <td class="py-3 px-3">
+            <td class="py-3 px-3 whitespace-nowrap">
               <span
                 v-if="getTierLabel(acc) !== 'UNKNOWN'"
                 class="px-1.5 py-0.5 rounded text-[10.5px] font-semibold"
@@ -163,16 +163,16 @@ const allSelected = computed(
             </td>
 
             <td class="py-3 px-3">
-              <div v-if="isAccountAbnormal(acc)" class="inline-flex items-center gap-1 text-[11.5px] font-medium" style="color: var(--danger-text)">
-                <AlertTriangle class="w-3.5 h-3.5" />
+              <div v-if="isAccountAbnormal(acc)" class="inline-flex items-center gap-1 text-[11.5px] font-medium whitespace-nowrap" style="color: var(--danger-text)">
+                <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
                 <span>{{ acc.disabled ? '令牌失效' : '状态异常' }}</span>
               </div>
               <div v-else-if="summarizeModelGroups(acc).length > 0" class="flex items-center gap-2.5 max-w-[240px]">
-                <div class="flex-1">
+                <div class="flex-1 min-w-[80px]">
                   <QuotaBar :percentage="getMinQuotaPercentage(acc)" />
                 </div>
                 <span
-                  class="font-mono-num text-[11.5px] font-medium w-9 text-right"
+                  class="font-mono-num text-[11.5px] font-medium w-9 text-right shrink-0"
                   :style="{
                     color: isAccountLowQuota(acc, appStore.settings.lowQuotaThreshold)
                       ? 'var(--warning-text)'
@@ -182,21 +182,21 @@ const allSelected = computed(
                   {{ getMinQuotaPercentage(acc) }}%
                 </span>
               </div>
-              <span v-else class="text-[11px]" style="color: var(--text-muted)">未拉取</span>
+              <span v-else class="text-[11px] whitespace-nowrap" style="color: var(--text-muted)">未拉取</span>
             </td>
 
-            <td class="py-3 px-3 font-mono-num text-[11.5px]" style="color: var(--text-muted)">
+            <td class="py-3 px-3 font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-muted)">
               {{ formatResetCountdown(getEarliestResetTime(acc)) }}
             </td>
 
-            <td class="py-3 pl-3 pr-4 text-right" @click.stop>
+            <td class="py-3 pl-3 pr-4 text-right whitespace-nowrap" @click.stop>
               <div class="inline-flex items-center gap-1.5">
                 <button
                   type="button"
                   title="刷新配额"
                   aria-label="刷新配额"
                   :disabled="Boolean(appStore.refreshingIds[acc.id])"
-                  class="p-1.5 rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
+                  class="p-1.5 rounded-lg border shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
                   style="border-color: var(--border-subtle); color: var(--text-secondary); background-color: var(--bg-surface)"
                   @click="appStore.refreshAccount(acc.id)"
                 >
@@ -205,7 +205,7 @@ const allSelected = computed(
                 <button
                   type="button"
                   :disabled="appStore.switchingId === acc.id"
-                  class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium cursor-pointer disabled:opacity-50"
+                  class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                   :style="
                     appStore.currentAccountId === acc.id
                       ? { backgroundColor: 'var(--success-soft)', color: 'var(--success-text)' }
@@ -213,7 +213,7 @@ const allSelected = computed(
                   "
                   @click="appStore.switchToAccount(acc.id)"
                 >
-                  <ArrowRightLeft class="w-3 h-3" />
+                  <ArrowRightLeft class="w-3 h-3 shrink-0" />
                   <span>{{ appStore.currentAccountId === acc.id ? '已激活' : '切换' }}</span>
                 </button>
               </div>

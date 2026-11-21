@@ -102,9 +102,9 @@ function setSort(val: string) {
 
 <template>
   <section class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
-    <!-- 顶部宽松单行操作栏（含 macOS 拖拽兼容区） -->
+    <!-- 顶部宽松单行操作栏（含 macOS 拖拽兼容区，窄窗口下优雅折行且按钮不竖排变形） -->
     <header
-      class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between gap-4"
+      class="wails-drag shrink-0 px-6 pt-5 pb-4 border-b flex items-center justify-between flex-wrap gap-x-4 gap-y-2.5"
       style="border-color: var(--border-subtle); background-color: var(--bg-app)"
     >
       <div class="wails-no-drag flex items-center gap-3 min-w-0">
@@ -112,16 +112,16 @@ function setSort(val: string) {
           {{ currentGroupTitle }}
         </h1>
         <span
-          class="px-2 py-0.5 rounded-full text-xs font-mono-num"
+          class="px-2 py-0.5 rounded-full text-xs font-mono-num shrink-0"
           style="background-color: var(--bg-subtle); color: var(--text-muted)"
         >
           {{ appStore.filteredAccounts.length }}
         </span>
       </div>
 
-      <div class="wails-no-drag flex items-center gap-2.5">
+      <div class="wails-no-drag flex items-center flex-wrap gap-2">
         <!-- 紧凑搜索框 -->
-        <div class="relative w-52">
+        <div class="relative w-44 lg:w-52">
           <Search
             class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
             style="color: var(--text-muted)"
@@ -130,16 +130,16 @@ function setSort(val: string) {
             v-model="appStore.searchQuery"
             type="search"
             placeholder="搜索邮箱、备注或分组..."
-            class="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border"
+            class="w-full h-8 pl-8 pr-3 text-xs rounded-lg border"
             style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
           />
         </div>
 
         <!-- 聚合筛选下拉：订阅等级 + 可选「仅看低配额」与「仅看异常」，保持顶栏不拥挤 -->
-        <div ref="filterWrapRef" class="relative">
+        <div ref="filterWrapRef" class="relative shrink-0">
           <button
             type="button"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+            class="h-8 inline-flex items-center gap-1.5 px-3 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
             :style="
               appStore.activeFilterCount > 0
                 ? { borderColor: 'var(--accent)', backgroundColor: 'var(--accent-soft)', color: 'var(--accent)' }
@@ -160,7 +160,7 @@ function setSort(val: string) {
 
           <div
             v-if="filterMenuOpen"
-            class="absolute right-0 mt-2 w-64 p-3.5 rounded-2xl border z-30 space-y-3.5"
+            class="absolute right-0 mt-2 w-64 p-3.5 rounded-2xl border z-20 space-y-3.5"
             style="background-color: var(--bg-surface); border-color: var(--border-subtle); box-shadow: var(--shadow-elevated)"
           >
             <!-- 订阅等级 -->
@@ -256,7 +256,7 @@ function setSort(val: string) {
 
         <!-- 视图切换：卡片 / 表格 -->
         <div
-          class="inline-flex p-0.5 rounded-lg border"
+          class="h-8 inline-flex items-center p-0.5 rounded-lg border shrink-0"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface)"
         >
           <button
@@ -293,7 +293,7 @@ function setSort(val: string) {
         <button
           type="button"
           :disabled="appStore.refreshingAll || appStore.accounts.length === 0"
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+          class="h-8 inline-flex items-center gap-1.5 px-3 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
           @click="appStore.refreshAllAccounts"
         >
@@ -310,7 +310,7 @@ function setSort(val: string) {
         <!-- 添加账号主按钮 -->
         <button
           type="button"
-          class="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded-lg text-white cursor-pointer transition-colors"
+          class="h-8 inline-flex items-center gap-1.5 px-3.5 text-xs font-medium rounded-lg text-white whitespace-nowrap shrink-0 cursor-pointer transition-colors"
           style="background-color: var(--accent)"
           @click="emit('open-add')"
         >
@@ -323,7 +323,7 @@ function setSort(val: string) {
     <!-- 激活的筛选条件胶囊（仅当存在激活筛选时出现，保持平时极致清爽） -->
     <div
       v-if="appStore.activeFilterCount > 0"
-      class="shrink-0 px-6 py-2 border-b flex items-center gap-2 text-xs"
+      class="shrink-0 px-6 py-2 border-b flex items-center flex-wrap gap-2 text-xs"
       style="border-color: var(--border-subtle); background-color: var(--bg-surface)"
     >
       <span style="color: var(--text-muted)">当前筛选：</span>
@@ -374,16 +374,16 @@ function setSort(val: string) {
     <!-- 多选批量操作条（仅勾选 ≥1 项时显示） -->
     <div
       v-if="appStore.selectedAccountIds.length > 0"
-      class="shrink-0 px-6 py-2.5 border-b flex items-center justify-between gap-3 text-xs"
+      class="shrink-0 px-6 py-2.5 border-b flex items-center justify-between flex-wrap gap-x-3 gap-y-2 text-xs"
       style="border-color: var(--accent-border); background-color: var(--accent-soft)"
     >
-      <div class="flex items-center gap-2.5">
-        <span class="font-medium" style="color: var(--accent)">
+      <div class="flex items-center gap-2.5 shrink-0">
+        <span class="font-medium whitespace-nowrap" style="color: var(--accent)">
           已选中 {{ appStore.selectedAccountIds.length }} 个账号
         </span>
         <button
           type="button"
-          class="text-[11.5px] cursor-pointer hover:underline"
+          class="text-[11.5px] whitespace-nowrap cursor-pointer hover:underline"
           style="color: var(--text-secondary)"
           @click="toggleSelectAllVisible"
         >
@@ -391,7 +391,7 @@ function setSort(val: string) {
         </button>
       </div>
 
-      <div class="flex items-center gap-2">
+      <div class="flex items-center flex-wrap gap-2">
         <div class="flex items-center gap-1.5">
           <AppSelect
             v-model="batchGroupTarget"
@@ -402,7 +402,7 @@ function setSort(val: string) {
           />
           <button
             type="button"
-            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-medium cursor-pointer hover:bg-[var(--bg-hover)]"
+            class="h-7 inline-flex items-center gap-1 px-2.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)]"
             style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
             @click="applyBatchGroup"
           >
@@ -413,7 +413,7 @@ function setSort(val: string) {
 
         <button
           type="button"
-          class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-medium cursor-pointer hover:bg-[var(--bg-hover)]"
+          class="h-7 inline-flex items-center gap-1 px-2.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)]"
           style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
           @click="emit('open-export', [...appStore.selectedAccountIds])"
         >
@@ -423,7 +423,7 @@ function setSort(val: string) {
 
         <button
           type="button"
-          class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-white cursor-pointer"
+          class="h-7 inline-flex items-center gap-1 px-2.5 rounded-lg text-xs font-medium text-white whitespace-nowrap shrink-0 cursor-pointer"
           style="background-color: var(--danger)"
           @click="
             emit(
@@ -450,7 +450,7 @@ function setSort(val: string) {
     </div>
 
     <!-- 主内容滚动区 -->
-    <div class="flex-1 overflow-y-auto custom-scroll p-6">
+    <div class="flex-1 min-h-0 overflow-y-auto custom-scroll p-6">
       <!-- 空状态 -->
       <div
         v-if="appStore.filteredAccounts.length === 0"
@@ -499,15 +499,10 @@ function setSort(val: string) {
         </div>
       </div>
 
-      <!-- 卡片网格视图 -->
+      <!-- 卡片网格视图：基于容器自然宽度的自适应网格，不受悬浮详情抽屉影响 -->
       <div
         v-else-if="appStore.viewMode === 'cards'"
-        class="grid gap-4"
-        :class="
-          appStore.activeDetailAccount
-            ? 'grid-cols-1 xl:grid-cols-2'
-            : 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3'
-        "
+        class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]"
       >
         <AccountCard
           v-for="acc in appStore.filteredAccounts"

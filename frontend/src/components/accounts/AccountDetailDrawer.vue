@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 右侧可收起 360px 账号详情抽屉：
+// 右侧悬浮账号详情抽屉（不挤压主工作区）：
 // 包含切号动作、刷新与立即唤醒测试、实时 2FA TOTP 30s 圆环动态码、账号密码、备注、所属分组与全量模型配额明细。
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
@@ -210,17 +210,28 @@ async function openValidationUrl(url: string) {
 </script>
 
 <template>
-  <aside
-    v-if="account"
-    class="w-[376px] shrink-0 h-full border-l flex flex-col overflow-hidden"
-    style="background-color: var(--bg-surface); border-color: var(--border-subtle)"
-    aria-label="账号详情抽屉"
-  >
-    <!-- 顶部标题栏 -->
-    <header
-      class="px-5 pt-4 pb-3.5 border-b flex items-start justify-between gap-3"
-      style="border-color: var(--border-subtle)"
+  <!-- 右侧悬浮遮罩：点击空白区域轻关闭，完全脱离文档流不挤压主工作区 -->
+  <Transition name="drawer-fade">
+    <div
+      v-if="account"
+      class="fixed inset-0 z-30 drawer-backdrop"
+      aria-hidden="true"
+      @click="emit('close')"
+    />
+  </Transition>
+
+  <Transition name="drawer-slide">
+    <aside
+      v-if="account"
+      class="fixed top-0 right-0 z-40 h-full w-[min(392px,calc(100vw-48px))] border-l flex flex-col overflow-hidden"
+      style="background-color: var(--bg-surface); border-color: var(--border-subtle); box-shadow: var(--shadow-elevated)"
+      aria-label="账号详情抽屉"
     >
+      <!-- 顶部标题栏 -->
+      <header
+        class="shrink-0 px-5 pt-5 pb-3.5 border-b flex items-start justify-between gap-3"
+        style="border-color: var(--border-subtle)"
+      >
       <div class="min-w-0">
         <div class="flex items-center gap-1.5">
           <span
@@ -274,7 +285,7 @@ async function openValidationUrl(url: string) {
       <button
         type="button"
         aria-label="收起详情抽屉"
-        class="p-1.5 rounded-lg cursor-pointer hover:bg-[var(--bg-hover)]"
+        class="p-1.5 rounded-lg shrink-0 cursor-pointer hover:bg-[var(--bg-hover)]"
         style="color: var(--text-muted)"
         @click="emit('close')"
       >
@@ -283,7 +294,7 @@ async function openValidationUrl(url: string) {
     </header>
 
     <!-- 可滚动详情体 -->
-    <div class="flex-1 overflow-y-auto custom-scroll px-5 py-4 space-y-5">
+    <div class="flex-1 min-h-0 overflow-y-auto custom-scroll px-5 py-4 space-y-5">
       <!-- 快捷操作按钮组 -->
       <section class="grid grid-cols-2 gap-2">
         <button
@@ -607,12 +618,12 @@ async function openValidationUrl(url: string) {
 
     <!-- 底部导出与删除栏 -->
     <footer
-      class="px-5 py-3 border-t flex items-center justify-between gap-2"
+      class="shrink-0 px-5 py-3 border-t flex items-center justify-between gap-2"
       style="border-color: var(--border-subtle); background-color: var(--bg-app)"
     >
       <button
         type="button"
-        class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer hover:bg-[var(--bg-hover)]"
+        class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)]"
         style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
         @click="emit('export-account', account.id)"
       >
@@ -622,7 +633,7 @@ async function openValidationUrl(url: string) {
 
       <button
         type="button"
-        class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer hover:opacity-90"
+        class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:opacity-90"
         style="background-color: var(--danger-soft); color: var(--danger-text)"
         @click="emit('delete-account', account)"
       >
@@ -630,5 +641,6 @@ async function openValidationUrl(url: string) {
         删除账号
       </button>
     </footer>
-  </aside>
+    </aside>
+  </Transition>
 </template>

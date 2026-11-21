@@ -16,16 +16,27 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <aside
-    v-if="open"
-    class="w-[400px] shrink-0 h-full border-l flex flex-col overflow-hidden"
-    style="background-color: var(--bg-surface); border-color: var(--border-subtle)"
-    aria-label="对话 Token 明细抽屉"
-  >
-    <header
-      class="px-5 py-4 border-b flex items-start justify-between gap-3"
-      style="border-color: var(--border-subtle)"
+  <!-- 悬浮右侧滑出对话明细抽屉，不挤压 Token 用量主页面 -->
+  <Transition name="drawer-fade">
+    <div
+      v-if="open"
+      class="fixed inset-0 z-30 drawer-backdrop"
+      aria-hidden="true"
+      @click="emit('close')"
+    />
+  </Transition>
+
+  <Transition name="drawer-slide">
+    <aside
+      v-if="open"
+      class="fixed top-0 right-0 z-40 h-full w-[min(420px,calc(100vw-48px))] border-l flex flex-col overflow-hidden"
+      style="background-color: var(--bg-surface); border-color: var(--border-subtle); box-shadow: var(--shadow-elevated)"
+      aria-label="对话 Token 明细抽屉"
     >
+      <header
+        class="shrink-0 px-5 pt-5 pb-4 border-b flex items-start justify-between gap-3"
+        style="border-color: var(--border-subtle)"
+      >
       <div class="min-w-0">
         <h2 class="text-sm font-semibold truncate" style="color: var(--text-primary)">
           {{ detail?.summary.displayTitle || '加载对话详情...' }}
@@ -43,7 +54,7 @@ const emit = defineEmits<{
       <button
         type="button"
         aria-label="关闭对话详情"
-        class="p-1.5 rounded-lg cursor-pointer hover:bg-[var(--bg-hover)]"
+        class="p-1.5 rounded-lg shrink-0 cursor-pointer hover:bg-[var(--bg-hover)]"
         style="color: var(--text-muted)"
         @click="emit('close')"
       >
@@ -51,12 +62,12 @@ const emit = defineEmits<{
       </button>
     </header>
 
-    <div v-if="loading" class="flex-1 flex items-center justify-center gap-2 text-xs" style="color: var(--text-muted)">
+    <div v-if="loading" class="flex-1 min-h-0 flex items-center justify-center gap-2 text-xs" style="color: var(--text-muted)">
       <Loader2 class="w-4 h-4 animate-spin" />
       <span>正在只读解析对话步骤...</span>
     </div>
 
-    <div v-else-if="detail" class="flex-1 overflow-y-auto custom-scroll px-5 py-4 space-y-5">
+    <div v-else-if="detail" class="flex-1 min-h-0 overflow-y-auto custom-scroll px-5 py-4 space-y-5">
       <!-- 模型分布切片 -->
       <section class="space-y-2">
         <h3 class="text-xs font-semibold" style="color: var(--text-primary)">模型消耗构成</h3>
@@ -111,7 +122,7 @@ const emit = defineEmits<{
               </span>
             </div>
 
-            <div class="flex items-center justify-between text-[11px] font-mono-num" style="color: var(--text-muted)">
+            <div class="flex items-center justify-between flex-wrap gap-x-2 gap-y-0.5 text-[11px] font-mono-num" style="color: var(--text-muted)">
               <span v-if="turn.isExact">
                 入 {{ formatTokenCount(turn.exact.inputTokens) }} · 出 {{ formatTokenCount(turn.exact.outputTokens) }} · 思 {{ formatTokenCount(turn.exact.thinkingTokens) }} · 缓 {{ formatTokenCount(turn.exact.cacheReadTokens) }}
               </span>
@@ -122,5 +133,6 @@ const emit = defineEmits<{
         </div>
       </section>
     </div>
-  </aside>
+    </aside>
+  </Transition>
 </template>

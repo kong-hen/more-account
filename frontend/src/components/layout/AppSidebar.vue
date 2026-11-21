@@ -68,7 +68,7 @@ function runtimeTargetLabel(target: string): string {
     style="background-color: var(--bg-sidebar); border-color: var(--border-subtle)"
   >
     <!-- 顶部 macOS 标题栏安全拖拽区 + 品牌标识 -->
-    <div class="wails-drag pt-9 pb-3 px-4 flex items-center gap-2.5">
+    <div class="wails-drag shrink-0 pt-9 pb-3 px-4 flex items-center gap-2.5">
       <div
         class="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-white"
         style="background-color: var(--accent)"
@@ -86,7 +86,7 @@ function runtimeTargetLabel(target: string): string {
     </div>
 
     <!-- 主模块导航 -->
-    <nav class="px-2.5 pt-1 space-y-0.5" aria-label="主导航">
+    <nav class="shrink-0 px-2.5 pt-1 space-y-0.5" aria-label="主导航">
       <button
         v-for="item in navItems"
         :key="item.id"
@@ -123,7 +123,7 @@ function runtimeTargetLabel(target: string): string {
         </button>
       </div>
 
-      <div class="flex-1 overflow-y-auto custom-scroll space-y-0.5 pr-0.5">
+      <div class="flex-1 min-h-0 overflow-y-auto custom-scroll space-y-0.5 pr-0.5">
         <!-- 全部账号 -->
         <button
           type="button"
@@ -224,7 +224,7 @@ function runtimeTargetLabel(target: string): string {
     </div>
 
     <!-- 底部当前激活账号胶囊 + 快捷工具行 -->
-    <div class="p-3 border-t space-y-2.5" style="border-color: var(--border-subtle)">
+    <div class="shrink-0 p-3 border-t space-y-2.5" style="border-color: var(--border-subtle)">
       <button
         type="button"
         class="w-full text-left p-2.5 rounded-xl border cursor-pointer transition-colors hover:border-[var(--accent-border)]"

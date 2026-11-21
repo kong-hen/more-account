@@ -217,6 +217,34 @@ body,
     background-color: var(--bg-surface);
     color: var(--text-primary);
   }
+
+  /* 右侧悬浮抽屉遮罩与面板过渡 */
+  .drawer-backdrop {
+    background-color: rgba(15, 23, 42, 0.22);
+  }
+
+  :root[data-theme="dark"] .drawer-backdrop {
+    background-color: rgba(0, 0, 0, 0.45);
+  }
+}
+
+.drawer-fade-enter-active,
+.drawer-fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+.drawer-fade-enter-from,
+.drawer-fade-leave-to {
+  opacity: 0;
+}
+
+.drawer-slide-enter-active,
+.drawer-slide-leave-active {
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.18s ease;
+}
+.drawer-slide-enter-from,
+.drawer-slide-leave-to {
+  transform: translateX(28px);
+  opacity: 0;
 }
 
 /* ─── 按钮与输入焦点可见性 ─── */

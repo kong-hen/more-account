@@ -202,18 +202,18 @@ const hasCredentials = computed(() =>
       class="mt-4 pt-3 border-t flex items-center justify-between gap-2"
       style="border-color: var(--border-subtle)"
     >
-      <span class="inline-flex items-center gap-1 text-[11px] tabular-nums" style="color: var(--text-muted)">
-        <Clock class="w-3 h-3" />
-        {{ earliestReset ? `重置 ${formatResetCountdown(earliestReset)}` : '暂无重置时间' }}
+      <span class="inline-flex items-center gap-1 text-[11px] tabular-nums truncate min-w-0" style="color: var(--text-muted)">
+        <Clock class="w-3 h-3 shrink-0" />
+        <span class="truncate">{{ earliestReset ? `重置 ${formatResetCountdown(earliestReset)}` : '暂无重置时间' }}</span>
       </span>
 
-      <div class="flex items-center gap-1.5" @click.stop>
+      <div class="flex items-center gap-1.5 shrink-0" @click.stop>
         <button
           type="button"
           title="刷新配额"
           aria-label="刷新配额"
           :disabled="isRefreshing"
-          class="p-1.5 rounded-lg border cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+          class="p-1.5 rounded-lg border shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
           style="border-color: var(--border-subtle); color: var(--text-secondary); background-color: var(--bg-surface)"
           @click="appStore.refreshAccount(account.id)"
         >
@@ -223,7 +223,7 @@ const hasCredentials = computed(() =>
         <button
           type="button"
           :disabled="isSwitching"
-          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-colors disabled:opacity-50"
+          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors disabled:opacity-50"
           :style="
             isCurrent
               ? { backgroundColor: 'var(--success-soft)', color: 'var(--success-text)' }
