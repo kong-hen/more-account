@@ -320,36 +320,57 @@ func isExplicitQuotaDenial(info model.QuotaErrorInfo) bool {
 		strings.TrimSpace(info.ValidationURL) != ""
 }
 
-// fetchQuotaSummary 向 CloudCode 拉取 5 小时与周额度共享配额桶摘要。
+// fetchQuotaSummary 向 CloudCode 拉取 5 小时与周额度共享配额桶摘要（含瞬时失败重试）。
 func (c *Client) fetchQuotaSummary(ctx context.Context, baseURL, accessToken string, rawPayload []byte) (map[string]any, *model.QuotaErrorInfo) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/"+RetrieveUserQuotaSummaryPath, bytes.NewReader(rawPayload))
-	if err != nil {
-		return nil, nil
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", cloudCodeUserAgent())
+	for attempt := 1; attempt <= 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/"+RetrieveUserQuotaSummaryPath, bytes.NewReader(rawPayload))
+		if err != nil {
+			return nil, nil
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", cloudCodeUserAgent())
 
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return nil, nil
-	}
-	defer resp.Body.Close()
+		resp, err := c.httpClient().Do(req)
+		if err != nil {
+			if attempt < 2 {
+				select {
+				case <-ctx.Done():
+					return nil, nil
+				case <-time.After(400 * time.Millisecond):
+				}
+				continue
+			}
+			return nil, nil
+		}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return nil, nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		errInfo := ParseGoogleAPIError(resp.StatusCode, string(body))
-		return nil, &errInfo
-	}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, nil
+		}
 
-	var parsed map[string]any
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, nil
+		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) && attempt < 2 {
+			select {
+			case <-ctx.Done():
+				return nil, nil
+			case <-time.After(400 * time.Millisecond):
+			}
+			continue
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			errInfo := ParseGoogleAPIError(resp.StatusCode, string(body))
+			return nil, &errInfo
+		}
+
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return nil, nil
+		}
+		return parsed, nil
 	}
-	return parsed, nil
+	return nil, nil
 }
 
 // FetchQuota 拉取单个账号的订阅、AI 积分、5h/周共享配额桶及所有模型配额。

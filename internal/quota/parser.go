@@ -282,28 +282,39 @@ func toModelQuota(name string, info rawModelInfo) model.ModelQuota {
 	}
 }
 
-// parseQuotaSummaryBuckets 解析 retrieveUserQuotaSummary 返回的 groups[].buckets[]，
+// parseQuotaSummaryBuckets 解析 retrieveUserQuotaSummary 返回的 groups[].buckets[]（兼容 payload 包装与顶层 buckets），
 // 独立存放为 SummaryBuckets（包含 5h 与周额度窗口），不混入模型明细列表。
 func parseQuotaSummaryBuckets(summary map[string]any) []model.QuotaBucket {
 	if len(summary) == 0 {
 		return nil
 	}
-	groups, ok := summary["groups"].([]any)
-	if !ok || len(groups) == 0 {
+	root := summary
+	if payload, ok := summary["payload"].(map[string]any); ok && len(payload) > 0 {
+		root = payload
+	}
+
+	rawBucketLists := make([][]any, 0)
+	if groups, ok := root["groups"].([]any); ok {
+		for _, g := range groups {
+			gm, ok := g.(map[string]any)
+			if !ok {
+				continue
+			}
+			if rawBuckets, ok := gm["buckets"].([]any); ok {
+				rawBucketLists = append(rawBucketLists, rawBuckets)
+			}
+		}
+	}
+	if topBuckets, ok := root["buckets"].([]any); ok {
+		rawBucketLists = append(rawBucketLists, topBuckets)
+	}
+	if len(rawBucketLists) == 0 {
 		return nil
 	}
 
 	buckets := make([]model.QuotaBucket, 0)
 	seen := make(map[string]struct{})
-	for _, g := range groups {
-		gm, ok := g.(map[string]any)
-		if !ok {
-			continue
-		}
-		rawBuckets, ok := gm["buckets"].([]any)
-		if !ok {
-			continue
-		}
+	for _, rawBuckets := range rawBucketLists {
 		for _, b := range rawBuckets {
 			bm, ok := b.(map[string]any)
 			if !ok {
@@ -311,9 +322,18 @@ func parseQuotaSummaryBuckets(summary map[string]any) []model.QuotaBucket {
 			}
 			bid, _ := bm["bucketId"].(string)
 			bid = strings.TrimSpace(bid)
-			frac, hasFrac := bm["remainingFraction"].(float64)
-			if bid == "" || !hasFrac {
+			if bid == "" {
 				continue
+			}
+			frac, hasFrac := bm["remainingFraction"].(float64)
+			reset, _ := bm["resetTime"].(string)
+			reset = strings.TrimSpace(reset)
+			// Proto3 JSON 序列化在 remainingFraction 为 0 时可能省略该字段；只要带 resetTime 即视为 0% 已耗尽
+			if !hasFrac && reset == "" {
+				continue
+			}
+			if !hasFrac {
+				frac = 0
 			}
 			key := strings.ToLower(bid)
 			if _, dup := seen[key]; dup {
@@ -321,12 +341,11 @@ func parseQuotaSummaryBuckets(summary map[string]any) []model.QuotaBucket {
 			}
 			seen[key] = struct{}{}
 			disp, _ := bm["displayName"].(string)
-			reset, _ := bm["resetTime"].(string)
 			buckets = append(buckets, model.QuotaBucket{
 				BucketID:    bid,
 				DisplayName: strings.TrimSpace(disp),
 				Percentage:  fractionToPercent(frac),
-				ResetTime:   strings.TrimSpace(reset),
+				ResetTime:   reset,
 				Exhausted:   frac <= 0,
 			})
 		}

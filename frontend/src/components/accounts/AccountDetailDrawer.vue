@@ -755,7 +755,7 @@ async function openValidationUrl(url: string) {
                 class="px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0"
                 style="background-color: var(--bg-subtle); color: var(--text-muted)"
               >
-                {{ cat.fiveHour && cat.weekly ? '5h + 周额度' : cat.weekly ? '仅周额度' : '5h 额度' }}
+                {{ cat.fiveHour ? '5h + 周额度' : '仅周额度' }}
               </span>
             </div>
 
@@ -780,25 +780,49 @@ async function openValidationUrl(url: string) {
               <QuotaBar :percentage="cat.fiveHour.percentage" />
             </div>
 
-            <!-- 周额度行（存在时展示） -->
-            <div v-if="cat.weekly" class="space-y-1">
-              <div class="flex items-center justify-between gap-2 text-[11.5px]">
-                <span class="inline-flex items-center gap-1.5" style="color: var(--text-secondary)">
-                  <span
-                    class="px-1.5 py-0.2 rounded text-[10px] font-semibold"
-                    style="background-color: var(--bg-subtle); color: var(--text-muted)"
-                  >
-                    周额度
+            <!-- 周额度行：有周额度数据直接展示；有 5h 限额但尚未拉到周桶时显示待同步占位 -->
+            <div v-if="cat.weekly || cat.fiveHour" class="space-y-1">
+              <template v-if="cat.weekly">
+                <div class="flex items-center justify-between gap-2 text-[11.5px]">
+                  <span class="inline-flex items-center gap-1.5" style="color: var(--text-secondary)">
+                    <span
+                      class="px-1.5 py-0.2 rounded text-[10px] font-semibold"
+                      style="background-color: var(--bg-subtle); color: var(--text-muted)"
+                    >
+                      周额度
+                    </span>
+                    <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.weekly.percentage)">
+                      {{ cat.weekly.percentage }}%
+                    </span>
                   </span>
-                  <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.weekly.percentage)">
-                    {{ cat.weekly.percentage }}%
+                  <span class="text-[11px] tabular-nums shrink-0" style="color: var(--text-muted)">
+                    {{ cat.weekly.resetTime ? `重置 ${formatResetCountdown(cat.weekly.resetTime)}` : '未返回重置时间' }}
                   </span>
-                </span>
-                <span class="text-[11px] tabular-nums shrink-0" style="color: var(--text-muted)">
-                  {{ cat.weekly.resetTime ? `重置 ${formatResetCountdown(cat.weekly.resetTime)}` : '未返回重置时间' }}
-                </span>
-              </div>
-              <QuotaBar :percentage="cat.weekly.percentage" />
+                </div>
+                <QuotaBar :percentage="cat.weekly.percentage" />
+              </template>
+              <template v-else>
+                <div class="flex items-center justify-between gap-2 text-[11.5px]">
+                  <span class="inline-flex items-center gap-1.5" style="color: var(--text-secondary)">
+                    <span
+                      class="px-1.5 py-0.2 rounded text-[10px] font-semibold"
+                      style="background-color: var(--bg-subtle); color: var(--text-muted)"
+                    >
+                      周额度
+                    </span>
+                    <span class="font-mono-num font-medium" style="color: var(--text-muted)">
+                      {{ isRefreshing ? '正在同步...' : '--' }}
+                    </span>
+                  </span>
+                  <span class="text-[11px] shrink-0" style="color: var(--text-muted)">
+                    {{ isRefreshing ? '拉取云端摘要' : '点击上方刷新配额' }}
+                  </span>
+                </div>
+                <div
+                  class="w-full h-[5px] rounded-full overflow-hidden"
+                  style="background-color: var(--bg-subtle)"
+                />
+              </template>
             </div>
           </div>
         </div>

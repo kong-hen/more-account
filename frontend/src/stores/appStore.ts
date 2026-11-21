@@ -141,10 +141,40 @@ export const useAppStore = defineStore('app', () => {
         }),
       )
       initialized.value = true
+
+      // 启动后静默补拉缺失 5h/周共享额度桶的账号（兼容旧缓存），避免周额度空白
+      void syncMissingQuotaSummaries()
     } catch (err) {
       notify(`加载应用数据失败：${extractErrorMessage(err)}`, 'error', 5000)
     } finally {
       loading.value = false
+    }
+  }
+
+  async function syncMissingQuotaSummaries() {
+    if (!isWailsRuntime()) return
+    const candidates = accounts.value.filter(
+      (acc) =>
+        !acc.disabled &&
+        !acc.quota?.isForbidden &&
+        (acc.quota?.models?.length ?? 0) > 0 &&
+        (acc.quota?.summaryBuckets?.length ?? 0) === 0,
+    )
+    if (candidates.length === 0) return
+
+    for (const acc of candidates) {
+      if (refreshingIds.value[acc.id]) continue
+      refreshingIds.value = { ...refreshingIds.value, [acc.id]: true }
+      try {
+        const updated = await api.refreshAccountQuota(acc.id)
+        replaceAccountInList(updated)
+      } catch {
+        // 后台静默补拉不弹错误提示，避免启动干扰
+      } finally {
+        const next = { ...refreshingIds.value }
+        delete next[acc.id]
+        refreshingIds.value = next
+      }
     }
   }
 

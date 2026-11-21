@@ -182,8 +182,8 @@ function quotaValueStyle(percentage: number) {
             class="px-2.5 py-2 rounded-xl border space-y-1.5"
             style="background-color: var(--bg-app); border-color: var(--border-subtle)"
           >
-            <!-- 双窗口：同时存在 5h 与周额度 -->
-            <template v-if="cat.fiveHour && cat.weekly">
+            <!-- 双窗口：凡是有 5 小时限额的分类必然也有周限额，始终左右并列展示 -->
+            <template v-if="cat.fiveHour">
               <div class="text-[11.5px] font-semibold leading-tight truncate" style="color: var(--text-primary)">
                 {{ cat.label }}
               </div>
@@ -214,34 +214,56 @@ function quotaValueStyle(percentage: number) {
                 </div>
 
                 <div class="space-y-1 min-w-0">
-                  <div class="flex items-baseline justify-between gap-1 text-[11px]">
-                    <span class="inline-flex items-center gap-1 min-w-0">
+                  <template v-if="cat.weekly">
+                    <div class="flex items-baseline justify-between gap-1 text-[11px]">
+                      <span class="inline-flex items-center gap-1 min-w-0">
+                        <span
+                          class="px-1 rounded text-[9.5px] font-semibold shrink-0"
+                          style="background-color: var(--bg-subtle); color: var(--text-muted)"
+                        >
+                          周
+                        </span>
+                        <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.weekly.percentage)">
+                          {{ cat.weekly.percentage }}%
+                        </span>
+                      </span>
                       <span
-                        class="px-1 rounded text-[9.5px] font-semibold shrink-0"
-                        style="background-color: var(--bg-subtle); color: var(--text-muted)"
+                        v-if="cat.weekly.resetTime"
+                        class="text-[10px] font-mono-num truncate"
+                        style="color: var(--text-muted)"
+                        :title="`周额度重置：${formatResetCountdown(cat.weekly.resetTime)}`"
                       >
-                        周
+                        {{ formatResetCountdown(cat.weekly.resetTime) }}
                       </span>
-                      <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.weekly.percentage)">
-                        {{ cat.weekly.percentage }}%
+                    </div>
+                    <QuotaBar :percentage="cat.weekly.percentage" />
+                  </template>
+                  <template v-else>
+                    <div class="flex items-baseline justify-between gap-1 text-[11px]">
+                      <span class="inline-flex items-center gap-1 min-w-0">
+                        <span
+                          class="px-1 rounded text-[9.5px] font-semibold shrink-0"
+                          style="background-color: var(--bg-subtle); color: var(--text-muted)"
+                        >
+                          周
+                        </span>
+                        <span class="font-mono-num font-medium" style="color: var(--text-muted)">
+                          {{ isRefreshing ? '同步中' : '--' }}
+                        </span>
                       </span>
-                    </span>
-                    <span
-                      v-if="cat.weekly.resetTime"
-                      class="text-[10px] font-mono-num truncate"
-                      style="color: var(--text-muted)"
-                      :title="`周额度重置：${formatResetCountdown(cat.weekly.resetTime)}`"
-                    >
-                      {{ formatResetCountdown(cat.weekly.resetTime) }}
-                    </span>
-                  </div>
-                  <QuotaBar :percentage="cat.weekly.percentage" />
+                    </div>
+                    <div
+                      class="w-full h-[5px] rounded-full overflow-hidden"
+                      style="background-color: var(--bg-subtle)"
+                      title="点击刷新获取云端周额度"
+                    />
+                  </template>
                 </div>
               </div>
             </template>
 
-            <!-- 单窗口：仅有周额度（如 Gemini Argon / FREE 账号）或仅有 5h 额度 -->
-            <template v-else>
+            <!-- 单窗口：仅有周额度（如 Gemini Argon / FREE 账号） -->
+            <template v-else-if="cat.weekly">
               <div class="flex items-center justify-between gap-2 text-[11.5px]">
                 <span class="inline-flex items-center gap-1.5 min-w-0">
                   <span class="font-semibold truncate" style="color: var(--text-primary)">{{ cat.label }}</span>
@@ -249,26 +271,26 @@ function quotaValueStyle(percentage: number) {
                     class="px-1 rounded text-[9.5px] font-semibold shrink-0"
                     style="background-color: var(--bg-subtle); color: var(--text-muted)"
                   >
-                    {{ cat.weekly ? '周' : '5h' }}
+                    周
                   </span>
                 </span>
                 <span class="inline-flex items-center gap-1.5 shrink-0 font-mono-num">
                   <span
-                    v-if="(cat.weekly ?? cat.fiveHour)?.resetTime"
+                    v-if="cat.weekly.resetTime"
                     class="text-[10.5px]"
                     style="color: var(--text-muted)"
                   >
-                    {{ formatResetCountdown((cat.weekly ?? cat.fiveHour)?.resetTime) }}
+                    {{ formatResetCountdown(cat.weekly.resetTime) }}
                   </span>
                   <span
                     class="font-semibold"
-                    :style="quotaValueStyle((cat.weekly ?? cat.fiveHour)!.percentage)"
+                    :style="quotaValueStyle(cat.weekly.percentage)"
                   >
-                    {{ (cat.weekly ?? cat.fiveHour)!.percentage }}%
+                    {{ cat.weekly.percentage }}%
                   </span>
                 </span>
               </div>
-              <QuotaBar :percentage="(cat.weekly ?? cat.fiveHour)!.percentage" />
+              <QuotaBar :percentage="cat.weekly.percentage" />
             </template>
           </div>
         </template>

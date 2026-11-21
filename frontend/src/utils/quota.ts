@@ -15,6 +15,8 @@ export interface QuotaCategorySummary {
   shortLabel: string
   fiveHour?: QuotaWindowSlot
   weekly?: QuotaWindowSlot
+  /** 凡是有 5 小时限额的分类必然也有周限额；为 true 时始终保留双窗口展示（尚未拉到周桶时显示待同步占位）。 */
+  expectsWeekly: boolean
   percentage: number
   resetTime: string
 }
@@ -316,23 +318,22 @@ export function mergeAccountModels(account: Account | null | undefined): MergedM
 function classifySummaryBucket(bucketId: string): { key: QuotaCategoryKey; period: 'fiveHour' | 'weekly' } | null {
   const id = bucketId.trim().toLowerCase()
   if (!id) return null
-  if (id === 'argon:5h' || id === 'gemini-argon-5h' || (id.startsWith('gemini-argon-') && id.endsWith('-5h'))) {
-    return { key: 'gemini-argon', period: 'fiveHour' }
+  const is5h = id.endsWith('5h') || id.includes(':5h') || id.includes('-5h')
+  const isWeekly = id.includes('weekly') || id.endsWith('7d') || id.includes(':week')
+  if (!is5h && !isWeekly) return null
+  const period: 'fiveHour' | 'weekly' = isWeekly ? 'weekly' : 'fiveHour'
+
+  if (id.includes('argon')) {
+    return { key: 'gemini-argon', period }
   }
-  if (id === 'argon:weekly' || id === 'gemini-argon-wtu-weekly' || (id.startsWith('gemini-argon-') && id.endsWith('-weekly'))) {
-    return { key: 'gemini-argon', period: 'weekly' }
+  if (id.includes('3p') || id.includes('claude') || id.includes('gpt')) {
+    return { key: 'claude-gpt', period }
   }
-  if (id === 'gemini-5h' || id === 'gemini:5h' || id === 'gemini-flash-5h' || id === 'flash:5h') {
-    return { key: 'gemini-flash', period: 'fiveHour' }
-  }
-  if (id === 'gemini-weekly' || id === 'gemini:weekly' || id === 'gemini-flash-weekly' || id === 'flash:weekly') {
-    return { key: 'gemini-flash', period: 'weekly' }
-  }
-  if (id === '3p-5h' || id === 'claude:5h' || id === 'claude-5h') {
-    return { key: 'claude-gpt', period: 'fiveHour' }
-  }
-  if (id === '3p-weekly' || id === 'claude:weekly' || id === 'claude-weekly') {
-    return { key: 'claude-gpt', period: 'weekly' }
+  if (
+    (id.includes('gemini') || id.includes('flash') || id.includes('neon') || id.includes('hydrogen')) &&
+    !id.includes('carbon')
+  ) {
+    return { key: 'gemini-flash', period }
   }
   return null
 }
@@ -476,6 +477,7 @@ export function summarizeQuotaCategories(account: Account | null | undefined): Q
       shortLabel: def.shortLabel,
       fiveHour: entry.fiveHour,
       weekly: entry.weekly,
+      expectsWeekly: Boolean(entry.weekly || entry.fiveHour),
       percentage: minPct,
       resetTime: earliestReset,
     })

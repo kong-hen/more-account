@@ -227,3 +227,30 @@ func TestBuildQuotaDataFollowsAgentModelSorts(t *testing.T) {
 		t.Fatalf("应保持 agentModelSorts 顺序，实际: %+v", got.Models)
 	}
 }
+
+func TestParseQuotaSummaryBucketsHandlesZeroOmittedFraction(t *testing.T) {
+	summary := map[string]any{
+		"groups": []any{
+			map[string]any{
+				"buckets": []any{
+					map[string]any{
+						"bucketId":  "3p-weekly",
+						"resetTime": "2026-11-28T00:00:00Z",
+					},
+					map[string]any{
+						"bucketId":          "3p-5h",
+						"remainingFraction": 0.65,
+						"resetTime":         "2026-11-21T18:00:00Z",
+					},
+				},
+			},
+		},
+	}
+	buckets := parseQuotaSummaryBuckets(summary)
+	if len(buckets) != 2 {
+		t.Fatalf("期望解析出 2 个桶（含省略 0 值的周额度桶），实际 %d: %+v", len(buckets), buckets)
+	}
+	if buckets[0].BucketID != "3p-weekly" || buckets[0].Percentage != 0 || !buckets[0].Exhausted {
+		t.Fatalf("省略 remainingFraction 且带 resetTime 的桶应视为 0%% 已耗尽: %+v", buckets[0])
+	}
+}

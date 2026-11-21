@@ -201,16 +201,14 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
                 >
                   <span class="w-1.5 h-1.5 rounded-full shrink-0" :style="{ backgroundColor: toneDotColor(cat.percentage) }" />
                   <span class="font-sans font-medium" style="color: var(--text-primary)">{{ cat.shortLabel }}</span>
-                  <template v-if="cat.fiveHour && cat.weekly">
+                  <template v-if="cat.fiveHour">
                     <span :style="{ color: toneTextColor(cat.fiveHour.percentage) }">5h {{ cat.fiveHour.percentage }}%</span>
                     <span style="color: var(--text-muted)">/</span>
-                    <span :style="{ color: toneTextColor(cat.weekly.percentage) }">周 {{ cat.weekly.percentage }}%</span>
+                    <span v-if="cat.weekly" :style="{ color: toneTextColor(cat.weekly.percentage) }">周 {{ cat.weekly.percentage }}%</span>
+                    <span v-else style="color: var(--text-muted)">周 {{ appStore.refreshingIds[acc.id] ? '同步中' : '--' }}</span>
                   </template>
                   <template v-else-if="cat.weekly">
                     <span :style="{ color: toneTextColor(cat.weekly.percentage) }">周 {{ cat.weekly.percentage }}%</span>
-                  </template>
-                  <template v-else-if="cat.fiveHour">
-                    <span :style="{ color: toneTextColor(cat.fiveHour.percentage) }">5h {{ cat.fiveHour.percentage }}%</span>
                   </template>
                 </span>
               </div>
