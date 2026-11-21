@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "MoreAccount",
+  "outputfilename": "MoreAccount",
+  "frontend:install": "pnpm install",
+  "frontend:build": "pnpm build",
+  "frontend:dev:watcher": "pnpm dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "More Account"
+  },
+  "info": {
+    "companyName": "More Account",
+    "productName": "More Account",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright (c) 2026",
+    "comments": "轻量级 Antigravity 反重力账号管理工具"
+  }
+}
