@@ -16,10 +16,11 @@ import { maskEmail } from '@/utils/privacy'
 import {
   formatResetCountdown,
   getEarliestResetTime,
+  getQuotaTone,
   getTierLabel,
   isAccountAbnormal,
   isAccountLowQuota,
-  summarizeModelGroups,
+  summarizeQuotaCategories,
 } from '@/utils/quota'
 import type { Account } from '@/types/models'
 
@@ -42,7 +43,7 @@ const isSwitching = computed(() => appStore.switchingId === props.account.id)
 const tier = computed(() => getTierLabel(props.account))
 const abnormal = computed(() => isAccountAbnormal(props.account))
 const lowQuota = computed(() => isAccountLowQuota(props.account, appStore.settings.lowQuotaThreshold))
-const modelGroups = computed(() => summarizeModelGroups(props.account).slice(0, 3))
+const quotaCategories = computed(() => summarizeQuotaCategories(props.account))
 const earliestReset = computed(() => getEarliestResetTime(props.account))
 const groupInfo = computed(() =>
   props.account.groupId ? appStore.groupMap.get(props.account.groupId) ?? null : null,
@@ -50,6 +51,13 @@ const groupInfo = computed(() =>
 const hasCredentials = computed(() =>
   Boolean(props.account.twoFactorSecret || props.account.accountPassword),
 )
+
+function quotaValueStyle(percentage: number) {
+  const tone = getQuotaTone(percentage)
+  if (tone === 'danger') return { color: 'var(--danger-text)' }
+  if (tone === 'warning') return { color: 'var(--warning-text)' }
+  return { color: 'var(--text-primary)' }
+}
 </script>
 
 <template>
@@ -165,17 +173,103 @@ const hasCredentials = computed(() =>
         </span>
       </div>
 
-      <!-- 模型配额进度条 -->
+      <!-- 三大配额分类进度条：Gemini Argon / Gemini Flash / Claude/GPT（有 5h 和周额度则双窗并列，仅有周额度则单行展示） -->
       <div class="pt-1.5 space-y-2">
-        <template v-if="modelGroups.length > 0">
-          <div v-for="mg in modelGroups" :key="mg.key" class="space-y-1">
-            <div class="flex items-center justify-between text-[11.5px]">
-              <span class="truncate" style="color: var(--text-secondary)">{{ mg.label }}</span>
-              <span class="font-mono-num font-medium" style="color: var(--text-primary)">
-                {{ mg.percentage }}%
-              </span>
-            </div>
-            <QuotaBar :percentage="mg.percentage" />
+        <template v-if="quotaCategories.length > 0">
+          <div
+            v-for="cat in quotaCategories"
+            :key="cat.key"
+            class="px-2.5 py-2 rounded-xl border space-y-1.5"
+            style="background-color: var(--bg-app); border-color: var(--border-subtle)"
+          >
+            <!-- 双窗口：同时存在 5h 与周额度 -->
+            <template v-if="cat.fiveHour && cat.weekly">
+              <div class="text-[11.5px] font-semibold leading-tight truncate" style="color: var(--text-primary)">
+                {{ cat.label }}
+              </div>
+              <div class="grid grid-cols-2 gap-2.5">
+                <div class="space-y-1 min-w-0">
+                  <div class="flex items-baseline justify-between gap-1 text-[11px]">
+                    <span class="inline-flex items-center gap-1 min-w-0">
+                      <span
+                        class="px-1 rounded text-[9.5px] font-semibold shrink-0"
+                        style="background-color: var(--bg-subtle); color: var(--text-muted)"
+                      >
+                        5h
+                      </span>
+                      <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.fiveHour.percentage)">
+                        {{ cat.fiveHour.percentage }}%
+                      </span>
+                    </span>
+                    <span
+                      v-if="cat.fiveHour.resetTime"
+                      class="text-[10px] font-mono-num truncate"
+                      style="color: var(--text-muted)"
+                      :title="`5小时额度重置：${formatResetCountdown(cat.fiveHour.resetTime)}`"
+                    >
+                      {{ formatResetCountdown(cat.fiveHour.resetTime) }}
+                    </span>
+                  </div>
+                  <QuotaBar :percentage="cat.fiveHour.percentage" />
+                </div>
+
+                <div class="space-y-1 min-w-0">
+                  <div class="flex items-baseline justify-between gap-1 text-[11px]">
+                    <span class="inline-flex items-center gap-1 min-w-0">
+                      <span
+                        class="px-1 rounded text-[9.5px] font-semibold shrink-0"
+                        style="background-color: var(--bg-subtle); color: var(--text-muted)"
+                      >
+                        周
+                      </span>
+                      <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.weekly.percentage)">
+                        {{ cat.weekly.percentage }}%
+                      </span>
+                    </span>
+                    <span
+                      v-if="cat.weekly.resetTime"
+                      class="text-[10px] font-mono-num truncate"
+                      style="color: var(--text-muted)"
+                      :title="`周额度重置：${formatResetCountdown(cat.weekly.resetTime)}`"
+                    >
+                      {{ formatResetCountdown(cat.weekly.resetTime) }}
+                    </span>
+                  </div>
+                  <QuotaBar :percentage="cat.weekly.percentage" />
+                </div>
+              </div>
+            </template>
+
+            <!-- 单窗口：仅有周额度（如 Gemini Argon / FREE 账号）或仅有 5h 额度 -->
+            <template v-else>
+              <div class="flex items-center justify-between gap-2 text-[11.5px]">
+                <span class="inline-flex items-center gap-1.5 min-w-0">
+                  <span class="font-semibold truncate" style="color: var(--text-primary)">{{ cat.label }}</span>
+                  <span
+                    class="px-1 rounded text-[9.5px] font-semibold shrink-0"
+                    style="background-color: var(--bg-subtle); color: var(--text-muted)"
+                  >
+                    {{ cat.weekly ? '周' : '5h' }}
+                  </span>
+                </span>
+                <span class="inline-flex items-center gap-1.5 shrink-0 font-mono-num">
+                  <span
+                    v-if="(cat.weekly ?? cat.fiveHour)?.resetTime"
+                    class="text-[10.5px]"
+                    style="color: var(--text-muted)"
+                  >
+                    {{ formatResetCountdown((cat.weekly ?? cat.fiveHour)?.resetTime) }}
+                  </span>
+                  <span
+                    class="font-semibold"
+                    :style="quotaValueStyle((cat.weekly ?? cat.fiveHour)!.percentage)"
+                  >
+                    {{ (cat.weekly ?? cat.fiveHour)!.percentage }}%
+                  </span>
+                </span>
+              </div>
+              <QuotaBar :percentage="(cat.weekly ?? cat.fiveHour)!.percentage" />
+            </template>
           </div>
         </template>
 

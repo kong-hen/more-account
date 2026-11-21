@@ -314,7 +314,45 @@ func (c *Client) tryOnboardUser(ctx context.Context, baseURL, accessToken, tierI
 	return "", nil
 }
 
-// FetchQuota 拉取单个账号的订阅、AI 积分及所有模型配额。
+func isExplicitQuotaDenial(info model.QuotaErrorInfo) bool {
+	return info.Reason == "VALIDATION_REQUIRED" ||
+		info.Reason == "SUBSCRIPTION_REQUIRED" ||
+		strings.TrimSpace(info.ValidationURL) != ""
+}
+
+// fetchQuotaSummary 向 CloudCode 拉取 5 小时与周额度共享配额桶摘要。
+func (c *Client) fetchQuotaSummary(ctx context.Context, baseURL, accessToken string, rawPayload []byte) (map[string]any, *model.QuotaErrorInfo) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/"+RetrieveUserQuotaSummaryPath, bytes.NewReader(rawPayload))
+	if err != nil {
+		return nil, nil
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", cloudCodeUserAgent())
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errInfo := ParseGoogleAPIError(resp.StatusCode, string(body))
+		return nil, &errInfo
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, nil
+	}
+	return parsed, nil
+}
+
+// FetchQuota 拉取单个账号的订阅、AI 积分、5h/周共享配额桶及所有模型配额。
 func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email string) (*FetchResult, error) {
 	ccCtx := CloudCodeContextFromToken(token)
 	baseURL := c.baseURL(ccCtx)
@@ -358,25 +396,30 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		_ = resp.Body.Close()
 
+		var modelsResp rawModelsResponse
+		var modelsErr *model.QuotaErrorInfo
+
 		if resp.StatusCode == http.StatusForbidden {
 			errInfo := ParseGoogleAPIError(resp.StatusCode, string(body))
-			q := model.QuotaData{
-				Models:           []model.ModelQuota{},
-				LastUpdated:      time.Now().Unix(),
-				IsForbidden:      true,
-				SubscriptionTier: NormalizeSubscriptionTier(tierID),
-				TierID:           strings.TrimSpace(tierID),
-				Credits:          credits,
-				ProjectID:        effectiveProject,
+			if isExplicitQuotaDenial(errInfo) {
+				q := model.QuotaData{
+					Models:           []model.ModelQuota{},
+					LastUpdated:      time.Now().Unix(),
+					IsForbidden:      true,
+					SubscriptionTier: NormalizeSubscriptionTier(tierID),
+					TierID:           strings.TrimSpace(tierID),
+					Credits:          credits,
+					ProjectID:        effectiveProject,
+				}
+				return &FetchResult{
+					Quota:     q,
+					Error:     &errInfo,
+					ProjectID: effectiveProject,
+				}, nil
 			}
-			return &FetchResult{
-				Quota:     q,
-				Error:     &errInfo,
-				ProjectID: effectiveProject,
-			}, nil
-		}
-
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			// 非明确封禁/验证的 403 继续尝试拉取配额摘要桶
+			modelsErr = &errInfo
+		} else if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 			lastErr = fmt.Errorf("配额接口暂时不可用 (HTTP %d)", resp.StatusCode)
 			if attempt < 3 {
 				select {
@@ -387,21 +430,33 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 				continue
 			}
 			return nil, lastErr
-		}
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			errInfo := ParseGoogleAPIError(resp.StatusCode, string(body))
 			return nil, fmt.Errorf("查询 %s 配额失败 (HTTP %d): %s", email, resp.StatusCode, errInfo.Message)
+		} else {
+			if err := json.Unmarshal(body, &modelsResp); err != nil {
+				return nil, fmt.Errorf("解析配额响应失败: %w", err)
+			}
 		}
 
-		var modelsResp rawModelsResponse
-		if err := json.Unmarshal(body, &modelsResp); err != nil {
-			return nil, fmt.Errorf("解析配额响应失败: %w", err)
+		// 同步拉取 retrieveUserQuotaSummary，获取 5 小时与周额度共享桶
+		summaryMap, summaryErr := c.fetchQuotaSummary(ctx, baseURL, token.AccessToken, rawPayload)
+		quotaData := buildQuotaData(modelsResp, summaryMap, tierID, credits, effectiveProject)
+
+		var finalErr *model.QuotaErrorInfo
+		if summaryErr != nil && isExplicitQuotaDenial(*summaryErr) {
+			finalErr = summaryErr
+			if modelsErr != nil {
+				quotaData.IsForbidden = true
+			}
+		} else if modelsErr != nil && len(quotaData.SummaryBuckets) == 0 && len(quotaData.Models) == 0 {
+			finalErr = modelsErr
+			quotaData.IsForbidden = true
 		}
-		quotaData := buildQuotaData(modelsResp, tierID, credits, effectiveProject)
+
 		return &FetchResult{
 			Quota:     quotaData,
-			Error:     nil,
+			Error:     finalErr,
 			ProjectID: effectiveProject,
 		}, nil
 	}

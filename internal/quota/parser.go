@@ -3,6 +3,7 @@ package quota
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -18,6 +19,7 @@ const (
 	LoadCodeAssistPath             = "v1internal:loadCodeAssist"
 	OnboardUserPath                = "v1internal:onboardUser"
 	FetchAvailableModelsPath       = "v1internal:fetchAvailableModels"
+	RetrieveUserQuotaSummaryPath   = "v1internal:retrieveUserQuotaSummary"
 	DefaultCloudCodeIDEVersion     = "2.25.0"
 	DefaultCloudCodeCL             = "1003475615"
 	DefaultGoogleAPINodeClientVer  = "10.3.0"
@@ -252,16 +254,21 @@ func extractSelectableModelIDs(resp rawModelsResponse, entries map[string]rawMod
 	return ordered
 }
 
+func fractionToPercent(frac float64) int {
+	pct := int(math.Round(frac * 100.0))
+	if pct < 0 {
+		return 0
+	}
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
 func toModelQuota(name string, info rawModelInfo) model.ModelQuota {
 	pct := 0
 	if info.QuotaInfo != nil && info.QuotaInfo.RemainingFraction != nil {
-		pct = int(*info.QuotaInfo.RemainingFraction * 100.0)
-		if pct < 0 {
-			pct = 0
-		}
-		if pct > 100 {
-			pct = 100
-		}
+		pct = fractionToPercent(*info.QuotaInfo.RemainingFraction)
 	}
 	resetTime := ""
 	if info.QuotaInfo != nil {
@@ -275,7 +282,59 @@ func toModelQuota(name string, info rawModelInfo) model.ModelQuota {
 	}
 }
 
-func buildQuotaData(resp rawModelsResponse, tierID string, credits []model.CreditInfo, projectID string) model.QuotaData {
+// parseQuotaSummaryBuckets 解析 retrieveUserQuotaSummary 返回的 groups[].buckets[]，
+// 独立存放为 SummaryBuckets（包含 5h 与周额度窗口），不混入模型明细列表。
+func parseQuotaSummaryBuckets(summary map[string]any) []model.QuotaBucket {
+	if len(summary) == 0 {
+		return nil
+	}
+	groups, ok := summary["groups"].([]any)
+	if !ok || len(groups) == 0 {
+		return nil
+	}
+
+	buckets := make([]model.QuotaBucket, 0)
+	seen := make(map[string]struct{})
+	for _, g := range groups {
+		gm, ok := g.(map[string]any)
+		if !ok {
+			continue
+		}
+		rawBuckets, ok := gm["buckets"].([]any)
+		if !ok {
+			continue
+		}
+		for _, b := range rawBuckets {
+			bm, ok := b.(map[string]any)
+			if !ok {
+				continue
+			}
+			bid, _ := bm["bucketId"].(string)
+			bid = strings.TrimSpace(bid)
+			frac, hasFrac := bm["remainingFraction"].(float64)
+			if bid == "" || !hasFrac {
+				continue
+			}
+			key := strings.ToLower(bid)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			disp, _ := bm["displayName"].(string)
+			reset, _ := bm["resetTime"].(string)
+			buckets = append(buckets, model.QuotaBucket{
+				BucketID:    bid,
+				DisplayName: strings.TrimSpace(disp),
+				Percentage:  fractionToPercent(frac),
+				ResetTime:   strings.TrimSpace(reset),
+				Exhausted:   frac <= 0,
+			})
+		}
+	}
+	return buckets
+}
+
+func buildQuotaData(resp rawModelsResponse, summary map[string]any, tierID string, credits []model.CreditInfo, projectID string) model.QuotaData {
 	entries := extractModelsMap(resp)
 	selectableIDs := extractSelectableModelIDs(resp, entries)
 
@@ -301,41 +360,15 @@ func buildQuotaData(resp rawModelsResponse, tierID string, credits []model.Credi
 		})
 	}
 
-	// 兼容 quota_summary.groups.buckets 结构。
-	if groups, ok := resp.QuotaSummary["groups"].([]any); ok {
-		for _, g := range groups {
-			gm, ok := g.(map[string]any)
-			if !ok {
-				continue
-			}
-			buckets, ok := gm["buckets"].([]any)
-			if !ok {
-				continue
-			}
-			for _, b := range buckets {
-				bm, ok := b.(map[string]any)
-				if !ok {
-					continue
-				}
-				bid, _ := bm["bucketId"].(string)
-				frac, hasFrac := bm["remainingFraction"].(float64)
-				if strings.TrimSpace(bid) == "" || !hasFrac {
-					continue
-				}
-				disp, _ := bm["displayName"].(string)
-				reset, _ := bm["resetTime"].(string)
-				models = append(models, model.ModelQuota{
-					Name:        strings.TrimSpace(bid),
-					DisplayName: strings.TrimSpace(disp),
-					Percentage:  int(frac * 100.0),
-					ResetTime:   strings.TrimSpace(reset),
-				})
-			}
-		}
+	effectiveSummary := summary
+	if len(effectiveSummary) == 0 {
+		effectiveSummary = resp.QuotaSummary
 	}
+	summaryBuckets := parseQuotaSummaryBuckets(effectiveSummary)
 
 	return model.QuotaData{
 		Models:           models,
+		SummaryBuckets:   summaryBuckets,
 		LastUpdated:      time.Now().Unix(),
 		IsForbidden:      false,
 		SubscriptionTier: NormalizeSubscriptionTier(tierID),

@@ -21,6 +21,14 @@ export interface ModelQuota {
   resetTime?: string
 }
 
+export interface QuotaBucket {
+  bucketId: string
+  displayName?: string
+  percentage: number
+  resetTime?: string
+  exhausted?: boolean
+}
+
 export interface CreditInfo {
   creditType: string
   creditAmount?: string
@@ -29,6 +37,7 @@ export interface CreditInfo {
 
 export interface QuotaData {
   models: ModelQuota[]
+  summaryBuckets?: QuotaBucket[]
   lastUpdated: number
   isForbidden: boolean
   subscriptionTier?: string

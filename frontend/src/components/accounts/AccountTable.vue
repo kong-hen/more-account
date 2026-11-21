@@ -8,17 +8,16 @@ import {
   ShieldCheck,
   Check,
 } from 'lucide-vue-next'
-import QuotaBar from '@/components/common/QuotaBar.vue'
 import { useAppStore } from '@/stores/appStore'
 import { maskEmail } from '@/utils/privacy'
 import {
   formatResetCountdown,
   getEarliestResetTime,
-  getMinQuotaPercentage,
+  getQuotaTone,
   getTierLabel,
   isAccountAbnormal,
-  isAccountLowQuota,
-  summarizeModelGroups,
+  summarizeQuotaCategories,
+  type QuotaCategorySummary,
 } from '@/utils/quota'
 import type { Account } from '@/types/models'
 
@@ -39,6 +38,31 @@ const allSelected = computed(
     props.accounts.length > 0 &&
     props.accounts.every((a) => appStore.selectedAccountIds.includes(a.id)),
 )
+
+function toneDotColor(percentage: number): string {
+  const tone = getQuotaTone(percentage)
+  if (tone === 'danger') return 'var(--danger)'
+  if (tone === 'warning') return 'var(--warning)'
+  return 'var(--success)'
+}
+
+function toneTextColor(percentage: number): string {
+  const tone = getQuotaTone(percentage)
+  if (tone === 'danger') return 'var(--danger-text)'
+  if (tone === 'warning') return 'var(--warning-text)'
+  return 'var(--text-primary)'
+}
+
+function categoryTooltip(cat: QuotaCategorySummary): string {
+  const parts: string[] = [cat.label]
+  if (cat.fiveHour) {
+    parts.push(`5h: ${cat.fiveHour.percentage}%${cat.fiveHour.resetTime ? ` (重置 ${formatResetCountdown(cat.fiveHour.resetTime)})` : ''}`)
+  }
+  if (cat.weekly) {
+    parts.push(`周: ${cat.weekly.percentage}%${cat.weekly.resetTime ? ` (重置 ${formatResetCountdown(cat.weekly.resetTime)})` : ''}`)
+  }
+  return parts.join('\n')
+}
 </script>
 
 <template>
@@ -71,7 +95,7 @@ const allSelected = computed(
             <th class="py-2.5 px-3 whitespace-nowrap">账号</th>
             <th class="py-2.5 px-3 whitespace-nowrap">分组</th>
             <th class="py-2.5 px-3 whitespace-nowrap">等级</th>
-            <th class="py-2.5 px-3 min-w-[200px] whitespace-nowrap">核心配额</th>
+            <th class="py-2.5 px-3 min-w-[260px] whitespace-nowrap">额度概览（5h / 周）</th>
             <th class="py-2.5 px-3 whitespace-nowrap">最近重置</th>
             <th class="py-2.5 px-3 text-right pr-4 whitespace-nowrap">操作</th>
           </tr>
@@ -167,19 +191,27 @@ const allSelected = computed(
                 <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
                 <span>{{ acc.disabled ? '令牌失效' : '状态异常' }}</span>
               </div>
-              <div v-else-if="summarizeModelGroups(acc).length > 0" class="flex items-center gap-2.5 max-w-[240px]">
-                <div class="flex-1 min-w-[80px]">
-                  <QuotaBar :percentage="getMinQuotaPercentage(acc)" />
-                </div>
+              <div v-else-if="summarizeQuotaCategories(acc).length > 0" class="flex items-center flex-wrap gap-1.5">
                 <span
-                  class="font-mono-num text-[11.5px] font-medium w-9 text-right shrink-0"
-                  :style="{
-                    color: isAccountLowQuota(acc, appStore.settings.lowQuotaThreshold)
-                      ? 'var(--warning-text)'
-                      : 'var(--text-primary)',
-                  }"
+                  v-for="cat in summarizeQuotaCategories(acc)"
+                  :key="cat.key"
+                  :title="categoryTooltip(cat)"
+                  class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] font-mono-num whitespace-nowrap"
+                  style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-secondary)"
                 >
-                  {{ getMinQuotaPercentage(acc) }}%
+                  <span class="w-1.5 h-1.5 rounded-full shrink-0" :style="{ backgroundColor: toneDotColor(cat.percentage) }" />
+                  <span class="font-sans font-medium" style="color: var(--text-primary)">{{ cat.shortLabel }}</span>
+                  <template v-if="cat.fiveHour && cat.weekly">
+                    <span :style="{ color: toneTextColor(cat.fiveHour.percentage) }">5h {{ cat.fiveHour.percentage }}%</span>
+                    <span style="color: var(--text-muted)">/</span>
+                    <span :style="{ color: toneTextColor(cat.weekly.percentage) }">周 {{ cat.weekly.percentage }}%</span>
+                  </template>
+                  <template v-else-if="cat.weekly">
+                    <span :style="{ color: toneTextColor(cat.weekly.percentage) }">周 {{ cat.weekly.percentage }}%</span>
+                  </template>
+                  <template v-else-if="cat.fiveHour">
+                    <span :style="{ color: toneTextColor(cat.fiveHour.percentage) }">5h {{ cat.fiveHour.percentage }}%</span>
+                  </template>
                 </span>
               </div>
               <span v-else class="text-[11px] whitespace-nowrap" style="color: var(--text-muted)">未拉取</span>

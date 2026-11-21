@@ -133,6 +133,20 @@ func TestClientFetchQuotaEndToEnd(t *testing.T) {
 					},
 				},
 			})
+		case "/" + RetrieveUserQuotaSummaryPath:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"groups": []map[string]any{
+					{
+						"buckets": []map[string]any{
+							{"bucketId": "gemini-argon-wtu-weekly", "remainingFraction": 0.95, "resetTime": "2026-11-28T00:00:00Z"},
+							{"bucketId": "gemini-5h", "remainingFraction": 1.0, "resetTime": "2026-11-21T18:00:00Z"},
+							{"bucketId": "gemini-weekly", "remainingFraction": 0.88, "resetTime": "2026-11-28T00:00:00Z"},
+							{"bucketId": "3p-5h", "remainingFraction": 0.6, "resetTime": "2026-11-21T17:00:00Z"},
+							{"bucketId": "3p-weekly", "remainingFraction": 0.45, "resetTime": "2026-11-28T00:00:00Z"},
+						},
+					},
+				},
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -161,6 +175,9 @@ func TestClientFetchQuotaEndToEnd(t *testing.T) {
 	}
 	if len(res.Quota.Models) != 3 {
 		t.Fatalf("期望保留 3 个核心模型（含占位 ID 展示名匹配），实际 %d: %+v", len(res.Quota.Models), res.Quota.Models)
+	}
+	if len(res.Quota.SummaryBuckets) != 5 {
+		t.Fatalf("期望独立解析出 5 个 5h/周共享额度桶，实际 %d: %+v", len(res.Quota.SummaryBuckets), res.Quota.SummaryBuckets)
 	}
 }
 
@@ -202,7 +219,7 @@ func TestBuildQuotaDataFollowsAgentModelSorts(t *testing.T) {
 		},
 	}
 
-	got := buildQuotaData(resp, "g1-pro-tier", nil, "proj-1")
+	got := buildQuotaData(resp, nil, "g1-pro-tier", nil, "proj-1")
 	if len(got.Models) != 2 {
 		t.Fatalf("有 agentModelSorts 时应仅保留官方可选模型，实际 %d: %+v", len(got.Models), got.Models)
 	}

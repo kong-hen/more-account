@@ -23,6 +23,15 @@ type ModelQuota struct {
 	ResetTime   string `json:"resetTime,omitempty"`
 }
 
+// QuotaBucket 表示云端 retrieveUserQuotaSummary 返回的共享配额窗口桶（如 5h 与周额度）。
+type QuotaBucket struct {
+	BucketID    string `json:"bucketId"`
+	DisplayName string `json:"displayName,omitempty"`
+	Percentage  int    `json:"percentage"`
+	ResetTime   string `json:"resetTime,omitempty"`
+	Exhausted   bool   `json:"exhausted,omitempty"`
+}
+
 // CreditInfo 表示付费订阅账号的 AI 积分明细。
 type CreditInfo struct {
 	CreditType                  string `json:"creditType"`
@@ -32,14 +41,15 @@ type CreditInfo struct {
 
 // QuotaData 表示某次配额查询得到的完整快照。
 type QuotaData struct {
-	Models           []ModelQuota `json:"models"`
-	LastUpdated      int64        `json:"lastUpdated"`
-	IsForbidden      bool         `json:"isForbidden"`
-	SubscriptionTier string       `json:"subscriptionTier,omitempty"`
-	Credits          []CreditInfo `json:"credits,omitempty"`
-	TierID           string       `json:"tierId,omitempty"`
-	IsGcpTos         *bool        `json:"isGcpTos,omitempty"`
-	ProjectID        string       `json:"projectId,omitempty"`
+	Models           []ModelQuota  `json:"models"`
+	SummaryBuckets   []QuotaBucket `json:"summaryBuckets,omitempty"`
+	LastUpdated      int64         `json:"lastUpdated"`
+	IsForbidden      bool          `json:"isForbidden"`
+	SubscriptionTier string        `json:"subscriptionTier,omitempty"`
+	Credits          []CreditInfo  `json:"credits,omitempty"`
+	TierID           string        `json:"tierId,omitempty"`
+	IsGcpTos         *bool         `json:"isGcpTos,omitempty"`
+	ProjectID        string        `json:"projectId,omitempty"`
 }
 
 // QuotaErrorInfo 记录最近一次刷新配额或令牌失败时的诊断信息。

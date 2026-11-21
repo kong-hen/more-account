@@ -31,9 +31,11 @@ import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
 import {
   formatDateTime,
   formatResetCountdown,
+  getQuotaTone,
   getTierLabel,
   isAccountAbnormal,
   mergeAccountModels,
+  summarizeQuotaCategories,
   type MergedModelQuota,
 } from '@/utils/quota'
 import type { Account, TotpCodeResult } from '@/types/models'
@@ -87,7 +89,15 @@ const displayedRefreshToken = computed(() => {
   if (!rt) return ''
   return refreshTokenRevealed.value ? rt : maskToken(rt)
 })
+const quotaCategories = computed(() => summarizeQuotaCategories(props.account))
 const mergedModels = computed(() => mergeAccountModels(props.account))
+
+function quotaValueStyle(percentage: number) {
+  const tone = getQuotaTone(percentage)
+  if (tone === 'danger') return { color: 'var(--danger-text)' }
+  if (tone === 'warning') return { color: 'var(--warning-text)' }
+  return { color: 'var(--text-primary)' }
+}
 
 function formatMergedModelTooltip(m: MergedModelQuota): string {
   if (m.variants.length <= 1) return m.baseId
@@ -719,18 +729,97 @@ async function openValidationUrl(url: string) {
         </div>
       </section>
 
-      <!-- 模型配额明细（独立展示各模型，仅合并同一模型的不同思考深度，不附加额外后缀） -->
+      <!-- 额度总览（三大分类：Gemini Argon / Gemini Flash / Claude/GPT，支持 5h 与周额度双窗口展示） -->
       <section class="space-y-2.5">
         <div class="flex items-center justify-between gap-2">
           <h3 class="text-xs font-semibold" style="color: var(--text-primary)">
-            模型配额 ({{ mergedModels.length }})
+            额度总览 ({{ quotaCategories.length }})
           </h3>
           <span v-if="account.quota?.lastUpdated" class="text-[11px] tabular-nums shrink-0" style="color: var(--text-muted)">
             更新于 {{ formatDateTime(account.quota.lastUpdated) }}
           </span>
         </div>
 
-        <div v-if="mergedModels.length" class="space-y-2.5">
+        <div v-if="quotaCategories.length" class="space-y-2.5">
+          <div
+            v-for="cat in quotaCategories"
+            :key="cat.key"
+            class="p-3 rounded-xl border space-y-2"
+            style="border-color: var(--border-subtle); background-color: var(--bg-app)"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs font-semibold truncate" style="color: var(--text-primary)">
+                {{ cat.label }}
+              </span>
+              <span
+                class="px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0"
+                style="background-color: var(--bg-subtle); color: var(--text-muted)"
+              >
+                {{ cat.fiveHour && cat.weekly ? '5h + 周额度' : cat.weekly ? '仅周额度' : '5h 额度' }}
+              </span>
+            </div>
+
+            <!-- 5 小时额度行（存在时展示） -->
+            <div v-if="cat.fiveHour" class="space-y-1">
+              <div class="flex items-center justify-between gap-2 text-[11.5px]">
+                <span class="inline-flex items-center gap-1.5" style="color: var(--text-secondary)">
+                  <span
+                    class="px-1.5 py-0.2 rounded text-[10px] font-semibold"
+                    style="background-color: var(--bg-subtle); color: var(--text-muted)"
+                  >
+                    5小时
+                  </span>
+                  <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.fiveHour.percentage)">
+                    {{ cat.fiveHour.percentage }}%
+                  </span>
+                </span>
+                <span class="text-[11px] tabular-nums shrink-0" style="color: var(--text-muted)">
+                  {{ cat.fiveHour.resetTime ? `重置 ${formatResetCountdown(cat.fiveHour.resetTime)}` : '未返回重置时间' }}
+                </span>
+              </div>
+              <QuotaBar :percentage="cat.fiveHour.percentage" />
+            </div>
+
+            <!-- 周额度行（存在时展示） -->
+            <div v-if="cat.weekly" class="space-y-1">
+              <div class="flex items-center justify-between gap-2 text-[11.5px]">
+                <span class="inline-flex items-center gap-1.5" style="color: var(--text-secondary)">
+                  <span
+                    class="px-1.5 py-0.2 rounded text-[10px] font-semibold"
+                    style="background-color: var(--bg-subtle); color: var(--text-muted)"
+                  >
+                    周额度
+                  </span>
+                  <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.weekly.percentage)">
+                    {{ cat.weekly.percentage }}%
+                  </span>
+                </span>
+                <span class="text-[11px] tabular-nums shrink-0" style="color: var(--text-muted)">
+                  {{ cat.weekly.resetTime ? `重置 ${formatResetCountdown(cat.weekly.resetTime)}` : '未返回重置时间' }}
+                </span>
+              </div>
+              <QuotaBar :percentage="cat.weekly.percentage" />
+            </div>
+          </div>
+        </div>
+        <div
+          v-else
+          class="p-4 rounded-xl border text-center text-xs"
+          style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
+        >
+          暂无额度数据，请点击上方「刷新配额」获取。
+        </div>
+      </section>
+
+      <!-- 模型配额明细（独立展示各模型，仅合并同一模型的不同思考深度，不附加额外后缀） -->
+      <section v-if="mergedModels.length" class="space-y-2.5">
+        <div class="flex items-center justify-between gap-2">
+          <h3 class="text-xs font-semibold" style="color: var(--text-primary)">
+            模型明细 ({{ mergedModels.length }})
+          </h3>
+        </div>
+
+        <div class="space-y-2">
           <div
             v-for="m in mergedModels"
             :key="m.key"
@@ -754,13 +843,6 @@ async function openValidationUrl(url: string) {
               </span>
             </div>
           </div>
-        </div>
-        <div
-          v-else
-          class="p-4 rounded-xl border text-center text-xs"
-          style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
-        >
-          暂无模型配额数据，请点击上方「刷新配额」获取。
         </div>
       </section>
 
