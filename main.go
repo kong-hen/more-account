@@ -18,13 +18,14 @@ func main() {
 
 	err := wails.Run(&options.App{
 		Title:     "More Account",
-		Width:     1280,
-		Height:    820,
-		MinWidth:  980,
-		MinHeight: 640,
+		Width:     1320,
+		Height:    840,
+		MinWidth:  1024,
+		MinHeight: 660,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
+		// 默认浅色画布背景，与默认浅色主题保持无缝一致
 		BackgroundColour: &options.RGBA{R: 247, G: 248, B: 250, A: 255},
 		OnStartup:        app.startup,
 		OnShutdown:       app.shutdown,
@@ -35,10 +36,14 @@ func main() {
 			TitleBar:             mac.TitleBarHiddenInset(),
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
+			About: &mac.AboutInfo{
+				Title:   "More Account",
+				Message: "轻量级 Antigravity 反重力账号管理工具",
+			},
 		},
 	})
 
 	if err != nil {
-		log.Fatalf("启动应用失败: %v", err)
+		log.Fatalf("启动 More Account 失败: %v", err)
 	}
 }
