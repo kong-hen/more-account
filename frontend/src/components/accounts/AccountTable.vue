@@ -56,10 +56,10 @@ function toneTextColor(percentage: number): string {
 function categoryTooltip(cat: QuotaCategorySummary): string {
   const parts: string[] = [cat.label]
   if (cat.fiveHour) {
-    parts.push(`5h: ${cat.fiveHour.percentage}%${cat.fiveHour.resetTime ? ` (重置 ${formatResetCountdown(cat.fiveHour.resetTime)})` : ''}`)
+    parts.push(`5h: ${cat.fiveHour.percentage}%${cat.fiveHour.resetTime ? ` (重置 ${formatResetCountdown(cat.fiveHour.resetTime, appStore.nowMs)})` : ''}`)
   }
   if (cat.weekly) {
-    parts.push(`周: ${cat.weekly.percentage}%${cat.weekly.resetTime ? ` (重置 ${formatResetCountdown(cat.weekly.resetTime)})` : ''}`)
+    parts.push(`周: ${cat.weekly.percentage}%${cat.weekly.resetTime ? ` (重置 ${formatResetCountdown(cat.weekly.resetTime, appStore.nowMs)})` : ''}`)
   }
   return parts.join('\n')
 }
@@ -216,7 +216,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
             </td>
 
             <td class="py-3 px-2.5 font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-muted)">
-              {{ formatResetCountdown(getEarliestResetTime(acc)) }}
+              {{ formatResetCountdown(getEarliestResetTime(acc), appStore.nowMs) }}
             </td>
 
             <td class="py-3 pl-2.5 pr-3 text-right whitespace-nowrap" @click.stop>

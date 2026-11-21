@@ -3,6 +3,7 @@
 import { ref, watch } from 'vue'
 import { FolderOpen, CheckCircle2, AlertCircle, Sun, Moon } from 'lucide-vue-next'
 import BaseModal from '@/components/common/BaseModal.vue'
+import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { api, extractErrorMessage } from '@/services/api'
 import type { AppSettings, RuntimeTarget } from '@/types/models'
@@ -27,6 +28,21 @@ watch(
     }
   },
 )
+
+const autoRefreshOptions = [
+  { value: '-1', label: '关闭自动刷新' },
+  { value: '1', label: '每 1 分钟' },
+  { value: '3', label: '每 3 分钟' },
+  { value: '5', label: '每 5 分钟（推荐）' },
+  { value: '10', label: '每 10 分钟' },
+  { value: '15', label: '每 15 分钟' },
+  { value: '30', label: '每 30 分钟' },
+]
+
+function setAutoRefreshMinutes(val: string) {
+  const num = Number(val)
+  form.value.autoRefreshMinutes = Number.isFinite(num) ? num : 5
+}
 
 const runtimeOptions: Array<{ value: RuntimeTarget; label: string; desc: string }> = [
   {
@@ -170,6 +186,26 @@ async function handleSave() {
             <p class="mt-1 text-[11.5px]" style="color: var(--text-muted)">{{ opt.desc }}</p>
           </button>
         </div>
+      </section>
+
+      <!-- 后台自动刷新配额 -->
+      <section
+        class="p-3 rounded-xl border flex items-center justify-between gap-3"
+        style="border-color: var(--border-subtle); background-color: var(--bg-app)"
+      >
+        <div class="min-w-0">
+          <div class="text-xs font-semibold" style="color: var(--text-primary)">后台自动刷新账号额度</div>
+          <div class="mt-0.5 text-[11px]" style="color: var(--text-muted)">
+            开启后定时静默同步配额，并在 5h / 周额度重置到期后自动拉取最新余量
+          </div>
+        </div>
+        <AppSelect
+          aria-label="后台自动刷新间隔"
+          :model-value="String(form.autoRefreshMinutes ?? 5)"
+          :options="autoRefreshOptions"
+          class="w-[144px] shrink-0"
+          @update:model-value="setAutoRefreshMinutes"
+        />
       </section>
 
       <!-- 切号重启与低配额阈值 -->

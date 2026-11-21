@@ -50,6 +50,7 @@ interface WailsAppBridge {
 
   RefreshAccountQuota(accountId: string): Promise<Account>
   RefreshAllQuotas(): Promise<RefreshStats>
+  TriggerAutoRefreshIfDue(): Promise<void>
 
   SwitchAccount(req: SwitchRequest): Promise<SwitchOutcome>
   ListSwitchHistory(): Promise<SwitchHistoryItem[]>
@@ -149,6 +150,7 @@ export const api = {
 
   refreshAccountQuota: (accountId: string) => getBridge().RefreshAccountQuota(accountId),
   refreshAllQuotas: () => getBridge().RefreshAllQuotas(),
+  triggerAutoRefreshIfDue: () => getBridge().TriggerAutoRefreshIfDue(),
 
   switchAccount: (req: SwitchRequest) => getBridge().SwitchAccount(req),
   listSwitchHistory: () => getBridge().ListSwitchHistory(),

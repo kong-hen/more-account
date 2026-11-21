@@ -538,12 +538,12 @@ export function getEarliestResetTime(account: Account): string {
   return earliest
 }
 
-// 将 ISO 时间戳格式化为简洁剩余倒计时（如 2h 14m / 35m / 已就绪）。
-export function formatResetCountdown(iso?: string): string {
+// 将 ISO 时间戳格式化为简洁剩余倒计时（如 2h 14m / 35m / 即将重置），支持传入响应式时钟 nowMs 实现实时跳动。
+export function formatResetCountdown(iso?: string, nowMs = Date.now()): string {
   if (!iso) return '—'
   const ts = Date.parse(iso)
   if (Number.isNaN(ts)) return iso
-  const diffSec = Math.floor((ts - Date.now()) / 1000)
+  const diffSec = Math.floor((ts - nowMs) / 1000)
   if (diffSec <= 0) return '即将重置'
 
   const days = Math.floor(diffSec / 86400)

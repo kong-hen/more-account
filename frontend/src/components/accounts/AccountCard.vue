@@ -205,9 +205,9 @@ function quotaValueStyle(percentage: number) {
                       v-if="cat.fiveHour.resetTime"
                       class="text-[10px] font-mono-num truncate"
                       style="color: var(--text-muted)"
-                      :title="`5小时额度重置：${formatResetCountdown(cat.fiveHour.resetTime)}`"
+                      :title="`5小时额度重置：${formatResetCountdown(cat.fiveHour.resetTime, appStore.nowMs)}`"
                     >
-                      {{ formatResetCountdown(cat.fiveHour.resetTime) }}
+                      {{ formatResetCountdown(cat.fiveHour.resetTime, appStore.nowMs) }}
                     </span>
                   </div>
                   <QuotaBar :percentage="cat.fiveHour.percentage" />
@@ -231,9 +231,9 @@ function quotaValueStyle(percentage: number) {
                         v-if="cat.weekly.resetTime"
                         class="text-[10px] font-mono-num truncate"
                         style="color: var(--text-muted)"
-                        :title="`周额度重置：${formatResetCountdown(cat.weekly.resetTime)}`"
+                        :title="`周额度重置：${formatResetCountdown(cat.weekly.resetTime, appStore.nowMs)}`"
                       >
-                        {{ formatResetCountdown(cat.weekly.resetTime) }}
+                        {{ formatResetCountdown(cat.weekly.resetTime, appStore.nowMs) }}
                       </span>
                     </div>
                     <QuotaBar :percentage="cat.weekly.percentage" />
@@ -280,7 +280,7 @@ function quotaValueStyle(percentage: number) {
                     class="text-[10.5px]"
                     style="color: var(--text-muted)"
                   >
-                    {{ formatResetCountdown(cat.weekly.resetTime) }}
+                    {{ formatResetCountdown(cat.weekly.resetTime, appStore.nowMs) }}
                   </span>
                   <span
                     class="font-semibold"
@@ -320,7 +320,7 @@ function quotaValueStyle(percentage: number) {
     >
       <span class="inline-flex items-center gap-1 text-[11px] tabular-nums truncate min-w-0" style="color: var(--text-muted)">
         <Clock class="w-3 h-3 shrink-0" />
-        <span class="truncate">{{ earliestReset ? `重置 ${formatResetCountdown(earliestReset)}` : '暂无重置时间' }}</span>
+        <span class="truncate">{{ earliestReset ? `重置 ${formatResetCountdown(earliestReset, appStore.nowMs)}` : '暂无重置时间' }}</span>
       </span>
 
       <div class="flex items-center gap-1.5 shrink-0" @click.stop>

@@ -767,7 +767,7 @@ async function openValidationUrl(url: string) {
                   </span>
                 </span>
                 <span class="text-[11px] tabular-nums shrink-0" style="color: var(--text-muted)">
-                  {{ cat.fiveHour.resetTime ? `重置 ${formatResetCountdown(cat.fiveHour.resetTime)}` : '未返回重置时间' }}
+                  {{ cat.fiveHour.resetTime ? `重置 ${formatResetCountdown(cat.fiveHour.resetTime, appStore.nowMs)}` : '未返回重置时间' }}
                 </span>
               </div>
               <QuotaBar :percentage="cat.fiveHour.percentage" />
@@ -789,7 +789,7 @@ async function openValidationUrl(url: string) {
                     </span>
                   </span>
                   <span class="text-[11px] tabular-nums shrink-0" style="color: var(--text-muted)">
-                    {{ cat.weekly.resetTime ? `重置 ${formatResetCountdown(cat.weekly.resetTime)}` : '未返回重置时间' }}
+                    {{ cat.weekly.resetTime ? `重置 ${formatResetCountdown(cat.weekly.resetTime, appStore.nowMs)}` : '未返回重置时间' }}
                   </span>
                 </div>
                 <QuotaBar :percentage="cat.weekly.percentage" />

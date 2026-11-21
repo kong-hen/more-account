@@ -289,15 +289,22 @@ function setSort(val: string) {
           </button>
         </div>
 
-        <!-- 刷新全部 -->
+        <!-- 刷新全部（后台自动刷新运行中也会柔和旋转图标提示） -->
         <button
           type="button"
           :disabled="appStore.refreshingAll || appStore.accounts.length === 0"
+          :title="
+            appStore.autoRefreshing
+              ? '正在后台自动同步最新额度...'
+              : appStore.settings.autoRefreshMinutes > 0
+                ? `手动立即刷新全部额度（已开启每 ${appStore.settings.autoRefreshMinutes} 分钟自动刷新）`
+                : '手动刷新全部账号额度'
+          "
           class="h-8 inline-flex items-center gap-1.5 px-2.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
           @click="appStore.refreshAllAccounts"
         >
-          <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': appStore.refreshingAll }" />
+          <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': appStore.refreshingAll || appStore.autoRefreshing }" />
           <span class="tabular-nums">
             {{
               appStore.refreshingAll

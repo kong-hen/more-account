@@ -39,6 +39,7 @@ type App struct {
 	oauthClient     *oauth.Client
 	oauthManager    *oauth.LoginManager
 	quotaService    *quota.Service
+	autoRefresher   *quota.AutoRefresher
 	switcherService *switcher.Service
 	importerService *importer.Service
 	usageService    *tokenusage.Service
@@ -70,6 +71,17 @@ func NewApp() *App {
 		usageService:    usageSvc,
 	}
 
+	app.autoRefresher = quota.NewAutoRefresher(
+		store,
+		quotaSvc,
+		func(running bool) {
+			app.emitEvent("quota:auto_status", map[string]any{"running": running})
+		},
+		func(count int) {
+			app.emitEvent("quota:updated", map[string]any{"count": count})
+		},
+	)
+
 	app.wakeupService = wakeup.NewService(store, oauthClient, quotaSvc, func() {
 		app.emitEvent("wakeup:updated", nil)
 	})
@@ -79,10 +91,12 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.wakeupService.Start(ctx)
+	a.autoRefresher.Start(ctx)
 }
 
 func (a *App) shutdown(ctx context.Context) {
 	a.oauthManager.Cancel()
+	a.autoRefresher.Stop()
 	a.wakeupService.Stop()
 }
 
@@ -113,9 +127,20 @@ func (a *App) GetSettings() model.AppSettings {
 	return a.store.GetSettings()
 }
 
-// SaveSettings 保存全局设置。
+// SaveSettings 保存全局设置，并通知后台自动刷新调度器立即应用新间隔。
 func (a *App) SaveSettings(settings model.AppSettings) (model.AppSettings, error) {
-	return a.store.SaveSettings(settings)
+	saved, err := a.store.SaveSettings(settings)
+	if err == nil && a.autoRefresher != nil {
+		a.autoRefresher.TriggerCheck()
+	}
+	return saved, err
+}
+
+// TriggerAutoRefreshIfDue 立即触发一次后台到期账号配额检查（用于窗口重新回到前台时自动保鲜）。
+func (a *App) TriggerAutoRefreshIfDue() {
+	if a.autoRefresher != nil {
+		a.autoRefresher.TriggerCheck()
+	}
 }
 
 // DetectInstalledClients 检测本机反重力桌面版、IDE 与 CLI 安装路径。

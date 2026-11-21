@@ -101,6 +101,7 @@ export interface AppSettings {
   runtimeTarget: RuntimeTarget
   launchOnSwitch: boolean
   lowQuotaThreshold: number
+  autoRefreshMinutes: number
   desktopAppPath?: string
   ideAppPath?: string
   tokenUsageDataDir?: string

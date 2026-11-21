@@ -47,13 +47,14 @@ export const useAppStore = defineStore('app', () => {
     cliDirOk: false,
   })
 
-  // 默认严格为浅色主题，不跟随系统暗色
+  // 默认严格为浅色主题，不跟随系统暗色；后台自动刷新默认每 5 分钟
   const settings = ref<AppSettings>({
     theme: 'light',
     privacyMode: false,
     runtimeTarget: 'desktop',
     launchOnSwitch: true,
     lowQuotaThreshold: 20,
+    autoRefreshMinutes: 5,
   })
 
   // 账号工作台筛选与视图状态
@@ -73,7 +74,10 @@ export const useAppStore = defineStore('app', () => {
   const refreshingIds = ref<Record<string, boolean>>({})
   const switchingId = ref<string | null>(null)
   const refreshingAll = ref(false)
+  const autoRefreshing = ref(false)
   const refreshProgress = ref({ done: 0, total: 0 })
+  // 响应式当前时间戳（每 30 秒推进一次，驱动额度重置倒计时实时更新）
+  const nowMs = ref(Date.now())
 
   // Toast 队列
   const toasts = ref<ToastItem[]>([])
@@ -128,7 +132,7 @@ export const useAppStore = defineStore('app', () => {
       dataDir.value = state.dataDir ?? ''
       applyTheme(settings.value.theme)
 
-      // 注册后端事件推送
+      // 注册后端事件推送（手动批量进度 + 后台自动刷新状态与完成通知）
       cleanups.push(
         onWailsEvent('quota:progress', (payload: unknown) => {
           const p = payload as { done?: number; total?: number } | null
@@ -140,41 +144,49 @@ export const useAppStore = defineStore('app', () => {
           }
         }),
       )
-      initialized.value = true
+      cleanups.push(
+        onWailsEvent('quota:auto_status', (payload: unknown) => {
+          const p = payload as { running?: boolean } | null
+          autoRefreshing.value = Boolean(p?.running)
+        }),
+      )
+      cleanups.push(
+        onWailsEvent('quota:updated', () => {
+          nowMs.value = Date.now()
+          void reloadAccounts()
+        }),
+      )
 
-      // 启动后静默补拉缺失 5h/周共享额度桶的账号（兼容旧缓存），避免周额度空白
-      void syncMissingQuotaSummaries()
+      // 每 30 秒推进倒计时时钟，保证卡片/表格/右栏重置倒计时实时变化
+      const clockTimer = window.setInterval(() => {
+        nowMs.value = Date.now()
+      }, 30_000)
+      cleanups.push(() => window.clearInterval(clockTimer))
+
+      // 窗口回到前台时自动保鲜：更新时间并触发后端检查到期账号（防抖 15 秒）
+      let lastFocusCheck = 0
+      const handleForeground = () => {
+        if (document.visibilityState === 'hidden') return
+        nowMs.value = Date.now()
+        const now = Date.now()
+        if (now - lastFocusCheck < 15_000) return
+        lastFocusCheck = now
+        void api.triggerAutoRefreshIfDue().catch(() => {})
+      }
+      window.addEventListener('focus', handleForeground)
+      document.addEventListener('visibilitychange', handleForeground)
+      cleanups.push(() => {
+        window.removeEventListener('focus', handleForeground)
+        document.removeEventListener('visibilitychange', handleForeground)
+      })
+
+      initialized.value = true
+      // 启动就绪后立即触发一次到期检查（补拉陈旧数据或缺失周额度桶的账号）
+      void api.triggerAutoRefreshIfDue().catch(() => {})
     } catch (err) {
       notify(`加载应用数据失败：${extractErrorMessage(err)}`, 'error', 5000)
     } finally {
       loading.value = false
-    }
-  }
-
-  async function syncMissingQuotaSummaries() {
-    if (!isWailsRuntime()) return
-    const candidates = accounts.value.filter(
-      (acc) =>
-        !acc.disabled &&
-        !acc.quota?.isForbidden &&
-        (acc.quota?.models?.length ?? 0) > 0 &&
-        (acc.quota?.summaryBuckets?.length ?? 0) === 0,
-    )
-    if (candidates.length === 0) return
-
-    for (const acc of candidates) {
-      if (refreshingIds.value[acc.id]) continue
-      refreshingIds.value = { ...refreshingIds.value, [acc.id]: true }
-      try {
-        const updated = await api.refreshAccountQuota(acc.id)
-        replaceAccountInList(updated)
-      } catch {
-        // 后台静默补拉不弹错误提示，避免启动干扰
-      } finally {
-        const next = { ...refreshingIds.value }
-        delete next[acc.id]
-        refreshingIds.value = next
-      }
     }
   }
 
@@ -510,7 +522,9 @@ export const useAppStore = defineStore('app', () => {
     refreshingIds,
     switchingId,
     refreshingAll,
+    autoRefreshing,
     refreshProgress,
+    nowMs,
     toasts,
     notify,
     dismissToast,
