@@ -94,7 +94,9 @@ func stopClientProcesses(target, customDesktop, customIDE string) error {
 				exeName = base
 			}
 		}
-		_ = exec.Command("taskkill", "/IM", exeName, "/T").Run()
+		killCmd := exec.Command("taskkill", "/IM", exeName, "/T")
+		configureHiddenSubprocess(killCmd)
+		_ = killCmd.Run()
 		time.Sleep(800 * time.Millisecond)
 		return nil
 

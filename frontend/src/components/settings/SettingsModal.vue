@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 全局应用设置弹窗：运行目标、切号重启策略、低配额筛选阈值、手动浅暗色切换与本机路径配置。
 import { computed, ref, watch } from 'vue'
-import { FolderOpen, CheckCircle2, AlertCircle, Sun, Moon } from 'lucide-vue-next'
+import { FolderOpen, CheckCircle2, AlertCircle, Sun, Moon, Loader2, Wifi } from 'lucide-vue-next'
 import BaseModal from '@/components/common/BaseModal.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
@@ -21,12 +21,15 @@ const appStore = useAppStore()
 const usageStore = useTokenUsageStore()
 const form = ref<AppSettings>({ ...appStore.settings })
 const saving = ref(false)
+const testingProxy = ref(false)
+const proxyTestResult = ref<{ ok: boolean; text: string } | null>(null)
 
 watch(
   () => props.open,
   (isOpen) => {
     if (isOpen) {
       form.value = { ...appStore.settings }
+      proxyTestResult.value = null
     }
   },
 )
@@ -111,6 +114,26 @@ async function openDataDir() {
   }
 }
 
+async function handleTestProxy() {
+  if (testingProxy.value) return
+  testingProxy.value = true
+  proxyTestResult.value = null
+  try {
+    const ms = await api.testProxy((form.value.proxyUrl ?? '').trim())
+    proxyTestResult.value = {
+      ok: true,
+      text: `连接正常（延迟 ${ms}ms）`,
+    }
+  } catch (err) {
+    proxyTestResult.value = {
+      ok: false,
+      text: extractErrorMessage(err),
+    }
+  } finally {
+    testingProxy.value = false
+  }
+}
+
 async function handleSave() {
   saving.value = true
   try {
@@ -127,6 +150,7 @@ async function handleSave() {
       desktopAppPath: (form.value.desktopAppPath ?? '').trim(),
       ideAppPath: (form.value.ideAppPath ?? '').trim(),
       tokenUsageDataDir: (form.value.tokenUsageDataDir ?? '').trim(),
+      proxyUrl: (form.value.proxyUrl ?? '').trim(),
     }
 
     await appStore.updateSettings(payload)
@@ -313,6 +337,49 @@ async function handleSave() {
             />
             <span class="text-[11px]" style="color: var(--text-muted)">任意核心模型 ≤ 此值</span>
           </div>
+        </div>
+      </section>
+
+      <!-- 网络代理配置（支持 HTTP / HTTPS / SOCKS5，热更新即时生效） -->
+      <section class="space-y-2 pt-1">
+        <div class="flex items-center justify-between gap-2">
+          <label for="proxy-url-input" class="block text-xs font-semibold" style="color: var(--text-primary)">
+            网络代理（支持 HTTP / SOCKS5，留空跟随系统环境）
+          </label>
+          <span
+            v-if="proxyTestResult"
+            class="text-[11px] font-mono-num truncate max-w-[220px]"
+            :style="{ color: proxyTestResult.ok ? 'var(--success-text)' : 'var(--danger-text)' }"
+            :title="proxyTestResult.text"
+          >
+            {{ proxyTestResult.text }}
+          </span>
+        </div>
+        <div class="flex gap-2">
+          <input
+            id="proxy-url-input"
+            v-model="form.proxyUrl"
+            type="text"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="none"
+            spellcheck="false"
+            placeholder="例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
+            class="flex-1 px-3 py-1.5 text-xs rounded-lg border font-mono-num"
+            style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
+            @input="proxyTestResult = null"
+          />
+          <button
+            type="button"
+            :disabled="testingProxy"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border cursor-pointer shrink-0 transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+            style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
+            @click="handleTestProxy"
+          >
+            <Loader2 v-if="testingProxy" class="w-3.5 h-3.5 animate-spin" />
+            <Wifi v-else class="w-3.5 h-3.5" />
+            <span>{{ testingProxy ? '测试中...' : '测试连通性' }}</span>
+          </button>
         </div>
       </section>
 

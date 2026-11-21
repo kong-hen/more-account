@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +19,7 @@ import (
 
 	"more-account/internal/importer"
 	"more-account/internal/model"
+	"more-account/internal/netutil"
 	"more-account/internal/oauth"
 	"more-account/internal/quota"
 	"more-account/internal/storage"
@@ -41,6 +46,7 @@ type App struct {
 	oauthGroupMu       sync.RWMutex
 	oauthTargetGroupID string
 	store              *storage.Store
+	netTransport       *netutil.DynamicTransport
 	oauthClient        *oauth.Client
 	oauthManager       *oauth.LoginManager
 	quotaService       *quota.Service
@@ -58,8 +64,16 @@ func NewApp() *App {
 	if err != nil {
 		panic(fmt.Sprintf("初始化本地数据存储失败: %v", err))
 	}
+	netTr, trErr := netutil.NewDynamicTransport(store.GetSettings().ProxyURL)
+	if trErr != nil {
+		netTr, _ = netutil.NewDynamicTransport("")
+	}
 	oauthClient := oauth.NewClient()
 	quotaClient := quota.NewClient()
+	if netTr != nil {
+		oauthClient.HTTPClient = &http.Client{Timeout: 15 * time.Second, Transport: netTr}
+		quotaClient.HTTPClient = &http.Client{Timeout: 20 * time.Second, Transport: netTr}
+	}
 	quotaSvc := quota.NewService(store, oauthClient, quotaClient)
 	switchSvc := switcher.NewService(store, oauthClient)
 	importSvc := importer.NewService(store, oauthClient, quotaSvc)
@@ -69,6 +83,7 @@ func NewApp() *App {
 
 	app := &App{
 		store:           store,
+		netTransport:    netTr,
 		oauthClient:     oauthClient,
 		oauthManager:    oauth.NewLoginManager(),
 		quotaService:    quotaSvc,
@@ -112,6 +127,9 @@ func NewApp() *App {
 		app.emitEvent("wakeup:updated", nil)
 		app.emitEvent("quota:updated", nil)
 	})
+	if netTr != nil {
+		app.wakeupService.SetTransport(netTr)
+	}
 	return app
 }
 
@@ -174,10 +192,13 @@ func (a *App) GetBootstrapState() *BootstrapState {
 	}
 }
 
-// SaveSettings 保存全局设置，同步原生窗口背景色并通知后台自动刷新与账号探测器立即应用新配置。
+// SaveSettings 保存全局设置，热更新网络代理、同步原生窗口背景色并通知后台服务立即应用新配置。
 func (a *App) SaveSettings(settings model.AppSettings) (model.AppSettings, error) {
 	saved, err := a.store.SaveSettings(settings)
 	if err == nil {
+		if a.netTransport != nil {
+			_ = a.netTransport.SetProxy(saved.ProxyURL)
+		}
 		a.syncWindowBackground(saved.Theme)
 		if a.activeDetector != nil {
 			a.activeDetector.TriggerCheck()
@@ -187,6 +208,13 @@ func (a *App) SaveSettings(settings model.AppSettings) (model.AppSettings, error
 		}
 	}
 	return saved, err
+}
+
+// TestProxy 测试给定代理（或留空时的直连/系统环境网络）与 Google OAuth 端点的连通延迟（毫秒）。
+func (a *App) TestProxy(rawProxyURL string) (int64, error) {
+	ctx, cancel := context.WithTimeout(a.baseCtx(), 10*time.Second)
+	defer cancel()
+	return netutil.TestConnectivity(ctx, rawProxyURL, "")
 }
 
 // TriggerAutoRefreshIfDue 立即触发一次后台到期账号配额检查（用于窗口重新回到前台时自动保鲜）。
@@ -596,6 +624,111 @@ func (a *App) SyncTokenUsage(rebuild bool, query model.TokenUsageQuery) (*model.
 // GetConversationDetail 按需只读加载单条对话的步级 Token 消耗明细。
 func (a *App) GetConversationDetail(conversationID string) (*model.ConversationDetail, error) {
 	return a.usageService.GetConversationDetail(conversationID)
+}
+
+func sanitizeCSVCell(s string) string {
+	trimmed := strings.TrimLeft(s, " \t")
+	if trimmed != "" {
+		switch trimmed[0] {
+		case '=', '+', '-', '@':
+			return "'" + s
+		}
+	}
+	return s
+}
+
+func formatTokenUsageCSV(bundle *model.TokenUsageBundle) (string, error) {
+	var buf bytes.Buffer
+	// 写入 UTF-8 BOM，确保在 Windows / macOS Excel 中直接打开中文无乱码
+	buf.WriteString("\xEF\xBB\xBF")
+	w := csv.NewWriter(&buf)
+
+	headers := []string{
+		"对话ID",
+		"对话标题",
+		"类型",
+		"工作区",
+		"主模型",
+		"交互轮次",
+		"精确输入Token",
+		"精确输出Token",
+		"思考Token",
+		"缓存读取Token",
+		"估算Token",
+		"综合总Token",
+		"最后更新时间",
+	}
+	if err := w.Write(headers); err != nil {
+		return "", err
+	}
+
+	if bundle != nil {
+		for _, item := range bundle.Conversations.Items {
+			combinedTotal := item.Exact.TotalTokens + item.Estimated.TotalTokens
+			row := []string{
+				sanitizeCSVCell(item.ConversationID),
+				sanitizeCSVCell(item.DisplayTitle),
+				sanitizeCSVCell(item.Kind),
+				sanitizeCSVCell(item.WorkspaceName),
+				sanitizeCSVCell(item.PrimaryModelDisplayName),
+				strconv.Itoa(item.TurnCount),
+				strconv.FormatUint(item.Exact.InputTokens, 10),
+				strconv.FormatUint(item.Exact.OutputTokens, 10),
+				strconv.FormatUint(item.Exact.ThinkingTokens, 10),
+				strconv.FormatUint(item.Exact.CacheReadTokens, 10),
+				strconv.FormatUint(item.Estimated.TotalTokens, 10),
+				strconv.FormatUint(combinedTotal, 10),
+				sanitizeCSVCell(item.LastModifiedTime),
+			}
+			if err := w.Write(row); err != nil {
+				return "", err
+			}
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// SaveTokenUsageCSV 将当前筛选条件下的完整对话 Token 消耗明细导出为 CSV 文件。
+func (a *App) SaveTokenUsageCSV(query model.TokenUsageQuery) (string, error) {
+	ctx := a.getCtx()
+	if ctx == nil {
+		return "", fmt.Errorf("应用上下文未就绪")
+	}
+	exportQuery := query
+	exportQuery.Page = 1
+	exportQuery.PageSize = 10000
+
+	bundle, err := a.usageService.Query(exportQuery)
+	if err != nil {
+		return "", err
+	}
+	csvContent, err := formatTokenUsageCSV(bundle)
+	if err != nil {
+		return "", fmt.Errorf("生成 CSV 失败: %w", err)
+	}
+
+	defaultName := fmt.Sprintf("more-account-token-usage-%s.csv", time.Now().Format("20060102-150405"))
+	path, err := wailsRuntime.SaveFileDialog(ctx, wailsRuntime.SaveDialogOptions{
+		Title:           "导出 Token 用量明细 CSV",
+		DefaultFilename: defaultName,
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "CSV 表格 (*.csv)", Pattern: "*.csv"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", nil
+	}
+	if err := storage.WriteBytesAtomic(path, []byte(csvContent), 0600); err != nil {
+		return "", fmt.Errorf("写入 CSV 文件失败: %w", err)
+	}
+	return path, nil
 }
 
 // ─── 定时唤醒任务 ─────────────────────────────────────────────

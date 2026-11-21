@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"image/png"
 	"os"
+	"strings"
 	"testing"
 
 	"more-account/internal/model"
@@ -213,21 +214,24 @@ func TestCrossPlatformAppIconsCompliance(t *testing.T) {
 		t.Fatalf("icon.ico 头部异常: reserved=%d type=%d count=%d", reserved, icoType, frameCount)
 	}
 
-	// 解码首帧 256x256 PNG，确认 Windows 主体占比 >= 90%（避免携带 macOS 大留白导致 Windows 任务栏图标偏小）
+	// 校验首帧 256x256 32-bit BGRA DIB，确认 Windows 主体占比 >= 90%（避免携带 macOS 大留白导致 Windows 任务栏图标偏小）
 	sizeBytes := binary.LittleEndian.Uint32(icoRaw[6+8 : 6+12])
 	offsetBytes := binary.LittleEndian.Uint32(icoRaw[6+12 : 6+16])
 	firstFrame := icoRaw[offsetBytes : offsetBytes+sizeBytes]
-	winImg, err := png.Decode(bytes.NewReader(firstFrame))
-	if err != nil {
-		t.Fatalf("解码 icon.ico 首帧 256x256 PNG 失败: %v", err)
+	if len(firstFrame) < 40+256*256*4 {
+		t.Fatalf("icon.ico 首帧 256x256 DIB 长度不足: %d", len(firstFrame))
 	}
-	if winImg.Bounds().Dx() != 256 || winImg.Bounds().Dy() != 256 {
-		t.Fatalf("icon.ico 首帧应为 256x256，实际 %v", winImg.Bounds())
+	biWidth := int(int32(binary.LittleEndian.Uint32(firstFrame[4:8])))
+	biHeight := int(int32(binary.LittleEndian.Uint32(firstFrame[8:12])))
+	if biWidth != 256 || biHeight != 512 {
+		t.Fatalf("icon.ico 首帧 DIB 头应为 256x512(含掩码)，实际 %dx%d", biWidth, biHeight)
 	}
+	// 检查中部第 128 行像素（BGRA 顺序，每像素 4 字节）的非透明水平跨度
+	midRowStart := 40 + 128*256*4
 	wMinX, wMaxX := 256, 0
 	for x := 0; x < 256; x++ {
-		_, _, _, a := winImg.At(x, 128).RGBA()
-		if a>>8 > 200 {
+		alpha := firstFrame[midRowStart+x*4+3]
+		if alpha > 200 {
 			if x < wMinX {
 				wMinX = x
 			}
@@ -245,5 +249,69 @@ func TestCrossPlatformAppIconsCompliance(t *testing.T) {
 		if st, err := os.Stat(p); err != nil || st.Size() == 0 {
 			t.Fatalf("缺少有效的 Windows 打包配置文件 %s: %v", p, err)
 		}
+	}
+}
+
+func TestProxySettingsValidationAndCSVExportFormat(t *testing.T) {
+	t.Setenv("MORE_ACCOUNT_DATA_DIR", t.TempDir())
+	app := NewApp()
+
+	// 非法代理应当被拦截
+	if _, err := app.SaveSettings(model.AppSettings{
+		Theme:             "light",
+		RuntimeTarget:     "desktop",
+		LowQuotaThreshold: 20,
+		ProxyURL:          "ftp://127.0.0.1:21",
+	}); err == nil {
+		t.Fatal("保存非法协议代理应当返回错误")
+	}
+
+	// 合法 SOCKS5 代理应当保存成功并同步热更新到传输层
+	saved, err := app.SaveSettings(model.AppSettings{
+		Theme:             "light",
+		RuntimeTarget:     "desktop",
+		LowQuotaThreshold: 20,
+		ProxyURL:          "socks5://127.0.0.1:1080",
+	})
+	if err != nil || saved.ProxyURL != "socks5://127.0.0.1:1080" {
+		t.Fatalf("保存合法 SOCKS5 代理失败: saved=%+v err=%v", saved, err)
+	}
+	if app.netTransport.ProxyURL() != "socks5://127.0.0.1:1080" {
+		t.Fatalf("期望 DynamicTransport 热更新代理生效，实际 %q", app.netTransport.ProxyURL())
+	}
+
+	// 验证 CSV 导出包含 UTF-8 BOM 并拦截公式注入
+	bundle := &model.TokenUsageBundle{
+		Conversations: model.PaginatedConversations{
+			Items: []model.ConversationSummaryItem{
+				{
+					ConversationID:          "conv-1",
+					DisplayTitle:            "=CMD|' /C calc'!A0",
+					Kind:                    "main",
+					WorkspaceName:           "more-account",
+					PrimaryModelDisplayName: "Gemini 4 Carbon",
+					TurnCount:               5,
+					Exact: model.ExactTokenTotals{
+						InputTokens:  1000,
+						OutputTokens: 400,
+						TotalTokens:  1400,
+					},
+					LastModifiedTime: "2026-11-21T22:00:00Z",
+				},
+			},
+		},
+	}
+	csvOut, err := formatTokenUsageCSV(bundle)
+	if err != nil {
+		t.Fatalf("生成 CSV 失败: %v", err)
+	}
+	if !strings.HasPrefix(csvOut, "\xEF\xBB\xBF") {
+		t.Fatal("导出 CSV 缺少 UTF-8 BOM 头")
+	}
+	if strings.Contains(csvOut, ",=CMD") {
+		t.Fatalf("导出 CSV 未对公式起始字符做转义防护: %s", csvOut)
+	}
+	if !strings.Contains(csvOut, "'=CMD") {
+		t.Fatalf("期望对公式起始字符添加单引号前缀，实际: %s", csvOut)
 	}
 }

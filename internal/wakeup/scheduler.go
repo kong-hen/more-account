@@ -55,6 +55,14 @@ func NewService(store *storage.Store, oauthClient *oauth.Client, quotaService *q
 	}
 }
 
+// SetTransport 为唤醒服务的 HTTP 客户端注入自定义传输层（如动态代理）。
+func (s *Service) SetTransport(rt http.RoundTripper) {
+	if s.httpClient == nil {
+		s.httpClient = &http.Client{Timeout: 45 * time.Second}
+	}
+	s.httpClient.Transport = rt
+}
+
 // Start 启动后台每 30 秒轮询一次的轻量定时调度器，并在启动瞬间先行建立本地持久化配额的重置基线，
 // 防止 AutoRefresher 在 1.5s 后率先刷新覆盖旧 ResetTime 导致离线重置漏触发。
 func (s *Service) Start(parent context.Context) {

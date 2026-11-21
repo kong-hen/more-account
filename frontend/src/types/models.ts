@@ -105,6 +105,7 @@ export interface AppSettings {
   desktopAppPath?: string
   ideAppPath?: string
   tokenUsageDataDir?: string
+  proxyUrl?: string
 }
 
 export interface ActiveDetectionResult {

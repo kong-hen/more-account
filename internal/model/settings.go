@@ -13,6 +13,7 @@ type AppSettings struct {
 	DesktopAppPath             string `json:"desktopAppPath,omitempty"`
 	IdeAppPath                 string `json:"ideAppPath,omitempty"`
 	TokenUsageDataDir          string `json:"tokenUsageDataDir,omitempty"`
+	ProxyURL                   string `json:"proxyUrl,omitempty"` // 可选 HTTP / HTTPS / SOCKS5 代理地址
 }
 
 // DefaultSettings 返回应用默认配置。

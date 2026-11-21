@@ -17,16 +17,36 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
+  Download,
   X,
 } from 'lucide-vue-next'
 import UsageTrendChart from '@/components/tokenusage/UsageTrendChart.vue'
 import ConversationDetailDrawer from '@/components/tokenusage/ConversationDetailDrawer.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
+import { useAppStore } from '@/stores/appStore'
 import { useTokenUsageStore } from '@/stores/tokenUsageStore'
+import { api, extractErrorMessage } from '@/services/api'
 import { formatDateTime, formatExactNumber, formatTokenCount } from '@/utils/quota'
 import type { TokenUsageQuery } from '@/types/models'
 
+const appStore = useAppStore()
 const usageStore = useTokenUsageStore()
+const exportingCSV = ref(false)
+
+async function handleExportCSV() {
+  if (exportingCSV.value) return
+  exportingCSV.value = true
+  try {
+    const savedPath = await api.saveTokenUsageCSV(usageStore.query)
+    if (savedPath) {
+      appStore.notify(`已导出 CSV 报表至 ${savedPath}`, 'success', 4200)
+    }
+  } catch (err) {
+    appStore.notify(`导出 CSV 失败：${extractErrorMessage(err)}`, 'error')
+  } finally {
+    exportingCSV.value = false
+  }
+}
 
 type SortColumn = TokenUsageQuery['sort']
 
@@ -264,6 +284,18 @@ function kindLabel(kind: string): string {
           >
             <RotateCcw class="w-3.5 h-3.5" />
             <span>重建</span>
+          </button>
+
+          <button
+            type="button"
+            title="将当前筛选条件下的完整对话 Token 明细导出为 CSV"
+            :disabled="exportingCSV || (conversations?.total ?? 0) === 0"
+            class="h-8 inline-flex items-center gap-1.5 px-2.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
+            style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
+            @click="handleExportCSV"
+          >
+            <Download class="w-3.5 h-3.5" />
+            <span>{{ exportingCSV ? '导出中...' : '导出 CSV' }}</span>
           </button>
         </div>
       </header>

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"more-account/internal/model"
+	"more-account/internal/netutil"
 )
 
 const (
@@ -104,6 +105,10 @@ func (s *Store) loadAll() error {
 		return err
 	} else if exists {
 		settings = normalizeSettings(settings)
+		// 启动自检：若磁盘手工修改了非法代理地址，自动回退为空以免阻塞启动
+		if _, pErr := netutil.ValidateProxyURL(settings.ProxyURL); pErr != nil {
+			settings.ProxyURL = ""
+		}
 	}
 	s.settings = settings
 
@@ -192,6 +197,7 @@ func normalizeSettings(in model.AppSettings) model.AppSettings {
 	in.DesktopAppPath = strings.TrimSpace(in.DesktopAppPath)
 	in.IdeAppPath = strings.TrimSpace(in.IdeAppPath)
 	in.TokenUsageDataDir = strings.TrimSpace(in.TokenUsageDataDir)
+	in.ProxyURL = strings.TrimSpace(in.ProxyURL)
 	return in
 }
 
@@ -858,12 +864,16 @@ func (s *Store) GetSettings() model.AppSettings {
 	return s.settings
 }
 
-// SaveSettings 保存全局设置。
+// SaveSettings 保存全局设置（并在落盘前校验代理地址合法性）。
 func (s *Store) SaveSettings(next model.AppSettings) (model.AppSettings, error) {
+	normalized := normalizeSettings(next)
+	if _, err := netutil.ValidateProxyURL(normalized.ProxyURL); err != nil {
+		return model.AppSettings{}, err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	normalized := normalizeSettings(next)
 	if err := s.writeSettingsFile(normalized); err != nil {
 		return model.AppSettings{}, err
 	}

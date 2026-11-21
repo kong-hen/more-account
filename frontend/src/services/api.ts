@@ -25,6 +25,7 @@ import type {
 interface WailsAppBridge {
   GetBootstrapState(): Promise<BootstrapState>
   SaveSettings(settings: AppSettings): Promise<AppSettings>
+  TestProxy(rawProxyURL: string): Promise<number>
   DetectInstalledClients(): Promise<ClientInstallInfo>
   OpenExternalURL(rawURL: string): Promise<void>
   OpenDataFolder(): Promise<void>
@@ -65,6 +66,7 @@ interface WailsAppBridge {
   QueryTokenUsage(query: TokenUsageQuery): Promise<TokenUsageBundle>
   SyncTokenUsage(rebuild: boolean, query: TokenUsageQuery): Promise<TokenUsageBundle>
   GetConversationDetail(conversationId: string): Promise<ConversationDetail>
+  SaveTokenUsageCSV(query: TokenUsageQuery): Promise<string>
 
   GetWakeupState(): Promise<WakeupState>
   SaveWakeupState(state: WakeupState): Promise<void>
@@ -119,6 +121,7 @@ export function extractErrorMessage(err: unknown): string {
 export const api = {
   getBootstrapState: () => getBridge().GetBootstrapState(),
   saveSettings: (settings: AppSettings) => getBridge().SaveSettings(settings),
+  testProxy: (rawProxyURL: string) => getBridge().TestProxy(rawProxyURL),
   detectInstalledClients: () => getBridge().DetectInstalledClients(),
   openExternalURL: (rawURL: string) => getBridge().OpenExternalURL(rawURL),
   openDataFolder: () => getBridge().OpenDataFolder(),
@@ -166,6 +169,7 @@ export const api = {
     getBridge().SyncTokenUsage(rebuild, query),
   getConversationDetail: (conversationId: string) =>
     getBridge().GetConversationDetail(conversationId),
+  saveTokenUsageCSV: (query: TokenUsageQuery) => getBridge().SaveTokenUsageCSV(query),
 
   getWakeupState: () => getBridge().GetWakeupState(),
   saveWakeupState: (state: WakeupState) => getBridge().SaveWakeupState(state),
