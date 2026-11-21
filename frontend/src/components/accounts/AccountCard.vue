@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 账号卡片视图项：展示当前激活标识、脱敏邮箱、订阅与自建分组、核心模型配额条与一键切换操作。
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import {
   RefreshCw,
   ArrowRightLeft,
@@ -11,17 +11,22 @@ import {
   CheckCircle2,
   KeyRound,
   GripVertical,
+  ExternalLink,
+  Copy,
 } from 'lucide-vue-next'
 import QuotaBar from '@/components/common/QuotaBar.vue'
 import { useAppStore } from '@/stores/appStore'
-import { maskEmail } from '@/utils/privacy'
+import { api, extractErrorMessage } from '@/services/api'
+import { copyToClipboard, maskEmail } from '@/utils/privacy'
 import {
   formatResetCountdown,
+  getAccountValidationUrl,
   getEarliestResetTime,
   getQuotaTone,
   getTierLabel,
   isAccountAbnormal,
   isAccountLowQuota,
+  isAccountValidationRequired,
   summarizeQuotaCategories,
 } from '@/utils/quota'
 import type { Account } from '@/types/models'
@@ -51,6 +56,9 @@ const isRefreshing = computed(() => Boolean(appStore.refreshingIds[props.account
 const isSwitching = computed(() => appStore.switchingId === props.account.id)
 const tier = computed(() => getTierLabel(props.account))
 const abnormal = computed(() => isAccountAbnormal(props.account))
+const validationRequired = computed(() => isAccountValidationRequired(props.account))
+const validationUrl = computed(() => getAccountValidationUrl(props.account))
+const copiedVerifyUrl = ref(false)
 const lowQuota = computed(() =>
   isAccountLowQuota(props.account, appStore.settings.lowQuotaThreshold, appStore.nowMs),
 )
@@ -68,6 +76,26 @@ function quotaValueStyle(percentage: number) {
   if (tone === 'danger') return { color: 'var(--danger-text)' }
   if (tone === 'warning') return { color: 'var(--warning-text)' }
   return { color: 'var(--text-primary)' }
+}
+
+async function handleOpenValidationUrl() {
+  if (!validationUrl.value) return
+  try {
+    await api.openExternalURL(validationUrl.value)
+  } catch (err) {
+    appStore.notify(`打开验证链接失败：${extractErrorMessage(err)}`, 'error')
+  }
+}
+
+async function handleCopyValidationUrl() {
+  if (!validationUrl.value) return
+  if (await copyToClipboard(validationUrl.value)) {
+    copiedVerifyUrl.value = true
+    appStore.notify('已复制网页验证链接', 'success', 2000)
+    window.setTimeout(() => {
+      copiedVerifyUrl.value = false
+    }, 1800)
+  }
 }
 </script>
 
@@ -225,7 +253,7 @@ function quotaValueStyle(percentage: number) {
           style="background-color: var(--danger-soft); color: var(--danger-text)"
         >
           <AlertTriangle class="w-3 h-3" />
-          {{ account.disabled ? '令牌失效' : account.quotaError?.reason === 'VALIDATION_REQUIRED' ? '需验证' : '异常' }}
+          {{ account.disabled ? '令牌失效' : validationRequired ? '需网页验证' : '异常' }}
         </span>
         <span
           v-else-if="lowQuota"
@@ -246,8 +274,41 @@ function quotaValueStyle(percentage: number) {
         </span>
       </div>
 
+      <!-- 需网页验证快捷操作栏（即使账号保留有历史配额缓存也直接展示，无需点进抽屉即可跳转验证或复制链接） -->
+      <div
+        v-if="validationUrl"
+        class="p-2.5 rounded-xl border space-y-2"
+        style="background-color: var(--danger-soft); border-color: rgba(239, 68, 68, 0.25)"
+        @click.stop
+      >
+        <p class="text-[11px] leading-snug line-clamp-2" style="color: var(--danger-text)">
+          {{ account.quotaError?.message || '此账号需完成 Google 网页安全验证后方可正常调用' }}
+        </p>
+        <div class="flex items-center gap-1.5">
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium text-white cursor-pointer transition-opacity hover:opacity-95"
+            style="background-color: var(--danger)"
+            @click="handleOpenValidationUrl"
+          >
+            <ExternalLink class="w-3 h-3" />
+            <span>网页验证</span>
+          </button>
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-medium cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+            style="border-color: rgba(239, 68, 68, 0.35); color: var(--danger-text); background-color: var(--bg-surface)"
+            @click="handleCopyValidationUrl"
+          >
+            <Check v-if="copiedVerifyUrl" class="w-3 h-3" style="color: var(--success)" />
+            <Copy v-else class="w-3 h-3" />
+            <span>{{ copiedVerifyUrl ? '已复制' : '复制链接' }}</span>
+          </button>
+        </div>
+      </div>
+
       <!-- 三大配额分类进度条：Gemini Argon / Gemini Flash / Claude/GPT（有 5h 和周额度则双窗并列，仅有周额度则单行展示） -->
-      <div class="pt-1.5 space-y-2">
+      <div v-if="quotaCategories.length > 0 || !validationUrl" class="pt-1.5 space-y-2">
         <template v-if="quotaCategories.length > 0">
           <div
             v-for="cat in quotaCategories"

@@ -37,6 +37,17 @@ const deleting = ref(false)
 
 let offWakeup: (() => void) | null = null
 
+function handlePointerModality() {
+  document.documentElement.dataset.focusSource = 'pointer'
+}
+
+function handleKeydownModality(e: KeyboardEvent) {
+  // 仅在按下 Tab（含 Shift+Tab）执行键盘焦点导航时切换至键盘焦点环模式，避免滚屏方向键误唤醒上次鼠标点击控件的外框
+  if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    document.documentElement.dataset.focusSource = 'keyboard'
+  }
+}
+
 function handleGlobalKeydown(e: KeyboardEvent) {
   if (e.key !== 'Escape') return
   // 如果当前已有原生 <dialog> 打开，交由浏览器原生 Esc 处理
@@ -50,6 +61,10 @@ function handleGlobalKeydown(e: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  document.documentElement.dataset.focusSource = 'pointer'
+  window.addEventListener('pointerdown', handlePointerModality, { capture: true, passive: true })
+  window.addEventListener('mousedown', handlePointerModality, { capture: true, passive: true })
+  window.addEventListener('keydown', handleKeydownModality, { capture: true })
   await appStore.bootstrap()
   offWakeup = onWailsEvent('wakeup:updated', () => {
     void wakeupStore.loadAll()
@@ -60,6 +75,9 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   offWakeup?.()
   appStore.disposeEvents()
+  window.removeEventListener('pointerdown', handlePointerModality, { capture: true })
+  window.removeEventListener('mousedown', handlePointerModality, { capture: true })
+  window.removeEventListener('keydown', handleKeydownModality, { capture: true })
   window.removeEventListener('keydown', handleGlobalKeydown)
 })
 

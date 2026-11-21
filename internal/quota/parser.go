@@ -105,7 +105,43 @@ func NormalizeSubscriptionTier(tierID string) string {
 	}
 }
 
-// ParseGoogleAPIError 解析 Google API 返回的 JSON 错误体，提取错误原因与验证链接。
+// sanitizeValidationURL 校验并清洗验证链接，仅允许标准 http / https 且具备合法主机名的地址。
+func sanitizeValidationURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || strings.TrimSpace(parsed.Host) == "" {
+		return ""
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
+	return parsed.String()
+}
+
+// extractInlineValidationURL 从错误消息文本中提取内嵌的 http(s) 验证链接并剥离句末粘连标点。
+func extractInlineValidationURL(msg string) string {
+	for _, token := range strings.Fields(msg) {
+		lower := strings.ToLower(token)
+		idx := strings.Index(lower, "https://")
+		if idx < 0 {
+			idx = strings.Index(lower, "http://")
+		}
+		if idx < 0 {
+			continue
+		}
+		candidate := strings.TrimRight(token[idx:], ".,;:!?)]}\"'”’>")
+		if clean := sanitizeValidationURL(candidate); clean != "" {
+			return clean
+		}
+	}
+	return ""
+}
+
+// ParseGoogleAPIError 解析 Google API 返回的 JSON 错误体，提取错误原因与网页验证链接。
 func ParseGoogleAPIError(status int, text string) model.QuotaErrorInfo {
 	msg := strings.TrimSpace(text)
 	if msg == "" {
@@ -114,11 +150,33 @@ func ParseGoogleAPIError(status int, text string) model.QuotaErrorInfo {
 	var reason string
 	var validationURL string
 
+	pickMetaURL := func(m map[string]any) string {
+		for _, key := range []string{
+			"validation_url",
+			"validationUrl",
+			"verify_url",
+			"verifyUrl",
+			"appeal_url",
+			"appealUrl",
+			"url",
+		} {
+			if raw, ok := m[key].(string); ok {
+				if clean := sanitizeValidationURL(raw); clean != "" {
+					return clean
+				}
+			}
+		}
+		return ""
+	}
+
 	var root map[string]any
 	if err := json.Unmarshal([]byte(text), &root); err == nil {
 		if errObj, ok := root["error"].(map[string]any); ok {
 			if m, ok := errObj["message"].(string); ok && strings.TrimSpace(m) != "" {
 				msg = strings.TrimSpace(m)
+			}
+			if validationURL == "" {
+				validationURL = pickMetaURL(errObj)
 			}
 			if details, ok := errObj["details"].([]any); ok {
 				for _, item := range details {
@@ -133,8 +191,19 @@ func ParseGoogleAPIError(status int, text string) model.QuotaErrorInfo {
 					}
 					if validationURL == "" {
 						if meta, ok := dm["metadata"].(map[string]any); ok {
-							if u, ok := meta["validation_url"].(string); ok && strings.TrimSpace(u) != "" {
-								validationURL = strings.TrimSpace(u)
+							validationURL = pickMetaURL(meta)
+						}
+					}
+					// 兼容 google.rpc.Help 标准 links[].url 验证跳转结构
+					if validationURL == "" {
+						if links, ok := dm["links"].([]any); ok {
+							for _, lk := range links {
+								if lm, ok := lk.(map[string]any); ok {
+									if u := pickMetaURL(lm); u != "" {
+										validationURL = u
+										break
+									}
+								}
 							}
 						}
 					}
@@ -143,11 +212,20 @@ func ParseGoogleAPIError(status int, text string) model.QuotaErrorInfo {
 		}
 	}
 
+	if validationURL == "" {
+		validationURL = extractInlineValidationURL(msg)
+	}
+
+	lowerMsg := strings.ToLower(msg)
 	if reason == "" {
 		switch {
-		case strings.Contains(msg, "Verify your account"):
+		case validationURL != "" ||
+			strings.Contains(lowerMsg, "verify your account") ||
+			strings.Contains(lowerMsg, "validation required") ||
+			strings.Contains(lowerMsg, "account verification") ||
+			strings.Contains(lowerMsg, "verification required"):
 			reason = "VALIDATION_REQUIRED"
-		case strings.Contains(msg, "Subscription required"):
+		case strings.Contains(lowerMsg, "subscription required"):
 			reason = "SUBSCRIPTION_REQUIRED"
 		}
 	}

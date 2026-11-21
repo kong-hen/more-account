@@ -365,3 +365,83 @@ func TestSanitizeOverrideURLOperationPathAndPrivacyError(t *testing.T) {
 		t.Fatalf("配额错误消息不应泄露明文邮箱: %v", err)
 	}
 }
+
+func TestParseGoogleAPIErrorExtendedFormatsAndSafety(t *testing.T) {
+	// 1. 兼容 google.rpc.Help 的 links[].url 结构
+	helpBody := `{
+		"error": {
+			"code": 403,
+			"message": "Account verification required before using Cloud Code.",
+			"details": [
+				{
+					"@type": "type.googleapis.com/google.rpc.Help",
+					"links": [
+						{
+							"description": "Complete web verification",
+							"url": "https://accounts.google.com/signin/continue?sarp=1"
+						}
+					]
+				}
+			]
+		}
+	}`
+	parsedHelp := ParseGoogleAPIError(403, helpBody)
+	if parsedHelp.ValidationURL != "https://accounts.google.com/signin/continue?sarp=1" {
+		t.Fatalf("期望从 Help.links 提取验证 URL，实际 %q", parsedHelp.ValidationURL)
+	}
+	if parsedHelp.Reason != "VALIDATION_REQUIRED" {
+		t.Fatalf("期望自动标记 VALIDATION_REQUIRED，实际 %q", parsedHelp.Reason)
+	}
+
+	// 2. 兼容错误文本内嵌验证链接并自动剥离末尾标点
+	inlineBody := `{"error":{"code":403,"message":"Please verify at https://accounts.google.com/verify/challenge?id=42)."}}`
+	parsedInline := ParseGoogleAPIError(403, inlineBody)
+	if parsedInline.ValidationURL != "https://accounts.google.com/verify/challenge?id=42" {
+		t.Fatalf("期望提取文本内嵌验证 URL 并剥离末尾标点，实际 %q", parsedInline.ValidationURL)
+	}
+
+	// 3. 拦截非 http/https 的危险验证链接
+	unsafeBody := `{"error":{"code":403,"details":[{"reason":"VALIDATION_REQUIRED","metadata":{"validation_url":"javascript:alert(1)"}}]}}`
+	parsedUnsafe := ParseGoogleAPIError(403, unsafeBody)
+	if parsedUnsafe.ValidationURL != "" {
+		t.Fatalf("危险协议验证链接必须被过滤为空，实际 %q", parsedUnsafe.ValidationURL)
+	}
+}
+
+func TestFetchQuotaCapturesValidationURLFromLoadCodeAssist(t *testing.T) {
+	// 模拟 loadCodeAssist 返回带 validation_url 的 403，而 fetchAvailableModels 仅返回普通无链接 403
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + LoadCodeAssistPath:
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{
+				"error": {
+					"code": 403,
+					"message": "Verify your account to continue.",
+					"details": [{
+						"reason": "VALIDATION_REQUIRED",
+						"metadata": {"validation_url": "https://accounts.google.com/verify/from-assist"}
+					}]
+				}
+			}`))
+		case "/" + FetchAvailableModelsPath, "/" + RetrieveUserQuotaSummaryPath:
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":403,"message":"Permission denied"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := &Client{HTTPClient: srv.Client(), BaseURLOverride: srv.URL}
+	res, err := client.FetchQuota(context.Background(), model.TokenData{AccessToken: "tok-v"}, "verify@example.com")
+	if err != nil {
+		t.Fatalf("明确验证拦截应返回结构化 FetchResult 而非普通 err: %v", err)
+	}
+	if res.Error == nil || res.Error.ValidationURL != "https://accounts.google.com/verify/from-assist" {
+		t.Fatalf("期望保留 loadCodeAssist 返回的 validation_url，实际 %+v", res.Error)
+	}
+	if res.Error.Reason != "VALIDATION_REQUIRED" || !res.Quota.IsForbidden {
+		t.Fatalf("期望标记 VALIDATION_REQUIRED 与 IsForbidden=true，实际 err=%+v quota=%+v", res.Error, res.Quota)
+	}
+}

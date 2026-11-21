@@ -43,6 +43,8 @@ interface WailsAppBridge {
   GenerateTOTP(secret: string): Promise<TotpCodeResult>
 
   StartOAuthLogin(groupId: string): Promise<OAuthLoginSession>
+  PrepareOAuthLogin(groupId: string): Promise<OAuthLoginSession>
+  SetOAuthTargetGroup(groupId: string): Promise<void>
   SubmitOAuthCallbackURL(rawURL: string): Promise<void>
   CancelOAuthLogin(): Promise<void>
 
@@ -140,6 +142,8 @@ export const api = {
   generateTOTP: (secret: string) => getBridge().GenerateTOTP(secret),
 
   startOAuthLogin: (groupId: string) => getBridge().StartOAuthLogin(groupId),
+  prepareOAuthLogin: (groupId: string) => getBridge().PrepareOAuthLogin(groupId),
+  setOAuthTargetGroup: (groupId: string) => getBridge().SetOAuthTargetGroup(groupId),
   submitOAuthCallbackURL: (rawURL: string) => getBridge().SubmitOAuthCallbackURL(rawURL),
   cancelOAuthLogin: () => getBridge().CancelOAuthLogin(),
 

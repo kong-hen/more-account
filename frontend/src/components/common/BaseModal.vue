@@ -106,6 +106,16 @@ function handleNativeClose() {
     emit('close')
   } else if (props.open && props.preventClose && el && !el.open) {
     el.showModal()
+    return
+  }
+  // 鼠标模式下关闭模态框后，释放浏览器自动归还到触发按钮上的残留焦点，避免外层选中框常驻
+  if (document.documentElement.dataset.focusSource === 'pointer') {
+    window.requestAnimationFrame(() => {
+      const active = document.activeElement
+      if (active instanceof HTMLButtonElement || active instanceof HTMLSelectElement) {
+        active.blur()
+      }
+    })
   }
 }
 </script>

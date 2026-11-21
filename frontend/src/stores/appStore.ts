@@ -8,6 +8,7 @@ import {
   getTierLabel,
   isAccountAbnormal,
   isAccountLowQuota,
+  isAccountValidationRequired,
 } from '@/utils/quota'
 import type {
   Account,
@@ -67,6 +68,7 @@ export const useAppStore = defineStore('app', () => {
   const tierFilter = ref<string>('all') // 'all' | 'ULTRA' | 'PRO' | 'FREE'
   const onlyLowQuota = ref(false)
   const onlyAbnormal = ref(false)
+  const onlyValidationRequired = ref(false)
   const sortBy = ref<AccountSortBy>('custom')
   const viewMode = ref<AccountViewMode>('cards')
 
@@ -213,10 +215,16 @@ export const useAppStore = defineStore('app', () => {
             }
           })
           if (p?.account?.email) {
-            notify(
-              `已通过 Google 授权添加账号 ${maskEmail(p.account.email, settings.value.privacyMode)}`,
-              'success',
-            )
+            const emailLabel = maskEmail(p.account.email, settings.value.privacyMode)
+            if (isAccountValidationRequired(p.account)) {
+              notify(
+                `已添加账号 ${emailLabel}，该账号需完成网页验证后方可使用`,
+                'warning',
+                5000,
+              )
+            } else {
+              notify(`已通过 Google 授权添加账号 ${emailLabel}`, 'success')
+            }
           } else {
             notify('OAuth 授权成功', 'success')
           }
@@ -337,7 +345,9 @@ export const useAppStore = defineStore('app', () => {
       const updated = await api.refreshAccountQuota(accountId)
       replaceAccountInList(updated)
       const displayEmail = maskEmail(updated.email, settings.value.privacyMode)
-      if (updated.quotaError) {
+      if (isAccountValidationRequired(updated)) {
+        notify(`${displayEmail} 需要网页验证，可点击「网页验证」或「复制链接」处理`, 'warning', 4800)
+      } else if (updated.quotaError) {
         notify(`${displayEmail} 配额状态异常：${updated.quotaError.message}`, 'warning', 4500)
       } else {
         notify(`已更新 ${displayEmail} 的最新配额`, 'success')
@@ -601,6 +611,7 @@ export const useAppStore = defineStore('app', () => {
     tierFilter.value = 'all'
     onlyLowQuota.value = false
     onlyAbnormal.value = false
+    onlyValidationRequired.value = false
   }
 
   function requestSelectDetailAccount(nextId: string | null) {
@@ -665,11 +676,16 @@ export const useAppStore = defineStore('app', () => {
     accounts.value.filter((a) => isAccountAbnormal(a)).length,
   )
 
+  const validationRequiredCount = computed(() =>
+    accounts.value.filter((a) => isAccountValidationRequired(a)).length,
+  )
+
   const activeFilterCount = computed(() => {
     let n = 0
     if (tierFilter.value !== 'all') n += 1
     if (onlyLowQuota.value) n += 1
     if (onlyAbnormal.value) n += 1
+    if (onlyValidationRequired.value) n += 1
     return n
   })
 
@@ -688,13 +704,12 @@ export const useAppStore = defineStore('app', () => {
         return false
       }
 
-      // 可选的「低配额 / 异常」过滤：同时勾选时取并集（查看所有需要关注的账号），单选时精准匹配。
-      if (onlyLowQuota.value && onlyAbnormal.value) {
-        if (!isAccountLowQuota(acc, threshold, nowMs.value) && !isAccountAbnormal(acc)) return false
-      } else if (onlyLowQuota.value) {
-        if (!isAccountLowQuota(acc, threshold, nowMs.value)) return false
-      } else if (onlyAbnormal.value) {
-        if (!isAccountAbnormal(acc)) return false
+      // 可选的健康状态过滤（低配额 / 需网页验证 / 异常）：多项同时勾选时取并集，单选时精准匹配。
+      if (onlyLowQuota.value || onlyAbnormal.value || onlyValidationRequired.value) {
+        const hitLow = onlyLowQuota.value && isAccountLowQuota(acc, threshold, nowMs.value)
+        const hitVerify = onlyValidationRequired.value && isAccountValidationRequired(acc)
+        const hitAbnormal = onlyAbnormal.value && isAccountAbnormal(acc)
+        if (!hitLow && !hitVerify && !hitAbnormal) return false
       }
 
       if (q) {
@@ -758,8 +773,10 @@ export const useAppStore = defineStore('app', () => {
     tierFilter,
     onlyLowQuota,
     onlyAbnormal,
+    onlyValidationRequired,
     lowQuotaCount,
     abnormalCount,
+    validationRequiredCount,
     activeFilterCount,
     sortBy,
     viewMode,

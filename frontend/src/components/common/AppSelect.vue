@@ -32,26 +32,30 @@ const emit = defineEmits<{
 }>()
 
 function onChange(e: Event) {
-  emit('update:modelValue', (e.target as HTMLSelectElement).value)
+  const selectEl = e.target as HTMLSelectElement
+  emit('update:modelValue', selectEl.value)
+  // 鼠标点选完成后主动释放原生 <select> 焦点，消除移开鼠标后残留的外层选中态并避免误触滚轮/方向键改值
+  if (document.documentElement.dataset.focusSource !== 'keyboard') {
+    selectEl.blur()
+  }
 }
 </script>
 
 <template>
   <div
-    class="relative items-center rounded-lg border transition-colors focus-within:border-[var(--accent)] focus-within:ring-2 focus-within:ring-[var(--accent)]/20 hover:border-[var(--border-strong)]"
+    class="app-select-wrap relative items-center rounded-lg"
     :class="[
       block ? 'flex w-full' : 'inline-flex',
       size === 'sm' ? 'h-7' : 'h-8',
       disabled ? 'opacity-50 pointer-events-none' : '',
     ]"
-    style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
   >
     <select
       :id="id"
       :aria-label="ariaLabel"
       :value="modelValue"
       :disabled="disabled"
-      class="app-select-native w-full h-full pl-2.5 pr-7 text-xs font-medium cursor-pointer truncate focus:outline-none"
+      class="app-select-native w-full h-full pl-2.5 pr-7 text-xs font-medium cursor-pointer truncate"
       style="color: var(--text-primary)"
       @change="onChange"
     >

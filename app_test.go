@@ -126,3 +126,26 @@ func TestReorderAccountsAndCancelWakeupTestBindings(t *testing.T) {
 	// 验证取消不存在的唤醒测试不会报错或 panic
 	app.CancelWakeupTest("nonexistent-scope")
 }
+
+func TestPrepareOAuthLoginAndDynamicGroupUpdate(t *testing.T) {
+	t.Setenv("MORE_ACCOUNT_DATA_DIR", t.TempDir())
+	app := NewApp()
+	defer app.CancelOAuthLogin()
+
+	sess, err := app.PrepareOAuthLogin("")
+	if err != nil {
+		t.Fatalf("PrepareOAuthLogin 调用失败: %v", err)
+	}
+	if sess.AuthURL == "" || sess.RedirectURI == "" || sess.State == "" {
+		t.Fatalf("PrepareOAuthLogin 返回会话字段不完整: %+v", sess)
+	}
+	if _, err := validateExternalHTTPURL(sess.AuthURL); err != nil {
+		t.Fatalf("生成的 AuthURL 非法: %v", err)
+	}
+
+	// 验证等待回调期间支持动态更新目标归属分组
+	app.SetOAuthTargetGroup("grp-test-1")
+	if got := app.getOAuthTargetGroup(); got != "grp-test-1" {
+		t.Fatalf("期望更新 OAuth 目标分组为 grp-test-1，实际 %q", got)
+	}
+}

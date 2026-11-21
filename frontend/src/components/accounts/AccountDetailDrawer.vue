@@ -32,9 +32,11 @@ import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
 import {
   formatDateTime,
   formatResetCountdown,
+  getAccountValidationUrl,
   getQuotaTone,
   getTierLabel,
   isAccountAbnormal,
+  isAccountValidationRequired,
   mergeAccountModels,
   pickPreferredWakeupModel,
   summarizeQuotaCategories,
@@ -82,6 +84,8 @@ const isTestingCurrent = computed(
   () => Boolean(props.account && wakeupStore.testingScopeId && wakeupStore.testingAccountId === props.account.id),
 )
 const abnormal = computed(() => (props.account ? isAccountAbnormal(props.account) : false))
+const validationRequired = computed(() => isAccountValidationRequired(props.account))
+const validationUrl = computed(() => getAccountValidationUrl(props.account))
 const tier = computed(() => (props.account ? getTierLabel(props.account) : 'UNKNOWN'))
 const groupOptions = computed(() => [
   { value: '', label: '未分组' },
@@ -463,7 +467,7 @@ async function openValidationUrl(url: string) {
         <div class="flex items-center justify-between gap-2 text-xs font-semibold" style="color: var(--danger-text)">
           <span class="inline-flex items-center gap-1.5">
             <AlertTriangle class="w-4 h-4 shrink-0" />
-            <span>{{ account.quotaError?.reason || (account.disabled ? '令牌已失效' : '账号异常') }}</span>
+            <span>{{ validationRequired ? '需完成网页验证' : account.quotaError?.reason || (account.disabled ? '令牌已失效' : '账号异常') }}</span>
           </span>
           <span v-if="account.disabled && account.disabledAt" class="text-[10.5px] font-normal font-mono-num">
             {{ formatDateTime(account.disabledAt) }}
@@ -472,24 +476,25 @@ async function openValidationUrl(url: string) {
         <p class="text-[11.5px] leading-relaxed break-words" style="color: var(--danger-text)">
           {{ account.quotaError?.message || account.disabledReason || '请尝试重新授权或完成 Google 账号安全验证。' }}
         </p>
-        <div v-if="account.quotaError?.validationUrl" class="flex items-center gap-2 pt-1">
+        <div v-if="validationUrl" class="flex items-center gap-2 pt-1">
           <button
             type="button"
             class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11.5px] font-medium text-white cursor-pointer"
             style="background-color: var(--danger)"
-            @click="openValidationUrl(account.quotaError!.validationUrl!)"
+            @click="openValidationUrl(validationUrl)"
           >
             <ExternalLink class="w-3 h-3" />
-            打开验证页
+            网页验证
           </button>
           <button
             type="button"
-            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11.5px] cursor-pointer"
+            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11.5px] cursor-pointer hover:bg-[var(--bg-hover)]"
             style="border-color: rgba(239, 68, 68, 0.35); color: var(--danger-text); background-color: var(--bg-surface)"
-            @click="handleCopy('validationUrl', account.quotaError!.validationUrl!, '验证链接')"
+            @click="handleCopy('validationUrl', validationUrl, '验证链接')"
           >
-            <Copy class="w-3 h-3" />
-            复制链接
+            <Check v-if="copiedField === 'validationUrl'" class="w-3 h-3" style="color: var(--success)" />
+            <Copy v-else class="w-3 h-3" />
+            {{ copiedField === 'validationUrl' ? '已复制链接' : '复制验证链接' }}
           </button>
         </div>
       </section>

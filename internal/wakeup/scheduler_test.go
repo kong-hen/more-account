@@ -368,3 +368,65 @@ func TestThinkingOnlyStreamSucceedsAndCooldownPreservesReset(t *testing.T) {
 		t.Fatal("冷却期结束后应当触发此前未消费的配额重置事件")
 	}
 }
+
+func TestWakeupPersistsValidationURLToAccountQuotaError(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	acc, err := store.UpsertAccount(model.Account{
+		Email: "needverify@example.com",
+		Token: model.TokenData{
+			AccessToken:     "valid-at",
+			RefreshToken:    "rt-v",
+			ExpiryTimestamp: time.Now().Unix() + 3600,
+			ProjectID:       "proj-v",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{
+			"error": {
+				"code": 403,
+				"message": "Verify your account to continue.",
+				"details": [{
+					"reason": "VALIDATION_REQUIRED",
+					"metadata": {"validation_url": "https://accounts.google.com/verify/wakeup-check"}
+				}]
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	targetURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, oauth.NewClient(), nil, nil)
+	svc.httpClient = &http.Client{
+		Transport: &rewriteHostTransport{
+			target: targetURL,
+			base:   srv.Client().Transport,
+		},
+	}
+
+	item, runErr := svc.TestNow(context.Background(), model.WakeupTestRequest{
+		AccountID: acc.ID,
+		Model:     "gemini-3.8-flash-high",
+	})
+	if runErr == nil {
+		t.Fatal("403 验证拦截应当返回错误")
+	}
+	if item == nil || item.ValidationURL != "https://accounts.google.com/verify/wakeup-check" {
+		t.Fatalf("唤醒历史应记录 ValidationURL，实际 %+v", item)
+	}
+
+	updatedAcc, ok := store.GetAccount(acc.ID)
+	if !ok || updatedAcc.QuotaError == nil || updatedAcc.QuotaError.ValidationURL != "https://accounts.google.com/verify/wakeup-check" {
+		t.Fatalf("唤醒发现需网页验证时应同步回写账号 QuotaError.ValidationURL，实际 %+v", updatedAcc.QuotaError)
+	}
+}

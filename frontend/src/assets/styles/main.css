@@ -197,19 +197,35 @@ body,
     background: rgba(0, 0, 0, 0.65);
   }
 
-  /* 统一重置 macOS WKWebView 原生 Aqua select 外观，避免边框/内边距错位 */
-  select.app-select-native {
+  /* 自定义圆角下拉选择框包装器与原生 select 重置：消除 WKWebView 直角外框与鼠标点选残留 */
+  .app-select-wrap {
+    border: 1px solid var(--border-subtle);
+    background-color: var(--bg-surface);
+    color: var(--text-primary);
+    transition: border-color 150ms ease, box-shadow 150ms ease;
+  }
+
+  .app-select-wrap:hover {
+    border-color: var(--border-strong);
+  }
+
+  :root:not([data-focus-source="pointer"]) .app-select-wrap:has(select:focus-visible) {
+    border-color: var(--accent);
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  select.app-select-native,
+  select.app-select-native:focus,
+  select.app-select-native:focus-visible {
     -webkit-appearance: none;
     appearance: none;
     background-image: none;
     background-color: transparent;
     border: 0;
     outline: none;
+    box-shadow: none;
     line-height: 1.25;
-  }
-
-  select.app-select-native:focus-visible {
-    outline: none;
   }
 
   select.app-select-native option,
@@ -266,13 +282,38 @@ body,
   opacity: 0;
 }
 
-/* ─── 按钮与输入焦点可见性 ─── */
-button:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+/* ─── 按钮与输入控件焦点可见性（置于 base 层，确保不越级覆盖组件圆角，兼顾键盘无障碍与鼠标操作零残留） ─── */
+@layer base {
+  :root:not([data-focus-source="pointer"]) :where(a, button, summary, [tabindex]:not([tabindex="-1"])):focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  :root[data-focus-source="pointer"] :where(button, select):focus,
+  :root[data-focus-source="pointer"] :where(button, select):focus-visible,
+  :where(button, select):focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+  textarea:focus-visible {
+    outline: none;
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+
+  :root:not([data-focus-source="pointer"]) input[type="checkbox"]:focus-visible,
+  :root:not([data-focus-source="pointer"]) input[type="radio"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  :root[data-focus-source="pointer"] input[type="checkbox"]:focus,
+  :root[data-focus-source="pointer"] input[type="checkbox"]:focus-visible,
+  :root[data-focus-source="pointer"] input[type="radio"]:focus,
+  :root[data-focus-source="pointer"] input[type="radio"]:focus-visible {
+    outline: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

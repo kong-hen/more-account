@@ -36,18 +36,20 @@ type BootstrapState struct {
 
 // App 是 Wails 桌面应用的后端绑定总入口，仅负责参数协调与事件桥接。
 type App struct {
-	ctxMu           sync.RWMutex
-	ctx             context.Context
-	store           *storage.Store
-	oauthClient     *oauth.Client
-	oauthManager    *oauth.LoginManager
-	quotaService    *quota.Service
-	autoRefresher   *quota.AutoRefresher
-	switcherService *switcher.Service
-	activeDetector  *switcher.ActiveDetector
-	importerService *importer.Service
-	usageService    *tokenusage.Service
-	wakeupService   *wakeup.Service
+	ctxMu              sync.RWMutex
+	ctx                context.Context
+	oauthGroupMu       sync.RWMutex
+	oauthTargetGroupID string
+	store              *storage.Store
+	oauthClient        *oauth.Client
+	oauthManager       *oauth.LoginManager
+	quotaService       *quota.Service
+	autoRefresher      *quota.AutoRefresher
+	switcherService    *switcher.Service
+	activeDetector     *switcher.ActiveDetector
+	importerService    *importer.Service
+	usageService       *tokenusage.Service
+	wakeupService      *wakeup.Service
 }
 
 // NewApp 创建并装配全部后端领域服务。
@@ -108,6 +110,7 @@ func NewApp() *App {
 
 	app.wakeupService = wakeup.NewService(store, oauthClient, quotaSvc, func() {
 		app.emitEvent("wakeup:updated", nil)
+		app.emitEvent("quota:updated", nil)
 	})
 	return app
 }
@@ -428,16 +431,31 @@ func (a *App) GenerateTOTP(secret string) (totp.CodeResult, error) {
 
 // ─── Google OAuth 浏览器授权 ──────────────────────────────────
 
-// StartOAuthLogin 启动本地回调监听并打开系统浏览器授权，授权完成后通过事件通知前端。
-func (a *App) StartOAuthLogin(groupID string) (oauth.LoginSession, error) {
+// SetOAuthTargetGroup 动态更新当前等待回调中的 OAuth 授权归属分组。
+func (a *App) SetOAuthTargetGroup(groupID string) {
+	a.oauthGroupMu.Lock()
+	a.oauthTargetGroupID = strings.TrimSpace(groupID)
+	a.oauthGroupMu.Unlock()
+}
+
+func (a *App) getOAuthTargetGroup() string {
+	a.oauthGroupMu.RLock()
+	defer a.oauthGroupMu.RUnlock()
+	return a.oauthTargetGroupID
+}
+
+func (a *App) beginOAuthSession(groupID string, openBrowser bool) (oauth.LoginSession, error) {
+	a.SetOAuthTargetGroup(groupID)
 	sess, err := a.oauthManager.StartSession()
 	if err != nil {
 		return oauth.LoginSession{}, err
 	}
 
-	_ = a.OpenExternalURL(sess.AuthURL)
+	if openBrowser {
+		_ = a.OpenExternalURL(sess.AuthURL)
+	}
 
-	go func(sessionState, redirectURI, codeVerifier, targetGroupID string) {
+	go func(sessionState, redirectURI, codeVerifier string) {
 		ctx, cancel := context.WithTimeout(a.baseCtx(), 5*time.Minute)
 		defer cancel()
 
@@ -463,6 +481,7 @@ func (a *App) StartOAuthLogin(groupID string) (oauth.LoginSession, error) {
 			return
 		}
 
+		targetGroupID := a.getOAuthTargetGroup()
 		acc, addErr := a.importerService.AddByRefreshToken(ctx, tokenResp.RefreshToken, targetGroupID, nil)
 		if addErr != nil {
 			a.emitEvent("oauth:failed", map[string]any{"error": addErr.Error()})
@@ -476,9 +495,19 @@ func (a *App) StartOAuthLogin(groupID string) (oauth.LoginSession, error) {
 			a.autoRefresher.TriggerCheck()
 		}
 		a.emitEvent("oauth:completed", map[string]any{"account": acc})
-	}(sess.State, sess.RedirectURI, sess.CodeVerifier, groupID)
+	}(sess.State, sess.RedirectURI, sess.CodeVerifier)
 
 	return sess, nil
+}
+
+// StartOAuthLogin 启动本地回调监听并立即打开系统浏览器跳转到网页验证授权。
+func (a *App) StartOAuthLogin(groupID string) (oauth.LoginSession, error) {
+	return a.beginOAuthSession(groupID, true)
+}
+
+// PrepareOAuthLogin 仅启动本地回调监听并生成授权链接（不自动拉起默认浏览器，供用户直接复制授权链接到指定浏览器验证）。
+func (a *App) PrepareOAuthLogin(groupID string) (oauth.LoginSession, error) {
+	return a.beginOAuthSession(groupID, false)
 }
 
 // SubmitOAuthCallbackURL 允许用户手动粘贴回调 URL 完成 OAuth 授权。

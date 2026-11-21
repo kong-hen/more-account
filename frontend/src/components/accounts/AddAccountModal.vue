@@ -1,12 +1,23 @@
 <script setup lang="ts">
-// 精简三入口添加账号弹窗：1) Google OAuth 浏览器授权（含手动回调兜底）2) 导入本机已登录账号 3) Refresh Token / JSON 批量导入。
+// 三入口添加账号弹窗：1) Google OAuth 授权（支持直接跳转网页验证或仅复制授权链接，含手动回调兜底）2) 读取本机已登录账号 3) Refresh Token / JSON 批量导入，并内置需网页验证账号直达操作。
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
-import { Globe, HardDriveDownload, KeyRound, Copy, Check, ExternalLink, Loader2 } from 'lucide-vue-next'
+import {
+  Globe,
+  HardDriveDownload,
+  KeyRound,
+  Copy,
+  Check,
+  ExternalLink,
+  Loader2,
+  AlertTriangle,
+} from 'lucide-vue-next'
 import BaseModal from '@/components/common/BaseModal.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { api, extractErrorMessage, onWailsEvent } from '@/services/api'
 import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
+import { getAccountValidationUrl, isAccountValidationRequired } from '@/utils/quota'
+import type { Account } from '@/types/models'
 
 const props = defineProps<{
   open: boolean
@@ -28,6 +39,7 @@ const groupOptions = computed(() => [
 
 // OAuth 状态
 const oauthWaiting = ref(false)
+const oauthStartingMode = ref<'open' | 'copy' | null>(null)
 const oauthAuthUrl = ref('')
 const oauthRedirectUri = ref('')
 const oauthCallbackInput = ref('')
@@ -46,6 +58,10 @@ const tokenImporting = ref(false)
 const tokenError = ref('')
 const tokenSummary = ref('')
 
+// 导入后检测到需要网页验证的账号列表（支持在弹窗内直接复制链接或打开网页验证）
+const pendingVerifyAccounts = ref<Account[]>([])
+const copiedVerifyId = ref('')
+
 let offFailed: (() => void) | null = null
 
 function bindOAuthEvents() {
@@ -53,6 +69,7 @@ function bindOAuthEvents() {
   offFailed = onWailsEvent('oauth:failed', (payload: unknown) => {
     const p = payload as { error?: string } | null
     oauthWaiting.value = false
+    oauthStartingMode.value = null
     oauthError.value = p?.error || 'OAuth 授权失败'
   })
 }
@@ -62,12 +79,20 @@ function unbindOAuthEvents() {
   offFailed = null
 }
 
-// 接收 appStore 全局 OAuth 入库完成通知，自动收起弹窗（避免与全局监听重复弹 Toast，同时确保提前关窗也不丢账号）
+// 等待 OAuth 回调期间若用户切换了目标分组，实时同步至后端会话
+watch(targetGroupId, (nextGroupId) => {
+  if (oauthWaiting.value) {
+    void api.setOAuthTargetGroup(nextGroupId).catch(() => {})
+  }
+})
+
+// 接收 appStore 全局 OAuth 入库完成通知，自动收起弹窗（若账号需网页验证，appStore 会自动展开右侧详情抽屉并提示）
 watch(
   () => appStore.oauthCompletedSeq,
   () => {
     if (!props.open) return
     oauthWaiting.value = false
+    oauthStartingMode.value = null
     oauthAuthUrl.value = ''
     oauthRedirectUri.value = ''
     oauthCallbackInput.value = ''
@@ -84,6 +109,8 @@ watch(
       tokenError.value = ''
       tokenSummary.value = ''
       oauthCallbackInput.value = ''
+      pendingVerifyAccounts.value = []
+      copiedVerifyId.value = ''
       // 若当前正筛选某个自定义分组，默认归入该分组
       if (
         appStore.selectedGroupFilter !== 'all' &&
@@ -98,6 +125,7 @@ watch(
       unbindOAuthEvents()
       if (oauthWaiting.value) {
         oauthWaiting.value = false
+        oauthStartingMode.value = null
         oauthAuthUrl.value = ''
         void api.cancelOAuthLogin().catch(() => {})
       }
@@ -109,21 +137,64 @@ onBeforeUnmount(() => {
   unbindOAuthEvents()
 })
 
-async function startOAuth() {
+// 方式 A：启动本地回调监听并直接打开系统默认浏览器跳转网页验证
+async function startOAuthAndOpen() {
+  if (oauthStartingMode.value) return
   oauthError.value = ''
-  oauthWaiting.value = true
+  oauthStartingMode.value = 'open'
   try {
     const sess = await api.startOAuthLogin(targetGroupId.value)
     oauthAuthUrl.value = sess.authUrl
     oauthRedirectUri.value = sess.redirectUri
+    oauthWaiting.value = true
   } catch (err) {
     oauthWaiting.value = false
+    oauthError.value = extractErrorMessage(err)
+  } finally {
+    oauthStartingMode.value = null
+  }
+}
+
+// 方式 B：仅启动本地回调监听并直接复制授权链接（不自动弹系统浏览器，便于粘贴到指纹浏览器或无痕窗口）
+async function prepareAndCopyOAuthUrl() {
+  if (oauthStartingMode.value) return
+  oauthError.value = ''
+  oauthStartingMode.value = 'copy'
+  try {
+    const sess = await api.prepareOAuthLogin(targetGroupId.value)
+    oauthAuthUrl.value = sess.authUrl
+    oauthRedirectUri.value = sess.redirectUri
+    oauthWaiting.value = true
+    if (await copyToClipboard(sess.authUrl)) {
+      oauthUrlCopied.value = true
+      appStore.notify('已复制授权链接，请粘贴至浏览器完成网页验证', 'success', 2800)
+      window.setTimeout(() => {
+        oauthUrlCopied.value = false
+      }, 2000)
+    } else {
+      appStore.notify('已生成授权链接，请手动点击复制授权链接', 'info')
+    }
+  } catch (err) {
+    oauthWaiting.value = false
+    oauthError.value = extractErrorMessage(err)
+  } finally {
+    oauthStartingMode.value = null
+  }
+}
+
+// 在等待回调期间直接打开当前会话的授权链接（不重新生成覆盖已复制的链接）
+async function openCurrentOAuthUrl() {
+  if (!oauthAuthUrl.value) return
+  try {
+    await api.openExternalURL(oauthAuthUrl.value)
+  } catch (err) {
     oauthError.value = extractErrorMessage(err)
   }
 }
 
 async function cancelOAuth() {
   oauthWaiting.value = false
+  oauthStartingMode.value = null
   oauthAuthUrl.value = ''
   oauthRedirectUri.value = ''
   oauthCallbackInput.value = ''
@@ -144,10 +215,34 @@ async function submitManualCallback() {
 }
 
 async function copyAuthUrl() {
+  if (!oauthAuthUrl.value) return
   if (await copyToClipboard(oauthAuthUrl.value)) {
     oauthUrlCopied.value = true
+    appStore.notify('已复制授权链接', 'success', 2000)
     window.setTimeout(() => {
       oauthUrlCopied.value = false
+    }, 1800)
+  }
+}
+
+async function openVerifyUrl(url: string) {
+  if (!url) return
+  try {
+    await api.openExternalURL(url)
+  } catch (err) {
+    appStore.notify(`打开验证链接失败：${extractErrorMessage(err)}`, 'error')
+  }
+}
+
+async function copyVerifyUrl(accountId: string, url: string) {
+  if (!url) return
+  if (await copyToClipboard(url)) {
+    copiedVerifyId.value = accountId
+    appStore.notify('已复制网页验证链接', 'success', 2000)
+    window.setTimeout(() => {
+      if (copiedVerifyId.value === accountId) {
+        copiedVerifyId.value = ''
+      }
     }, 1800)
   }
 }
@@ -155,6 +250,7 @@ async function copyAuthUrl() {
 async function handleImportLocal() {
   localImporting.value = true
   localError.value = ''
+  pendingVerifyAccounts.value = []
   try {
     const acc = await api.importFromLocal(targetGroupId.value)
     await appStore.reloadAccounts()
@@ -169,11 +265,14 @@ async function handleImportLocal() {
       detectedAt: Math.floor(Date.now() / 1000),
     }
     appStore.activeDetailAccountId = acc.id
-    appStore.notify(
-      `已从本机导入账号 ${maskEmail(acc.email, appStore.settings.privacyMode)}`,
-      'success',
-    )
-    emit('close')
+    const emailLabel = maskEmail(acc.email, appStore.settings.privacyMode)
+    if (isAccountValidationRequired(acc)) {
+      pendingVerifyAccounts.value = [acc]
+      appStore.notify(`已导入账号 ${emailLabel}，该账号需完成网页验证`, 'warning', 4500)
+    } else {
+      appStore.notify(`已从本机导入账号 ${emailLabel}`, 'success')
+      emit('close')
+    }
   } catch (err) {
     localError.value = extractErrorMessage(err)
   } finally {
@@ -196,15 +295,28 @@ async function handleImportTokens() {
   tokenImporting.value = true
   tokenError.value = ''
   tokenSummary.value = ''
+  pendingVerifyAccounts.value = []
   try {
     const res = await api.importRefreshTokens(tokenInput.value.trim(), targetGroupId.value)
     await appStore.reloadAccounts()
-    const okCount = res.imported?.length ?? 0
+    const importedList = res.imported ?? []
+    const okCount = importedList.length
     const failCount = res.failed?.length ?? 0
+    const verifyList = importedList.filter((acc) => isAccountValidationRequired(acc))
+    pendingVerifyAccounts.value = verifyList
+
     if (failCount === 0 && okCount > 0) {
-      appStore.notify(`成功导入 ${okCount} 个账号`, 'success')
       tokenInput.value = ''
-      emit('close')
+      if (verifyList.length > 0) {
+        appStore.notify(
+          `成功导入 ${okCount} 个账号，其中 ${verifyList.length} 个需完成网页验证`,
+          'warning',
+          4800,
+        )
+      } else {
+        appStore.notify(`成功导入 ${okCount} 个账号`, 'success')
+        emit('close')
+      }
     } else if (okCount > 0) {
       tokenSummary.value = `成功导入 ${okCount} 个，失败 ${failCount} 个：${res.failed.map((f) => `${formatFailedSource(f.source)}(${f.error})`).join('；')}`
       appStore.notify(`部分导入成功（${okCount} 成功 / ${failCount} 失败）`, 'warning')
@@ -223,8 +335,8 @@ async function handleImportTokens() {
   <BaseModal
     :open="open"
     title="添加反重力账号"
-    subtitle="支持 Google OAuth 授权、读取本机已登录账号或批量导入 Refresh Token / JSON"
-    width-class="w-[540px]"
+    subtitle="支持网页验证授权 / 复制授权链接、读取本机账号或批量导入 Refresh Token / JSON"
+    width-class="w-[548px]"
     :prevent-close="localImporting || tokenImporting"
     :close-on-outside="!(localImporting || tokenImporting)"
     @close="emit('close')"
@@ -298,32 +410,55 @@ async function handleImportTokens() {
           style="border-color: var(--border-subtle); background-color: var(--bg-app)"
         >
           <p class="text-xs leading-relaxed" style="color: var(--text-secondary)">
-            点击下方按钮将在系统默认浏览器打开 Google 授权页。登录并同意权限后，浏览器会自动回调本地端口完成入库。
+            可直接点击「网页验证授权」跳转到浏览器完成登录，或点击「复制授权链接」粘贴至无痕窗口 / 指纹浏览器完成授权回调。
           </p>
 
-          <div v-if="!oauthWaiting" class="flex items-center gap-2">
+          <div v-if="!oauthWaiting" class="flex items-center flex-wrap gap-2.5">
             <button
               type="button"
-              class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium text-white cursor-pointer"
+              :disabled="Boolean(oauthStartingMode)"
+              class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium text-white cursor-pointer transition-opacity hover:opacity-95 disabled:opacity-60"
               style="background-color: var(--accent)"
-              @click="startOAuth"
+              @click="startOAuthAndOpen"
             >
-              <ExternalLink class="w-3.5 h-3.5" />
-              打开浏览器开始授权
+              <Loader2 v-if="oauthStartingMode === 'open'" class="w-3.5 h-3.5 animate-spin" />
+              <ExternalLink v-else class="w-3.5 h-3.5" />
+              <span>网页验证授权</span>
+            </button>
+
+            <button
+              type="button"
+              :disabled="Boolean(oauthStartingMode)"
+              class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-60"
+              style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
+              @click="prepareAndCopyOAuthUrl"
+            >
+              <Loader2 v-if="oauthStartingMode === 'copy'" class="w-3.5 h-3.5 animate-spin" />
+              <Copy v-else class="w-3.5 h-3.5" />
+              <span>复制授权链接</span>
             </button>
           </div>
 
           <div v-else class="space-y-3">
-            <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center justify-between flex-wrap gap-2">
               <span class="inline-flex items-center gap-2 text-xs font-medium" style="color: var(--accent)">
                 <Loader2 class="w-3.5 h-3.5 animate-spin" />
-                正在等待浏览器回调...
+                正在等待网页验证回调...
               </span>
-              <div class="flex items-center gap-1.5">
+              <div class="flex items-center flex-wrap gap-1.5">
                 <button
                   type="button"
-                  class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] cursor-pointer hover:bg-[var(--bg-hover)]"
-                  style="border-color: var(--border-strong); color: var(--text-secondary); background-color: var(--bg-surface)"
+                  class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium text-white cursor-pointer transition-opacity hover:opacity-95"
+                  style="background-color: var(--accent)"
+                  @click="openCurrentOAuthUrl"
+                >
+                  <ExternalLink class="w-3 h-3" />
+                  网页验证
+                </button>
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+                  style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
                   @click="copyAuthUrl"
                 >
                   <Check v-if="oauthUrlCopied" class="w-3 h-3" style="color: var(--success)" />
@@ -332,7 +467,7 @@ async function handleImportTokens() {
                 </button>
                 <button
                   type="button"
-                  class="px-2.5 py-1 rounded-md border text-[11px] cursor-pointer hover:bg-[var(--bg-hover)]"
+                  class="px-2.5 py-1 rounded-md border text-[11px] cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
                   style="border-color: var(--border-strong); color: var(--text-secondary); background-color: var(--bg-surface)"
                   @click="cancelOAuth"
                 >
@@ -341,10 +476,23 @@ async function handleImportTokens() {
               </div>
             </div>
 
+            <!-- 授权链接只读预览栏，方便确认或直接复制 -->
+            <div v-if="oauthAuthUrl" class="flex items-center gap-1.5">
+              <input
+                :value="oauthAuthUrl"
+                type="text"
+                readonly
+                aria-label="当前生成的 OAuth 授权链接"
+                class="w-full px-2.5 py-1.5 text-[11px] rounded-lg border font-mono-num select-all"
+                style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-secondary)"
+                @click="($event.target as HTMLInputElement).select()"
+              />
+            </div>
+
             <!-- 手动粘贴回调 URL 兜底 -->
             <div class="pt-2 border-t space-y-1.5" style="border-color: var(--border-subtle)">
               <label for="manual-callback-url" class="block text-[11px]" style="color: var(--text-muted)">
-                若浏览器未能自动跳回，可复制地址栏中的完整回调 URL 粘贴至此处：
+                若跨环境或浏览器未能自动跳回，可复制地址栏中的完整回调 URL 粘贴至此处：
               </label>
               <div class="flex gap-2">
                 <input
@@ -357,7 +505,7 @@ async function handleImportTokens() {
                 />
                 <button
                   type="button"
-                  class="px-3 py-1.5 text-xs font-medium rounded-lg text-white cursor-pointer"
+                  class="px-3 py-1.5 text-xs font-medium rounded-lg text-white cursor-pointer shrink-0"
                   style="background-color: var(--accent)"
                   @click="submitManualCallback"
                 >
@@ -424,7 +572,16 @@ async function handleImportTokens() {
           {{ tokenSummary }}
         </p>
 
-        <div class="flex justify-end">
+        <div class="flex justify-end gap-2">
+          <button
+            v-if="pendingVerifyAccounts.length > 0"
+            type="button"
+            class="px-3.5 py-2 rounded-lg border text-xs font-medium cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+            style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
+            @click="emit('close')"
+          >
+            完成并关闭
+          </button>
           <button
             type="button"
             :disabled="tokenImporting"
@@ -435,6 +592,66 @@ async function handleImportTokens() {
             <Loader2 v-if="tokenImporting" class="w-3.5 h-3.5 animate-spin" />
             <span>{{ tokenImporting ? '验证并导入中...' : '开始导入' }}</span>
           </button>
+        </div>
+      </div>
+
+      <!-- 导入后检测到需网页验证的账号快捷处理面板 -->
+      <div
+        v-if="pendingVerifyAccounts.length > 0 && activeTab !== 'oauth'"
+        class="p-3.5 rounded-xl border space-y-2.5"
+        style="background-color: var(--danger-soft); border-color: rgba(239, 68, 68, 0.3)"
+      >
+        <div class="flex items-center justify-between gap-2">
+          <span class="inline-flex items-center gap-1.5 text-xs font-semibold" style="color: var(--danger-text)">
+            <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
+            <span>检测到 {{ pendingVerifyAccounts.length }} 个已导入账号需完成网页验证</span>
+          </span>
+          <button
+            v-if="activeTab === 'local'"
+            type="button"
+            class="text-[11px] underline cursor-pointer"
+            style="color: var(--danger-text)"
+            @click="emit('close')"
+          >
+            关闭弹窗
+          </button>
+        </div>
+
+        <div class="space-y-1.5 max-h-36 overflow-y-auto custom-scroll pr-0.5">
+          <div
+            v-for="acc in pendingVerifyAccounts"
+            :key="acc.id"
+            class="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-xs"
+            style="background-color: var(--bg-surface); border-color: var(--border-subtle)"
+          >
+            <span class="font-medium truncate min-w-0" style="color: var(--text-primary)">
+              {{ maskEmail(acc.email, appStore.settings.privacyMode) }}
+            </span>
+            <div v-if="getAccountValidationUrl(acc)" class="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                class="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-white cursor-pointer"
+                style="background-color: var(--danger)"
+                @click="openVerifyUrl(getAccountValidationUrl(acc))"
+              >
+                <ExternalLink class="w-3 h-3" />
+                网页验证
+              </button>
+              <button
+                type="button"
+                class="inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] cursor-pointer hover:bg-[var(--bg-hover)]"
+                style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
+                @click="copyVerifyUrl(acc.id, getAccountValidationUrl(acc))"
+              >
+                <Check v-if="copiedVerifyId === acc.id" class="w-3 h-3" style="color: var(--success)" />
+                <Copy v-else class="w-3 h-3" />
+                {{ copiedVerifyId === acc.id ? '已复制' : '复制链接' }}
+              </button>
+            </div>
+            <span v-else class="text-[11px] shrink-0" style="color: var(--danger-text)">
+              请在详情中查看
+            </span>
+          </div>
         </div>
       </div>
     </div>

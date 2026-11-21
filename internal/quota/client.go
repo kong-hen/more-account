@@ -172,7 +172,7 @@ func extractCredits(t *rawTier) []model.CreditInfo {
 	return out
 }
 
-func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, preferredProjectID string) (string, string, []model.CreditInfo, bool) {
+func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, preferredProjectID string) (string, string, []model.CreditInfo, *model.QuotaErrorInfo, bool) {
 	payload := map[string]any{
 		"metadata": buildCloudCodeMetadata(preferredProjectID),
 		"mode":     "FULL_ELIGIBILITY_CHECK",
@@ -184,7 +184,7 @@ func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, p
 	rawBody, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/"+LoadCodeAssistPath, bytes.NewReader(rawBody))
 	if err != nil {
-		return "", "", nil, false
+		return "", "", nil, nil, false
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -193,21 +193,25 @@ func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, p
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return "", "", nil, false
+		return "", "", nil, nil, false
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", nil, false
-	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return "", "", nil, false
+		return "", "", nil, nil, false
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errInfo := ParseGoogleAPIError(resp.StatusCode, string(body))
+		if isExplicitQuotaDenial(errInfo) {
+			return "", "", nil, &errInfo, false
+		}
+		return "", "", nil, nil, false
 	}
 
 	var parsed loadCodeAssistResp
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", "", nil, false
+		return "", "", nil, nil, false
 	}
 
 	var tierID string
@@ -223,10 +227,10 @@ func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, p
 	}
 	projectID := extractProjectID(parsed.Project)
 	if projectID != "" {
-		return projectID, tierID, credits, true
+		return projectID, tierID, credits, nil, true
 	}
 
-	// 若账号尚未分配云项目，尝试执行 onboardUser 获取默认项目 ID。
+	// 若账号尚未分配云项目，尝试执行 onboardUser 获取默认项目 ID（同时保留可能返回的网页验证链接）。
 	var onboardTier string
 	for _, t := range parsed.AllowedTiers {
 		if t.IsDefault && strings.TrimSpace(t.ID) != "" {
@@ -240,16 +244,21 @@ func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, p
 	if onboardTier == "" {
 		onboardTier = tierID
 	}
+	var onboardDenial *model.QuotaErrorInfo
 	if onboardTier != "" {
-		if proj, err := c.tryOnboardUser(ctx, baseURL, accessToken, onboardTier, preferredProjectID); err == nil && proj != "" {
-			return proj, tierID, credits, true
+		proj, obErrInfo, obErr := c.tryOnboardUser(ctx, baseURL, accessToken, onboardTier, preferredProjectID)
+		if obErr == nil && proj != "" {
+			return proj, tierID, credits, nil, true
+		}
+		if obErrInfo != nil && isExplicitQuotaDenial(*obErrInfo) {
+			onboardDenial = obErrInfo
 		}
 	}
 
-	return "", tierID, credits, true
+	return "", tierID, credits, onboardDenial, true
 }
 
-func (c *Client) tryOnboardUser(ctx context.Context, baseURL, accessToken, tierID, projectHint string) (string, error) {
+func (c *Client) tryOnboardUser(ctx context.Context, baseURL, accessToken, tierID, projectHint string) (string, *model.QuotaErrorInfo, error) {
 	payload := map[string]any{
 		"tierId":   tierID,
 		"metadata": buildCloudCodeMetadata(projectHint),
@@ -261,7 +270,7 @@ func (c *Client) tryOnboardUser(ctx context.Context, baseURL, accessToken, tierI
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/"+OnboardUserPath, bytes.NewReader(rawBody))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -269,66 +278,68 @@ func (c *Client) tryOnboardUser(ctx context.Context, baseURL, accessToken, tierI
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	_ = resp.Body.Close()
 	if readErr != nil {
-		return "", readErr
+		return "", nil, readErr
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("onboardUser 返回 HTTP %d", resp.StatusCode)
+		errInfo := ParseGoogleAPIError(resp.StatusCode, string(body))
+		return "", &errInfo, fmt.Errorf("onboardUser 返回 HTTP %d", resp.StatusCode)
 	}
 
 	var op onboardOpResp
 	if err := json.Unmarshal(body, &op); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	for polls := 0; polls < 8; polls++ {
 		if op.Done {
 			if op.Response != nil {
-				return extractProjectID(op.Response.Project), nil
+				return extractProjectID(op.Response.Project), nil, nil
 			}
-			return "", nil
+			return "", nil, nil
 		}
 		opPath, ok := sanitizeOperationPath(op.Name)
 		if !ok {
-			return "", nil
+			return "", nil, nil
 		}
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", nil, ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
 
 		pollReq, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1internal/"+opPath, nil)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		pollReq.Header.Set("Authorization", "Bearer "+accessToken)
 		pollReq.Header.Set("User-Agent", loadCodeAssistUserAgent())
 
 		pollResp, err := c.httpClient().Do(pollReq)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		pollBody, pollReadErr := io.ReadAll(io.LimitReader(pollResp.Body, 1<<20))
 		_ = pollResp.Body.Close()
 		if pollReadErr != nil {
-			return "", pollReadErr
+			return "", nil, pollReadErr
 		}
 		if pollResp.StatusCode < 200 || pollResp.StatusCode >= 300 {
-			return "", fmt.Errorf("onboardUser 轮询返回 HTTP %d", pollResp.StatusCode)
+			errInfo := ParseGoogleAPIError(pollResp.StatusCode, string(pollBody))
+			return "", &errInfo, fmt.Errorf("onboardUser 轮询返回 HTTP %d", pollResp.StatusCode)
 		}
 		// 每次轮询使用全新的目标结构体，防止旧字段残留。
 		var nextOp onboardOpResp
 		if err := json.Unmarshal(pollBody, &nextOp); err != nil {
-			return "", err
+			return "", nil, err
 		}
 		op = nextOp
 	}
-	return "", nil
+	return "", nil, nil
 }
 
 func sanitizeOperationPath(raw string) (string, bool) {
@@ -406,12 +417,34 @@ func (c *Client) fetchQuotaSummary(ctx context.Context, baseURL, accessToken str
 	return nil, nil, false
 }
 
+// mergeQuotaErrorInfo 在主错误缺少验证链接或原因时，从前置接口（如 loadCodeAssist）捕获的错误中补齐。
+func mergeQuotaErrorInfo(primary, fallback *model.QuotaErrorInfo) *model.QuotaErrorInfo {
+	if primary == nil {
+		return fallback
+	}
+	if fallback == nil {
+		return primary
+	}
+	merged := *primary
+	if strings.TrimSpace(merged.ValidationURL) == "" && strings.TrimSpace(fallback.ValidationURL) != "" {
+		merged.ValidationURL = fallback.ValidationURL
+	}
+	if strings.TrimSpace(merged.Reason) == "" && strings.TrimSpace(fallback.Reason) != "" {
+		merged.Reason = fallback.Reason
+	}
+	if (strings.TrimSpace(merged.Message) == "" || strings.EqualFold(merged.Message, "Permission denied")) &&
+		strings.TrimSpace(fallback.Message) != "" {
+		merged.Message = fallback.Message
+	}
+	return &merged
+}
+
 // FetchQuota 拉取单个账号的订阅、AI 积分、5h/周共享配额桶及所有模型配额。
 func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email string) (*FetchResult, error) {
 	ccCtx := CloudCodeContextFromToken(token)
 	baseURL := c.baseURL(ccCtx)
 
-	resolvedProject, tierID, credits, tierLoaded := c.loadProjectAndTier(ctx, baseURL, token.AccessToken, ccCtx.PreferredProjectID)
+	resolvedProject, tierID, credits, assistErr, tierLoaded := c.loadProjectAndTier(ctx, baseURL, token.AccessToken, ccCtx.PreferredProjectID)
 	effectiveProject := resolvedProject
 	if effectiveProject == "" {
 		effectiveProject = ccCtx.PreferredProjectID
@@ -472,8 +505,9 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 		var modelsErr *model.QuotaErrorInfo
 
 		if resp.StatusCode == http.StatusForbidden {
-			errInfo := ParseGoogleAPIError(resp.StatusCode, string(body))
-			if isExplicitQuotaDenial(errInfo) {
+			parsedErr := ParseGoogleAPIError(resp.StatusCode, string(body))
+			combined := mergeQuotaErrorInfo(&parsedErr, assistErr)
+			if combined != nil && isExplicitQuotaDenial(*combined) {
 				q := model.QuotaData{
 					Models:           []model.ModelQuota{},
 					LastUpdated:      time.Now().Unix(),
@@ -486,13 +520,13 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 				}
 				return &FetchResult{
 					Quota:      q,
-					Error:      &errInfo,
+					Error:      combined,
 					ProjectID:  effectiveProject,
 					TierLoaded: tierLoaded,
 				}, nil
 			}
 			// 非明确封禁/验证的 403 继续尝试拉取配额摘要桶
-			modelsErr = &errInfo
+			modelsErr = combined
 		} else if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 			lastErr = fmt.Errorf("配额接口暂时不可用 (HTTP %d)", resp.StatusCode)
 			if attempt < 3 {
@@ -505,8 +539,27 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 			}
 			return nil, lastErr
 		} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			errInfo := ParseGoogleAPIError(resp.StatusCode, string(body))
-			return nil, fmt.Errorf("查询配额失败 (HTTP %d): %s", resp.StatusCode, errInfo.Message)
+			parsedErr := ParseGoogleAPIError(resp.StatusCode, string(body))
+			combined := mergeQuotaErrorInfo(&parsedErr, assistErr)
+			if combined != nil && isExplicitQuotaDenial(*combined) {
+				q := model.QuotaData{
+					Models:           []model.ModelQuota{},
+					LastUpdated:      time.Now().Unix(),
+					IsForbidden:      true,
+					SubscriptionTier: NormalizeSubscriptionTier(tierID),
+					TierID:           strings.TrimSpace(tierID),
+					Credits:          credits,
+					IsGcpTos:         isGcpCopy,
+					ProjectID:        effectiveProject,
+				}
+				return &FetchResult{
+					Quota:      q,
+					Error:      combined,
+					ProjectID:  effectiveProject,
+					TierLoaded: tierLoaded,
+				}, nil
+			}
+			return nil, fmt.Errorf("查询配额失败 (HTTP %d): %s", resp.StatusCode, parsedErr.Message)
 		} else {
 			if err := json.Unmarshal(body, &modelsResp); err != nil {
 				return nil, fmt.Errorf("解析配额响应失败: %w", err)
@@ -520,12 +573,15 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 
 		var finalErr *model.QuotaErrorInfo
 		if summaryErr != nil && isExplicitQuotaDenial(*summaryErr) {
-			finalErr = summaryErr
+			finalErr = mergeQuotaErrorInfo(summaryErr, assistErr)
 			if modelsErr != nil {
 				quotaData.IsForbidden = true
 			}
 		} else if modelsErr != nil && len(quotaData.SummaryBuckets) == 0 && len(quotaData.Models) == 0 {
-			finalErr = modelsErr
+			finalErr = mergeQuotaErrorInfo(modelsErr, assistErr)
+			quotaData.IsForbidden = true
+		} else if assistErr != nil && isExplicitQuotaDenial(*assistErr) && len(quotaData.SummaryBuckets) == 0 && len(quotaData.Models) == 0 {
+			finalErr = assistErr
 			quotaData.IsForbidden = true
 		}
 

@@ -16,6 +16,7 @@ import {
   UserPlus,
   AlertTriangle,
   BatteryLow,
+  Globe,
 } from 'lucide-vue-next'
 import AccountCard from '@/components/accounts/AccountCard.vue'
 import AccountTable from '@/components/accounts/AccountTable.vue'
@@ -294,6 +295,23 @@ const refreshButtonTooltip = computed(() => {
               >
                 <span class="flex items-center gap-2 text-xs" style="color: var(--text-primary)">
                   <input
+                    v-model="appStore.onlyValidationRequired"
+                    type="checkbox"
+                    class="rounded accent-[var(--accent)]"
+                  />
+                  <Globe class="w-3.5 h-3.5" style="color: var(--danger)" />
+                  <span>仅看需网页验证</span>
+                </span>
+                <span class="text-[11px] font-mono-num" style="color: var(--text-muted)">
+                  {{ appStore.validationRequiredCount }}
+                </span>
+              </label>
+
+              <label
+                class="flex items-center justify-between gap-2 p-2 rounded-lg cursor-pointer hover:bg-[var(--bg-hover)]"
+              >
+                <span class="flex items-center gap-2 text-xs" style="color: var(--text-primary)">
+                  <input
                     v-model="appStore.onlyAbnormal"
                     type="checkbox"
                     class="rounded accent-[var(--accent)]"
@@ -431,6 +449,17 @@ const refreshButtonTooltip = computed(() => {
       >
         低配额 ≤{{ appStore.settings.lowQuotaThreshold }}%
         <button type="button" class="cursor-pointer" @click="appStore.onlyLowQuota = false">
+          <X class="w-3 h-3" />
+        </button>
+      </span>
+
+      <span
+        v-if="appStore.onlyValidationRequired"
+        class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium"
+        style="background-color: var(--danger-soft); color: var(--danger-text)"
+      >
+        需网页验证
+        <button type="button" class="cursor-pointer" @click="appStore.onlyValidationRequired = false">
           <X class="w-3 h-3" />
         </button>
       </span>

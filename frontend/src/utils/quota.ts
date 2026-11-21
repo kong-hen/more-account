@@ -555,10 +555,39 @@ export function getMinQuotaPercentage(account: Account, nowMs = Date.now()): num
   return min
 }
 
+// 提取账号安全校验后的网页验证链接（仅允许 http / https）。
+export function getAccountValidationUrl(account: Account | null | undefined): string {
+  const raw = (account?.quotaError?.validationUrl ?? '').trim()
+  if (!raw) return ''
+  try {
+    const parsed = new URL(raw)
+    if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.hostname) {
+      return parsed.toString()
+    }
+  } catch {
+    // 忽略非法 URL
+  }
+  return ''
+}
+
+// 判断账号是否需要完成 Google 网页验证。
+export function isAccountValidationRequired(account: Account | null | undefined): boolean {
+  if (!account) return false
+  if (account.quotaError?.reason === 'VALIDATION_REQUIRED') return true
+  if (getAccountValidationUrl(account)) return true
+  const msg = (account.quotaError?.message ?? '').toLowerCase()
+  return (
+    msg.includes('verify your account') ||
+    msg.includes('validation required') ||
+    msg.includes('account verification')
+  )
+}
+
 // 判断账号是否处于「异常」状态（禁用、403 封禁、或存在配额/验证报错）。
 export function isAccountAbnormal(account: Account): boolean {
   if (account.disabled) return true
   if (account.quota?.isForbidden) return true
+  if (isAccountValidationRequired(account)) return true
   if (account.quotaError && account.quotaError.message) return true
   return false
 }

@@ -542,8 +542,21 @@ func (s *Service) runSingleAccountWakeup(
 	if reqErr != nil {
 		item.Success = false
 		item.ErrorMessage = reqErr.Error()
-		if errInfo != nil && errInfo.ValidationURL != "" {
-			item.ValidationURL = errInfo.ValidationURL
+		if errInfo != nil {
+			if errInfo.ValidationURL != "" {
+				item.ValidationURL = errInfo.ValidationURL
+			}
+			// 若唤醒时检测到账号需要网页验证或明确配额拒绝，同步回写至账号 QuotaError，方便工作台直接点击验证或复制链接
+			if errInfo.ValidationURL != "" || errInfo.Reason == "VALIDATION_REQUIRED" || errInfo.Reason == "SUBSCRIPTION_REQUIRED" {
+				errCopy := *errInfo
+				_, _ = s.store.UpdateAccount(acc.ID, func(target *model.Account) error {
+					target.QuotaError = &errCopy
+					if errCopy.Code == http.StatusForbidden && target.Quota != nil {
+						target.Quota.IsForbidden = true
+					}
+					return nil
+				})
+			}
 		}
 		_ = s.store.AppendWakeupHistory(item)
 		return &item, reqErr

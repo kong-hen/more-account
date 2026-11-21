@@ -12,6 +12,8 @@ import {
   XCircle,
   Power,
   ExternalLink,
+  Copy,
+  Check,
   Loader2,
   History,
   ListChecks,
@@ -21,7 +23,7 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
 import { api, extractErrorMessage } from '@/services/api'
-import { maskEmail } from '@/utils/privacy'
+import { copyToClipboard, maskEmail } from '@/utils/privacy'
 import { formatDateTime } from '@/utils/quota'
 import type { WakeupHistoryItem, WakeupTask } from '@/types/models'
 
@@ -35,6 +37,7 @@ const deletingTask = ref<WakeupTask | null>(null)
 const deleting = ref(false)
 const clearHistoryConfirm = ref(false)
 const clearingHistory = ref(false)
+const copiedHistoryId = ref('')
 const validAccountIdSet = computed(() => new Set(appStore.accounts.map((a) => a.id)))
 
 function validTaskAccountCount(task: WakeupTask): number {
@@ -113,6 +116,19 @@ async function openUrl(url: string) {
     await api.openExternalURL(url)
   } catch (err) {
     appStore.notify(`打开验证链接失败：${extractErrorMessage(err)}`, 'error')
+  }
+}
+
+async function copyHistoryUrl(itemId: string, url: string) {
+  if (!url) return
+  if (await copyToClipboard(url)) {
+    copiedHistoryId.value = itemId
+    appStore.notify('已复制网页验证链接', 'success', 2000)
+    window.setTimeout(() => {
+      if (copiedHistoryId.value === itemId) {
+        copiedHistoryId.value = ''
+      }
+    }, 1800)
   }
 }
 </script>
@@ -406,16 +422,27 @@ async function openUrl(url: string) {
                         <XCircle class="w-3.5 h-3.5 shrink-0" />
                         <span class="truncate">{{ item.errorMessage || '执行失败' }}</span>
                       </div>
-                      <button
-                        v-if="item.validationUrl"
-                        type="button"
-                        class="inline-flex items-center gap-1 text-[11px] underline cursor-pointer"
-                        style="color: var(--accent)"
-                        @click="openUrl(item.validationUrl!)"
-                      >
-                        <ExternalLink class="w-3 h-3" />
-                        打开验证链接
-                      </button>
+                      <div v-if="item.validationUrl" class="flex items-center gap-2.5 pt-0.5">
+                        <button
+                          type="button"
+                          class="inline-flex items-center gap-1 text-[11px] font-medium underline cursor-pointer"
+                          style="color: var(--accent)"
+                          @click="openUrl(item.validationUrl!)"
+                        >
+                          <ExternalLink class="w-3 h-3" />
+                          网页验证
+                        </button>
+                        <button
+                          type="button"
+                          class="inline-flex items-center gap-1 text-[11px] underline cursor-pointer"
+                          style="color: var(--text-secondary)"
+                          @click="copyHistoryUrl(item.id, item.validationUrl!)"
+                        >
+                          <Check v-if="copiedHistoryId === item.id" class="w-3 h-3" style="color: var(--success)" />
+                          <Copy v-else class="w-3 h-3" />
+                          {{ copiedHistoryId === item.id ? '已复制' : '复制链接' }}
+                        </button>
+                      </div>
                     </div>
                   </td>
                   <td class="py-3 px-4 text-right font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-muted)">

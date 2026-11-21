@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 紧凑数据表格视图：适合账号数量较多时高效率浏览、批量多选、默认排序拖拽重排与快速切号。
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import {
   RefreshCw,
   ArrowRightLeft,
@@ -8,15 +8,20 @@ import {
   ShieldCheck,
   Check,
   GripVertical,
+  ExternalLink,
+  Copy,
 } from 'lucide-vue-next'
 import { useAppStore } from '@/stores/appStore'
-import { maskEmail } from '@/utils/privacy'
+import { api, extractErrorMessage } from '@/services/api'
+import { copyToClipboard, maskEmail } from '@/utils/privacy'
 import {
   formatResetCountdown,
+  getAccountValidationUrl,
   getEarliestResetTime,
   getQuotaTone,
   getTierLabel,
   isAccountAbnormal,
+  isAccountValidationRequired,
   summarizeQuotaCategories,
   type QuotaCategorySummary,
 } from '@/utils/quota'
@@ -47,17 +52,43 @@ const allSelected = computed(
     props.accounts.every((a) => appStore.selectedAccountIds.includes(a.id)),
 )
 
-// 预先计算每行账号的配额分类、异常态、等级与最近重置时间，避免模板渲染期重复多次计算
+const copiedVerifyAccountId = ref('')
+
+// 预先计算每行账号的配额分类、异常态、验证链接、等级与最近重置时间，避免模板渲染期重复多次计算
 const tableRows = computed(() =>
   props.accounts.map((acc) => ({
     account: acc,
     abnormal: isAccountAbnormal(acc),
+    validationRequired: isAccountValidationRequired(acc),
+    validationUrl: getAccountValidationUrl(acc),
     tier: getTierLabel(acc),
     categories: summarizeQuotaCategories(acc, appStore.nowMs),
     earliestReset: getEarliestResetTime(acc, appStore.nowMs),
     group: acc.groupId ? (appStore.groupMap.get(acc.groupId) ?? null) : null,
   })),
 )
+
+async function openVerifyUrl(url: string) {
+  if (!url) return
+  try {
+    await api.openExternalURL(url)
+  } catch (err) {
+    appStore.notify(`打开验证链接失败：${extractErrorMessage(err)}`, 'error')
+  }
+}
+
+async function copyVerifyUrl(accountId: string, url: string) {
+  if (!url) return
+  if (await copyToClipboard(url)) {
+    copiedVerifyAccountId.value = accountId
+    appStore.notify('已复制网页验证链接', 'success', 2000)
+    window.setTimeout(() => {
+      if (copiedVerifyAccountId.value === accountId) {
+        copiedVerifyAccountId.value = ''
+      }
+    }, 1800)
+  }
+}
 
 function toneDotColor(percentage: number): string {
   const tone = getQuotaTone(percentage)
@@ -227,9 +258,32 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
             </td>
 
             <td class="py-3 px-2.5">
-              <div v-if="row.abnormal" class="inline-flex items-center gap-1 text-[11.5px] font-medium whitespace-nowrap" style="color: var(--danger-text)">
-                <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
-                <span>{{ row.account.disabled ? '令牌失效' : '状态异常' }}</span>
+              <div v-if="row.abnormal" class="flex items-center flex-wrap gap-2">
+                <span class="inline-flex items-center gap-1 text-[11.5px] font-medium whitespace-nowrap" style="color: var(--danger-text)">
+                  <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
+                  <span>{{ row.account.disabled ? '令牌失效' : row.validationRequired ? '需网页验证' : '状态异常' }}</span>
+                </span>
+                <div v-if="row.validationUrl" class="inline-flex items-center gap-1" @click.stop>
+                  <button
+                    type="button"
+                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium text-white cursor-pointer"
+                    style="background-color: var(--danger)"
+                    @click="openVerifyUrl(row.validationUrl)"
+                  >
+                    <ExternalLink class="w-3 h-3" />
+                    <span>网页验证</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] cursor-pointer hover:bg-[var(--bg-hover)]"
+                    style="border-color: rgba(239, 68, 68, 0.35); color: var(--danger-text); background-color: var(--bg-surface)"
+                    @click="copyVerifyUrl(row.account.id, row.validationUrl)"
+                  >
+                    <Check v-if="copiedVerifyAccountId === row.account.id" class="w-3 h-3" style="color: var(--success)" />
+                    <Copy v-else class="w-3 h-3" />
+                    <span>{{ copiedVerifyAccountId === row.account.id ? '已复制' : '复制链接' }}</span>
+                  </button>
+                </div>
               </div>
               <div v-else-if="row.categories.length > 0" class="flex items-center flex-wrap gap-1.5">
                 <span
