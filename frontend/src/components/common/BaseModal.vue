@@ -95,7 +95,7 @@ function handleNativeClose() {
     @close="handleNativeClose"
   >
     <header
-      class="flex items-start justify-between gap-4 px-5 py-4 border-b"
+      class="shrink-0 flex items-start justify-between gap-4 px-5 py-4 border-b"
       style="border-color: var(--border-subtle)"
     >
       <div class="min-w-0">
@@ -117,13 +117,16 @@ function handleNativeClose() {
       </button>
     </header>
 
-    <div class="px-5 py-4 overflow-y-auto custom-scroll flex-1">
+    <div
+      class="px-5 py-4 overflow-y-auto custom-scroll"
+      :style="{ maxHeight: $slots.footer ? 'calc(100vh - 180px)' : 'calc(100vh - 128px)' }"
+    >
       <slot />
     </div>
 
     <footer
       v-if="$slots.footer"
-      class="flex items-center justify-end gap-2.5 px-5 py-3.5 border-t"
+      class="shrink-0 flex items-center justify-end gap-2.5 px-5 py-3.5 border-t"
       style="border-color: var(--border-subtle); background-color: var(--bg-app)"
     >
       <slot name="footer" />

@@ -21,6 +21,7 @@ import {
   Sparkles,
 } from 'lucide-vue-next'
 import QuotaBar from '@/components/common/QuotaBar.vue'
+import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
 import { api, extractErrorMessage } from '@/services/api'
@@ -63,6 +64,10 @@ const isRefreshing = computed(() => Boolean(props.account && appStore.refreshing
 const isSwitching = computed(() => Boolean(props.account && appStore.switchingId === props.account.id))
 const abnormal = computed(() => (props.account ? isAccountAbnormal(props.account) : false))
 const tier = computed(() => (props.account ? getTierLabel(props.account) : 'UNKNOWN'))
+const groupOptions = computed(() => [
+  { value: '', label: '未分组' },
+  ...appStore.groups.map((g) => ({ value: g.id, label: g.name })),
+])
 
 const formattedTotpCode = computed(() => {
   const code = totpResult.value?.code ?? ''
@@ -443,17 +448,12 @@ async function openValidationUrl(url: string) {
           <label for="detail-group-select" class="block text-[11.5px] mb-1" style="color: var(--text-muted)">
             所属分组
           </label>
-          <select
+          <AppSelect
             id="detail-group-select"
             v-model="formGroupId"
-            class="w-full px-2.5 py-1.5 text-xs rounded-lg border"
-            style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
-          >
-            <option value="">未分组</option>
-            <option v-for="g in appStore.groups" :key="g.id" :value="g.id">
-              {{ g.name }}
-            </option>
-          </select>
+            :options="groupOptions"
+            block
+          />
         </div>
 
         <!-- 账号密码 -->

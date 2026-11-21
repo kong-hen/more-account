@@ -19,6 +19,7 @@ import {
 } from 'lucide-vue-next'
 import AccountCard from '@/components/accounts/AccountCard.vue'
 import AccountTable from '@/components/accounts/AccountTable.vue'
+import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore, type AccountSortBy } from '@/stores/appStore'
 import type { Account } from '@/types/models'
 
@@ -80,6 +81,19 @@ async function applyBatchGroup() {
   if (appStore.selectedAccountIds.length === 0) return
   await appStore.assignAccountsToGroup(appStore.selectedAccountIds, batchGroupTarget.value)
 }
+
+const sortOptions = [
+  { value: 'custom', label: '默认排序' },
+  { value: 'quota_desc', label: '配额从高到低' },
+  { value: 'quota_asc', label: '配额从低到高' },
+  { value: 'last_used', label: '最近使用' },
+  { value: 'email', label: '按邮箱名称' },
+]
+
+const batchGroupOptions = computed(() => [
+  { value: '', label: '移至未分组' },
+  ...appStore.groups.map((g) => ({ value: g.id, label: `移至 ${g.name}` })),
+])
 
 function setSort(val: string) {
   appStore.sortBy = val as AccountSortBy
@@ -232,19 +246,13 @@ function setSort(val: string) {
         </div>
 
         <!-- 排序 -->
-        <select
+        <AppSelect
           aria-label="排序方式"
-          :value="appStore.sortBy"
-          class="px-2.5 py-1.5 text-xs rounded-lg border cursor-pointer"
-          style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-secondary)"
-          @change="setSort(($event.target as HTMLSelectElement).value)"
-        >
-          <option value="custom">默认排序</option>
-          <option value="quota_desc">配额从高到低</option>
-          <option value="quota_asc">配额从低到高</option>
-          <option value="last_used">最近使用</option>
-          <option value="email">按邮箱名称</option>
-        </select>
+          :model-value="appStore.sortBy"
+          :options="sortOptions"
+          class="w-[126px]"
+          @update:model-value="setSort"
+        />
 
         <!-- 视图切换：卡片 / 表格 -->
         <div
@@ -385,17 +393,13 @@ function setSort(val: string) {
 
       <div class="flex items-center gap-2">
         <div class="flex items-center gap-1.5">
-          <select
+          <AppSelect
             v-model="batchGroupTarget"
             aria-label="选择目标分组"
-            class="px-2 py-1 text-xs rounded-lg border"
-            style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
-          >
-            <option value="">移至未分组</option>
-            <option v-for="g in appStore.groups" :key="g.id" :value="g.id">
-              移至 {{ g.name }}
-            </option>
-          </select>
+            size="sm"
+            :options="batchGroupOptions"
+            class="w-36"
+          />
           <button
             type="button"
             class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-medium cursor-pointer hover:bg-[var(--bg-hover)]"

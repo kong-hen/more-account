@@ -2,6 +2,7 @@
 // 新建 / 编辑定时唤醒任务弹窗：支持每日、每周、固定间隔、Cron 与配额重置触发模式。
 import { computed, ref, watch } from 'vue'
 import BaseModal from '@/components/common/BaseModal.vue'
+import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
 import { maskEmail } from '@/utils/privacy'
@@ -33,6 +34,18 @@ const maxOutputTokens = ref(16)
 const selectedAccounts = ref<string[]>([])
 const selectedModels = ref<string[]>(['gemini-3-flash'])
 const error = ref('')
+
+const repeatModeOptions = [
+  { value: 'daily', label: '每日定点' },
+  { value: 'weekly', label: '每周定点' },
+  { value: 'interval', label: '固定间隔（小时）' },
+  { value: 'crontab', label: 'Cron 表达式' },
+  { value: 'quota_reset', label: '配额重置后自动唤醒' },
+]
+
+function setRepeatMode(val: string) {
+  repeatMode.value = val as WakeupRepeatMode
+}
 
 const weekdayOptions = [
   { val: 1, label: '周一' },
@@ -172,18 +185,13 @@ async function handleSave() {
         </div>
         <div>
           <label for="wk-mode" class="block text-xs font-medium mb-1" style="color: var(--text-secondary)">触发模式</label>
-          <select
+          <AppSelect
             id="wk-mode"
-            v-model="repeatMode"
-            class="w-full px-2.5 py-1.5 text-xs rounded-lg border"
-            style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
-          >
-            <option value="daily">每日定点</option>
-            <option value="weekly">每周定点</option>
-            <option value="interval">固定间隔（小时）</option>
-            <option value="crontab">Cron 表达式</option>
-            <option value="quota_reset">配额重置后自动唤醒</option>
-          </select>
+            :model-value="repeatMode"
+            :options="repeatModeOptions"
+            block
+            @update:model-value="setRepeatMode"
+          />
         </div>
       </div>
 

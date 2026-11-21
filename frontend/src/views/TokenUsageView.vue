@@ -16,6 +16,7 @@ import {
 } from 'lucide-vue-next'
 import UsageTrendChart from '@/components/tokenusage/UsageTrendChart.vue'
 import ConversationDetailDrawer from '@/components/tokenusage/ConversationDetailDrawer.vue'
+import AppSelect from '@/components/common/AppSelect.vue'
 import { useTokenUsageStore } from '@/stores/tokenUsageStore'
 import { formatDateTime, formatExactNumber, formatTokenCount } from '@/utils/quota'
 import type { TokenUsageQuery } from '@/types/models'
@@ -46,6 +47,13 @@ onMounted(() => {
 function setPreset(preset: TokenUsageQuery['preset']) {
   void usageStore.fetchQuery({ preset, page: 1 })
 }
+
+const kindOptions = [
+  { value: '', label: '全部类型' },
+  { value: 'main', label: '主对话' },
+  { value: 'subagent', label: 'Subagent' },
+  { value: 'swarm', label: 'Swarm' },
+]
 
 function setKind(kind: string) {
   void usageStore.fetchQuery({ kind, page: 1 })
@@ -325,18 +333,14 @@ function kindLabel(kind: string): string {
                 />
               </div>
 
-              <select
-                :value="usageStore.query.kind"
+              <AppSelect
+                :model-value="usageStore.query.kind"
                 aria-label="筛选对话类型"
-                class="px-2.5 py-1 text-xs rounded-lg border"
-                style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-secondary)"
-                @change="setKind(($event.target as HTMLSelectElement).value)"
-              >
-                <option value="">全部类型</option>
-                <option value="main">主对话</option>
-                <option value="subagent">Subagent</option>
-                <option value="swarm">Swarm</option>
-              </select>
+                size="sm"
+                :options="kindOptions"
+                class="w-28"
+                @update:model-value="setKind"
+              />
             </div>
           </div>
 

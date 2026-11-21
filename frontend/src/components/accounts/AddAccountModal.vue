@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // 精简三入口添加账号弹窗：1) Google OAuth 浏览器授权（含手动回调兜底）2) 导入本机已登录账号 3) Refresh Token / JSON 批量导入。
-import { ref, watch, onBeforeUnmount } from 'vue'
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { Globe, HardDriveDownload, KeyRound, Copy, Check, ExternalLink, Loader2 } from 'lucide-vue-next'
 import BaseModal from '@/components/common/BaseModal.vue'
+import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { api, extractErrorMessage, onWailsEvent } from '@/services/api'
 import { copyToClipboard } from '@/utils/privacy'
@@ -21,6 +22,10 @@ const appStore = useAppStore()
 type AddTab = 'oauth' | 'local' | 'token'
 const activeTab = ref<AddTab>('oauth')
 const targetGroupId = ref('')
+const groupOptions = computed(() => [
+  { value: '', label: '未分组' },
+  ...appStore.groups.map((g) => ({ value: g.id, label: g.name })),
+])
 
 // OAuth 状态
 const oauthWaiting = ref(false)
@@ -258,17 +263,12 @@ async function handleImportTokens() {
         <label for="add-target-group" class="text-xs font-medium" style="color: var(--text-secondary)">
           导入后自动归入分组
         </label>
-        <select
+        <AppSelect
           id="add-target-group"
           v-model="targetGroupId"
-          class="w-52 px-2.5 py-1.5 text-xs rounded-lg border"
-          style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
-        >
-          <option value="">未分组</option>
-          <option v-for="g in appStore.groups" :key="g.id" :value="g.id">
-            {{ g.name }}
-          </option>
-        </select>
+          :options="groupOptions"
+          class="w-52"
+        />
       </div>
 
       <!-- Tab 1: Google OAuth -->
