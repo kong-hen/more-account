@@ -20,6 +20,7 @@ import (
 const (
 	streamPath              = "/v1internal:streamGenerateContent?alt=sse"
 	defaultWakeupPrompt     = "hi"
+	defaultWakeupModel      = "gemini-3.8-flash-high"
 	antigravitySystemPrompt = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
@@ -29,8 +30,6 @@ type StreamResult struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
-	TraceID          string
-	ResponseID       string
 	DurationMs       int64
 }
 
@@ -87,11 +86,6 @@ func ParseStreamResult(rawText string) (*StreamResult, error) {
 			if cands, ok := respObj["candidates"].([]any); ok && len(cands) > 0 {
 				cand, _ = cands[0].(map[string]any)
 			}
-			if res.ResponseID == "" {
-				if rid, ok := respObj["responseId"].(string); ok {
-					res.ResponseID = rid
-				}
-			}
 			if usage, ok := respObj["usageMetadata"].(map[string]any); ok {
 				extractUsageMeta(usage, &res)
 			}
@@ -103,16 +97,6 @@ func ParseStreamResult(rawText string) (*StreamResult, error) {
 		}
 		if usage, ok := obj["usageMetadata"].(map[string]any); ok {
 			extractUsageMeta(usage, &res)
-		}
-		if res.TraceID == "" {
-			if tid, ok := obj["traceId"].(string); ok {
-				res.TraceID = tid
-			}
-		}
-		if res.ResponseID == "" {
-			if rid, ok := obj["responseId"].(string); ok {
-				res.ResponseID = rid
-			}
 		}
 
 		if cand != nil {
@@ -177,35 +161,26 @@ func ParseStreamResult(rawText string) (*StreamResult, error) {
 	return &res, nil
 }
 
+// extractUsageMeta 从流式分片中更新累计 Token 计数，始终取最新且不回退的最大累计值。
 func extractUsageMeta(usage map[string]any, res *StreamResult) {
-	if res.PromptTokens == 0 {
-		if v, ok := usage["promptTokenCount"].(float64); ok {
-			res.PromptTokens = int(v)
-		}
+	if v, ok := usage["promptTokenCount"].(float64); ok && int(v) > res.PromptTokens {
+		res.PromptTokens = int(v)
 	}
-	if res.CompletionTokens == 0 {
-		if v, ok := usage["candidatesTokenCount"].(float64); ok {
-			res.CompletionTokens = int(v)
-		}
+	if v, ok := usage["candidatesTokenCount"].(float64); ok && int(v) > res.CompletionTokens {
+		res.CompletionTokens = int(v)
 	}
-	if res.TotalTokens == 0 {
-		if v, ok := usage["totalTokenCount"].(float64); ok {
-			res.TotalTokens = int(v)
-		}
+	if v, ok := usage["totalTokenCount"].(float64); ok && int(v) > res.TotalTokens {
+		res.TotalTokens = int(v)
 	}
 }
 
 func wakeupUserAgent() string {
-	osName := runtime.GOOS
-	if osName == "darwin" {
-		osName = "darwin"
-	}
 	arch := "amd64"
 	if runtime.GOARCH == "arm64" {
 		arch = "arm64"
 	}
 	return fmt.Sprintf("antigravity/%s (aidev_client; os_type=%s; arch=%s; cl=%s)",
-		quota.DefaultCloudCodeIDEVersion, osName, arch, quota.DefaultCloudCodeCL)
+		quota.DefaultCloudCodeIDEVersion, runtime.GOOS, arch, quota.DefaultCloudCodeCL)
 }
 
 // ExecuteWakeupRequest 向 CloudCode 发送单次极轻唤醒请求并返回解析结果或错误诊断。
@@ -220,7 +195,7 @@ func ExecuteWakeupRequest(ctx context.Context, httpClient *http.Client, token mo
 		maxOutputTokens = 16
 	}
 	if strings.TrimSpace(modelName) == "" {
-		modelName = "gemini-3-flash"
+		modelName = defaultWakeupModel
 	}
 
 	ccCtx := quota.CloudCodeContextFromToken(token)

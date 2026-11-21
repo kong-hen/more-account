@@ -35,6 +35,14 @@ const maxOutputTokens = ref(16)
 const selectedAccounts = ref<string[]>([])
 const selectedModels = ref<string[]>([])
 const error = ref('')
+const saving = ref(false)
+
+const HH_MM_RE = /^([01]\d|2[0-3]):[0-5]\d$/
+const CRON_FIELD_RE = /^[0-9*,/-]+$/
+
+const allAccountsSelected = computed(
+  () => appStore.accounts.length > 0 && selectedAccounts.value.length === appStore.accounts.length,
+)
 
 const repeatModeOptions = [
   { value: 'daily', label: '每日定点' },
@@ -106,6 +114,8 @@ watch(
   ([isOpen, task]) => {
     if (!isOpen) return
     error.value = ''
+    saving.value = false
+    const validAccountIds = new Set(appStore.accounts.map((a) => a.id))
     if (task) {
       name.value = task.name
       enabled.value = task.enabled
@@ -123,7 +133,8 @@ watch(
       customPrompt.value = task.schedule.customPrompt || 'hi'
       maxOutputTokens.value = task.schedule.maxOutputTokens || 16
       const fallbackModel = modelCandidates.value[0]?.canonicalModelId || 'gemini-3.8-flash-high'
-      selectedAccounts.value = [...(task.schedule.selectedAccounts ?? [])]
+      // 过滤掉已删除的无效账号 ID，避免勾选计数与全选状态失真
+      selectedAccounts.value = (task.schedule.selectedAccounts ?? []).filter((id) => validAccountIds.has(id))
       selectedModels.value = task.schedule.selectedModels?.length
         ? [...task.schedule.selectedModels]
         : [fallbackModel]
@@ -140,7 +151,10 @@ watch(
       crontab.value = '0 9 * * *'
       customPrompt.value = 'hi'
       maxOutputTokens.value = 16
-      selectedAccounts.value = appStore.currentAccountId ? [appStore.currentAccountId] : []
+      selectedAccounts.value =
+        appStore.currentAccountId && validAccountIds.has(appStore.currentAccountId)
+          ? [appStore.currentAccountId]
+          : []
       selectedModels.value = [fallbackModel]
     }
   },
@@ -151,12 +165,18 @@ function toggleInArray<T>(arr: T[], val: T): T[] {
 }
 
 async function handleSave() {
+  if (saving.value) return
+  error.value = ''
+
   if (!name.value.trim()) {
     error.value = '请输入任务名称'
     return
   }
-  if (selectedAccounts.value.length === 0) {
-    error.value = '请至少选择一个目标账号'
+
+  const validAccountIds = new Set(appStore.accounts.map((a) => a.id))
+  const cleanAccounts = selectedAccounts.value.filter((id) => validAccountIds.has(id))
+  if (cleanAccounts.length === 0) {
+    error.value = '请至少选择一个有效的目标账号'
     return
   }
   if (selectedModels.value.length === 0) {
@@ -164,10 +184,70 @@ async function handleSave() {
     return
   }
 
-  const parsedTimes = timesText.value
-    .split(/[,，\s]+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
+  let parsedTimes: string[] | undefined
+  let cleanIntervalHours: number | undefined
+  let cleanIntervalStart: string | undefined
+  let cleanIntervalEnd: string | undefined
+  let cleanCron: string | undefined
+
+  if (repeatMode.value === 'daily' || repeatMode.value === 'weekly') {
+    if (repeatMode.value === 'weekly' && weeklyDays.value.length === 0) {
+      error.value = '请至少选择一个执行星期'
+      return
+    }
+    const rawTimes = Array.from(
+      new Set(
+        timesText.value
+          .split(/[,，\s]+/)
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
+    )
+    if (rawTimes.length === 0) {
+      error.value = '请至少填写一个执行时间点（24 小时制 HH:MM）'
+      return
+    }
+    const invalidTime = rawTimes.find((t) => !HH_MM_RE.test(t))
+    if (invalidTime) {
+      error.value = `时间点格式不正确（需为 24 小时制 HH:MM）：${invalidTime}`
+      return
+    }
+    parsedTimes = rawTimes
+  } else if (repeatMode.value === 'interval') {
+    const hours = Number(intervalHours.value)
+    if (!Number.isInteger(hours) || hours < 1 || hours > 24) {
+      error.value = '间隔小时数需为 1–24 之间的整数'
+      return
+    }
+    const startStr = intervalStartTime.value.trim()
+    const endStr = intervalEndTime.value.trim()
+    if (startStr && !HH_MM_RE.test(startStr)) {
+      error.value = '窗口开始时间格式不正确（需为 24 小时制 HH:MM）'
+      return
+    }
+    if (endStr && !HH_MM_RE.test(endStr)) {
+      error.value = '窗口结束时间格式不正确（需为 24 小时制 HH:MM）'
+      return
+    }
+    cleanIntervalHours = hours
+    cleanIntervalStart = startStr || undefined
+    cleanIntervalEnd = endStr || undefined
+  } else if (repeatMode.value === 'crontab') {
+    const cronStr = crontab.value.trim()
+    const fields = cronStr.split(/\s+/).filter(Boolean)
+    if (fields.length !== 5 || fields.some((f) => !CRON_FIELD_RE.test(f))) {
+      error.value = '请输入标准 5 段 Cron 表达式（仅支持数字与 * , - /）'
+      return
+    }
+    cleanCron = fields.join(' ')
+  }
+
+  // 清洗最大输出 Token，防止输入框清空后序列化为 NaN/空字符串
+  const rawMaxTokens = Number(maxOutputTokens.value)
+  const cleanMaxTokens =
+    Number.isFinite(rawMaxTokens) && rawMaxTokens > 0
+      ? Math.min(128, Math.max(4, Math.round(rawMaxTokens)))
+      : 16
 
   const task: WakeupTask = {
     id: props.editingTask?.id ?? '',
@@ -178,22 +258,29 @@ async function handleSave() {
     schedule: {
       repeatMode: repeatMode.value,
       dailyTimes: repeatMode.value === 'daily' ? parsedTimes : undefined,
-      weeklyDays: repeatMode.value === 'weekly' ? weeklyDays.value : undefined,
+      weeklyDays: repeatMode.value === 'weekly' ? [...weeklyDays.value] : undefined,
       weeklyTimes: repeatMode.value === 'weekly' ? parsedTimes : undefined,
-      intervalHours: repeatMode.value === 'interval' ? intervalHours.value : undefined,
-      intervalStartTime: repeatMode.value === 'interval' ? intervalStartTime.value : undefined,
-      intervalEndTime: repeatMode.value === 'interval' ? intervalEndTime.value : undefined,
-      crontab: repeatMode.value === 'crontab' ? crontab.value.trim() : undefined,
+      intervalHours: cleanIntervalHours,
+      intervalStartTime: cleanIntervalStart,
+      intervalEndTime: cleanIntervalEnd,
+      crontab: cleanCron,
       wakeOnReset: repeatMode.value === 'quota_reset',
-      selectedAccounts: selectedAccounts.value,
-      selectedModels: selectedModels.value,
+      selectedAccounts: cleanAccounts,
+      selectedModels: [...selectedModels.value],
       customPrompt: customPrompt.value.trim() || 'hi',
-      maxOutputTokens: maxOutputTokens.value || 16,
+      maxOutputTokens: cleanMaxTokens,
     },
   }
 
-  await wakeupStore.upsertTask(task)
-  emit('close')
+  saving.value = true
+  try {
+    await wakeupStore.upsertTask(task)
+    emit('close')
+  } catch {
+    // wakeupStore 内已通过 toast 提示失败，保留弹窗便于修正后重试
+  } finally {
+    saving.value = false
+  }
 }
 </script>
 
@@ -203,6 +290,8 @@ async function handleSave() {
     :title="editingTask ? '编辑唤醒任务' : '新建定时唤醒任务'"
     subtitle="定时向指定账号发送极轻请求以触发配额重置计时窗口"
     width-class="w-[560px]"
+    :prevent-close="saving"
+    :close-on-outside="!saving"
     @close="emit('close')"
   >
     <div class="space-y-4">
@@ -328,17 +417,17 @@ async function handleSave() {
             目标账号 ({{ selectedAccounts.length }})
           </span>
           <button
+            v-if="appStore.accounts.length > 0"
             type="button"
             class="text-[11px] cursor-pointer hover:underline"
             style="color: var(--accent)"
             @click="
-              selectedAccounts =
-                selectedAccounts.length === appStore.accounts.length
-                  ? []
-                  : appStore.accounts.map((a) => a.id)
+              selectedAccounts = allAccountsSelected
+                ? []
+                : appStore.accounts.map((a) => a.id)
             "
           >
-            {{ selectedAccounts.length === appStore.accounts.length ? '取消全选' : '全选账号' }}
+            {{ allAccountsSelected ? '取消全选' : '全选账号' }}
           </button>
         </div>
         <div
@@ -421,7 +510,8 @@ async function handleSave() {
     <template #footer>
       <button
         type="button"
-        class="px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)]"
+        :disabled="saving"
+        class="px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
         style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
         @click="emit('close')"
       >
@@ -429,11 +519,12 @@ async function handleSave() {
       </button>
       <button
         type="button"
-        class="px-4 py-1.5 text-xs font-medium rounded-lg text-white cursor-pointer"
+        :disabled="saving"
+        class="px-4 py-1.5 text-xs font-medium rounded-lg text-white cursor-pointer disabled:opacity-50"
         style="background-color: var(--accent)"
         @click="handleSave"
       >
-        保存任务
+        {{ saving ? '保存中...' : '保存任务' }}
       </button>
     </template>
   </BaseModal>

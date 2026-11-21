@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 纯 SVG 响应式 Token 趋势柱状图，支持悬浮查看精确输入 / 输出 / Thinking / 缓存分布。
+// 响应式 Flexbox Token 堆叠趋势柱状图，支持悬浮查看精确输入 / 输出 / Thinking / 缓存与估算分布。
 import { computed, ref } from 'vue'
 import { formatExactNumber, formatTokenCount } from '@/utils/quota'
 import type { UsageTrendBucket } from '@/types/models'
@@ -10,44 +10,62 @@ const props = defineProps<{
 
 const hoveredIndex = ref<number | null>(null)
 
-const maxTotal = computed(() => {
-  let max = 0
-  for (const b of props.buckets) {
-    const t = b.exact.totalTokens + b.estimatedTotalTokens
-    if (t > max) max = t
-  }
-  return max > 0 ? max : 1
-})
-
 const visibleBuckets = computed(() => {
   // 最多优雅展示最近 24 个时间桶，保证柱宽清晰不拥挤
   if (props.buckets.length <= 24) return props.buckets
   return props.buckets.slice(-24)
 })
 
+// 仅基于当前展示的最近 24 桶计算高度上限，避免更早的历史极端峰值把近期柱子压扁
+const maxTotal = computed(() => {
+  let max = 0
+  for (const b of visibleBuckets.value) {
+    const t = b.exact.totalTokens + b.estimatedTotalTokens
+    if (t > max) max = t
+  }
+  return max > 0 ? max : 1
+})
+
+const hasAnyEstimated = computed(() =>
+  visibleBuckets.value.some((b) => b.estimatedTotalTokens > 0),
+)
+
+// 预计算每根柱体的各分段高度百分比，避免模板渲染期对同一桶重复计算
+const chartBars = computed(() =>
+  visibleBuckets.value.map((b) => {
+    const total = b.exact.totalTokens + b.estimatedTotalTokens
+    if (total === 0) {
+      return {
+        bucket: b,
+        totalHeightPct: 0,
+        inputPct: 0,
+        outputPct: 0,
+        thinkingPct: 0,
+        cachePct: 0,
+        estimatedPct: 0,
+      }
+    }
+    const input = b.exact.inputTokens
+    const output = b.exact.outputTokens
+    const thinking = b.exact.thinkingTokens
+    const cache = b.exact.cacheReadTokens + b.exact.cacheWriteTokens
+    const estimated = b.estimatedTotalTokens
+    return {
+      bucket: b,
+      totalHeightPct: Math.max(2, (total / maxTotal.value) * 100),
+      inputPct: (input / total) * 100,
+      outputPct: (output / total) * 100,
+      thinkingPct: (thinking / total) * 100,
+      cachePct: (cache / total) * 100,
+      estimatedPct: (estimated / total) * 100,
+    }
+  }),
+)
+
 const hoveredBucket = computed(() => {
   if (hoveredIndex.value === null) return null
   return visibleBuckets.value[hoveredIndex.value] ?? null
 })
-
-function barSegments(b: UsageTrendBucket) {
-  const total = b.exact.totalTokens + b.estimatedTotalTokens
-  const totalHeightPct = Math.max(2, (total / maxTotal.value) * 100)
-  if (total === 0) {
-    return { totalHeightPct: 0, inputPct: 0, outputPct: 0, thinkingPct: 0, cachePct: 0 }
-  }
-  const input = b.exact.inputTokens + b.estimatedTotalTokens
-  const output = b.exact.outputTokens
-  const thinking = b.exact.thinkingTokens
-  const cache = b.exact.cacheReadTokens + b.exact.cacheWriteTokens
-  return {
-    totalHeightPct,
-    inputPct: (input / total) * 100,
-    outputPct: (output / total) * 100,
-    thinkingPct: (thinking / total) * 100,
-    cachePct: (cache / total) * 100,
-  }
-}
 </script>
 
 <template>
@@ -77,10 +95,13 @@ function barSegments(b: UsageTrendBucket) {
         <span class="inline-flex items-center gap-1.5">
           <span class="w-2.5 h-2.5 rounded-sm" style="background-color: var(--warning)" />缓存
         </span>
+        <span v-if="hasAnyEstimated" class="inline-flex items-center gap-1.5">
+          <span class="w-2.5 h-2.5 rounded-sm" style="background-color: var(--text-muted)" />估算
+        </span>
       </div>
     </div>
 
-    <div v-if="visibleBuckets.length === 0" class="h-44 flex items-center justify-center text-xs" style="color: var(--text-muted)">
+    <div v-if="chartBars.length === 0" class="h-44 flex items-center justify-center text-xs" style="color: var(--text-muted)">
       所选时间范围内暂无用量记录
     </div>
 
@@ -100,6 +121,7 @@ function barSegments(b: UsageTrendBucket) {
             <span>输出 {{ formatTokenCount(hoveredBucket.exact.outputTokens) }}</span>
             <span>思考 {{ formatTokenCount(hoveredBucket.exact.thinkingTokens) }}</span>
             <span>缓存 {{ formatTokenCount(hoveredBucket.exact.cacheReadTokens + hoveredBucket.exact.cacheWriteTokens) }}</span>
+            <span v-if="hoveredBucket.estimatedTotalTokens > 0">估算 {{ formatTokenCount(hoveredBucket.estimatedTotalTokens) }}</span>
           </span>
         </template>
         <span v-else style="color: var(--text-muted)">
@@ -110,8 +132,8 @@ function barSegments(b: UsageTrendBucket) {
       <!-- 堆叠柱状区 -->
       <div class="h-44 flex items-end gap-1.5 px-1">
         <div
-          v-for="(b, idx) in visibleBuckets"
-          :key="b.key"
+          v-for="(bar, idx) in chartBars"
+          :key="bar.bucket.key"
           class="flex-1 h-full flex flex-col items-center justify-end gap-1.5 group cursor-pointer"
           @mouseenter="hoveredIndex = idx"
           @mouseleave="hoveredIndex = null"
@@ -120,14 +142,15 @@ function barSegments(b: UsageTrendBucket) {
             <div
               class="w-full max-w-[28px] rounded-t-md overflow-hidden flex flex-col-reverse transition-opacity"
               :style="{
-                height: `${barSegments(b).totalHeightPct}%`,
+                height: `${bar.totalHeightPct}%`,
                 opacity: hoveredIndex === null || hoveredIndex === idx ? 1 : 0.45,
               }"
             >
-              <div :style="{ height: `${barSegments(b).inputPct}%`, backgroundColor: 'var(--accent)' }" />
-              <div :style="{ height: `${barSegments(b).outputPct}%`, backgroundColor: 'var(--success)' }" />
-              <div :style="{ height: `${barSegments(b).thinkingPct}%`, backgroundColor: '#8b5cf6' }" />
-              <div :style="{ height: `${barSegments(b).cachePct}%`, backgroundColor: 'var(--warning)' }" />
+              <div v-if="bar.inputPct > 0" :style="{ height: `${bar.inputPct}%`, backgroundColor: 'var(--accent)' }" />
+              <div v-if="bar.outputPct > 0" :style="{ height: `${bar.outputPct}%`, backgroundColor: 'var(--success)' }" />
+              <div v-if="bar.thinkingPct > 0" :style="{ height: `${bar.thinkingPct}%`, backgroundColor: '#8b5cf6' }" />
+              <div v-if="bar.cachePct > 0" :style="{ height: `${bar.cachePct}%`, backgroundColor: 'var(--warning)' }" />
+              <div v-if="bar.estimatedPct > 0" :style="{ height: `${bar.estimatedPct}%`, backgroundColor: 'var(--text-muted)' }" />
             </div>
           </div>
 
@@ -135,7 +158,7 @@ function barSegments(b: UsageTrendBucket) {
             class="text-[10px] font-mono-num truncate max-w-full"
             style="color: var(--text-muted)"
           >
-            {{ b.label }}
+            {{ bar.bucket.label }}
           </span>
         </div>
       </div>

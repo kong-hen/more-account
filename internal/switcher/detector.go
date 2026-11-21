@@ -17,7 +17,8 @@ import (
 const (
 	activeDetectPollInterval = 10 * time.Second
 	activeDetectStartupDelay = 500 * time.Millisecond
-	emailResolveNegativeTTL  = 5 * time.Minute
+	emailResolveNegativeTTL  = 30 * time.Second
+	maxEmailCacheSize        = 256
 )
 
 // ActiveDetectionResult 描述一次本机正在使用账号的探测结果。
@@ -30,7 +31,7 @@ type ActiveDetectionResult struct {
 	TargetClient     string `json:"targetClient"`               // 当前探测的目标客户端类型：desktop | ide | cli
 	Changed          bool   `json:"changed"`                    // 本次探测是否引起当前激活账号状态变更
 	DetectedAt       int64  `json:"detectedAt"`                 // 探测时间戳（秒）
-	Error            string `json:"error,omitempty"`            // 读取凭据异常信息
+	Error            string `json:"error,omitempty"`            // 读取凭据或联网校验异常信息
 }
 
 type cachedResolvedEmail struct {
@@ -163,6 +164,15 @@ func (d *ActiveDetector) loop(ctx context.Context) {
 
 // DetectOnce 立即执行一次本机正在使用账号探测，并在发现变化时同步更新 store 与通知回调。
 func (d *ActiveDetector) DetectOnce(ctx context.Context) ActiveDetectionResult {
+	return d.detect(ctx, true)
+}
+
+// DetectOnceSilent 执行一次同步探测并更新基线，但不触发后台变更回调（供手动探测 RPC 调用，避免与事件推送重复弹通知）。
+func (d *ActiveDetector) DetectOnceSilent(ctx context.Context) ActiveDetectionResult {
+	return d.detect(ctx, false)
+}
+
+func (d *ActiveDetector) detect(ctx context.Context, emitCallback bool) ActiveDetectionResult {
 	d.detectMu.Lock()
 	defer d.detectMu.Unlock()
 
@@ -207,13 +217,18 @@ func (d *ActiveDetector) DetectOnce(ctx context.Context) ActiveDetectionResult {
 				res.Changed = true
 			}
 		}
-		d.commitAndNotify(res)
+		d.commitAndNotify(res, emitCallback)
 		return res
 	}
 
 	res.HasCredential = true
 	accounts := d.store.ListAccounts()
-	matched, detectedEmail := d.matchAccount(ctx, cred, accounts, now)
+	matched, detectedEmail, resolveErr := d.matchAccount(ctx, cred, accounts, now)
+	if resolveErr != nil {
+		// 断网或 Google OAuth 临时不可达导致无法识别未知凭据身份：保留现有激活态，不误清空 currentAccountID。
+		res.Error = resolveErr.Error()
+		return res
+	}
 	res.DetectedEmail = detectedEmail
 
 	if matched != nil {
@@ -235,11 +250,11 @@ func (d *ActiveDetector) DetectOnce(ctx context.Context) ActiveDetectionResult {
 		}
 	}
 
-	d.commitAndNotify(res)
+	d.commitAndNotify(res, emitCallback)
 	return res
 }
 
-func (d *ActiveDetector) commitAndNotify(res ActiveDetectionResult) {
+func (d *ActiveDetector) commitAndNotify(res ActiveDetectionResult, emitCallback bool) {
 	key := buildDetectionStateKey(res)
 
 	d.stateMu.Lock()
@@ -248,7 +263,7 @@ func (d *ActiveDetector) commitAndNotify(res ActiveDetectionResult) {
 	d.lastResult = res
 	d.stateMu.Unlock()
 
-	if (res.Changed || stateChanged) && d.onChanged != nil {
+	if emitCallback && (res.Changed || stateChanged) && d.onChanged != nil {
 		d.onChanged(res)
 	}
 }
@@ -258,9 +273,9 @@ func (d *ActiveDetector) matchAccount(
 	cred *SystemCredential,
 	accounts []model.Account,
 	now time.Time,
-) (*model.Account, string) {
+) (*model.Account, string, error) {
 	if cred == nil {
-		return nil, ""
+		return nil, "", nil
 	}
 
 	// 1. 优先本地精确匹配 RefreshToken（零网络开销）
@@ -269,7 +284,7 @@ func (d *ActiveDetector) matchAccount(
 		for i := range accounts {
 			if strings.TrimSpace(accounts[i].Token.RefreshToken) == rt {
 				acc := accounts[i]
-				return &acc, acc.Email
+				return &acc, acc.Email, nil
 			}
 		}
 	}
@@ -278,41 +293,48 @@ func (d *ActiveDetector) matchAccount(
 	email := strings.TrimSpace(cred.Email)
 	if email != "" {
 		if acc, ok := findAccountByEmail(accounts, email); ok {
-			return &acc, acc.Email
+			return &acc, acc.Email, nil
 		}
-		return nil, email
+		return nil, email, nil
 	}
 
 	// 3. 兜底：若第三方程序写入的凭据不含 id_token 且 RT 未命中，按 RT 哈希缓存查询一次 Google UserInfo
-	resolved := d.resolveEmailViaOAuth(ctx, cred, now)
+	resolved, err := d.resolveEmailViaOAuth(ctx, cred, now)
+	if err != nil {
+		return nil, "", err
+	}
 	if resolved != "" {
 		if acc, ok := findAccountByEmail(accounts, resolved); ok {
-			return &acc, acc.Email
+			return &acc, acc.Email, nil
 		}
-		return nil, resolved
+		return nil, resolved, nil
 	}
-	return nil, ""
+	return nil, "", nil
 }
 
-func (d *ActiveDetector) resolveEmailViaOAuth(ctx context.Context, cred *SystemCredential, now time.Time) string {
+func (d *ActiveDetector) resolveEmailViaOAuth(ctx context.Context, cred *SystemCredential, now time.Time) (string, error) {
 	if d.oauthClient == nil || cred == nil {
-		return ""
+		return "", nil
 	}
 	cacheSeed := strings.TrimSpace(cred.RefreshToken)
 	if cacheSeed == "" {
 		cacheSeed = strings.TrimSpace(cred.AccessToken)
 	}
 	if cacheSeed == "" {
-		return ""
+		return "", nil
 	}
 	sum := sha256.Sum256([]byte(cacheSeed))
 	fp := hex.EncodeToString(sum[:])
 
 	d.stateMu.Lock()
 	if cached, ok := d.emailCache[fp]; ok {
-		if cached.email != "" || now.Sub(cached.checkedAt) < emailResolveNegativeTTL {
+		if cached.email != "" {
 			d.stateMu.Unlock()
-			return cached.email
+			return cached.email, nil
+		}
+		if now.Sub(cached.checkedAt) < emailResolveNegativeTTL {
+			d.stateMu.Unlock()
+			return "", fmt.Errorf("暂无法联网验证本机未知凭据身份，稍后重试")
 		}
 	}
 	d.stateMu.Unlock()
@@ -321,31 +343,48 @@ func (d *ActiveDetector) resolveEmailViaOAuth(ctx context.Context, cred *SystemC
 	defer cancel()
 
 	var resolvedEmail string
+	var lastErr error
 	if at := strings.TrimSpace(cred.AccessToken); at != "" {
-		if info, err := d.oauthClient.FetchUserInfo(callCtx, at); err == nil && info != nil {
+		info, err := d.oauthClient.FetchUserInfo(callCtx, at)
+		if err == nil && info != nil {
 			resolvedEmail = strings.TrimSpace(info.Email)
+		} else if err != nil {
+			lastErr = err
 		}
 	}
 	if resolvedEmail == "" && strings.TrimSpace(cred.RefreshToken) != "" {
-		if tok, err := d.oauthClient.RefreshAccessToken(callCtx, cred.RefreshToken); err == nil && tok != nil {
+		tok, err := d.oauthClient.RefreshAccessToken(callCtx, cred.RefreshToken)
+		if err == nil && tok != nil {
 			if tok.IDToken != "" {
 				resolvedEmail = ExtractEmailFromIDToken(tok.IDToken)
 			}
 			if resolvedEmail == "" && tok.AccessToken != "" {
-				if info, uErr := d.oauthClient.FetchUserInfo(callCtx, tok.AccessToken); uErr == nil && info != nil {
+				info, uErr := d.oauthClient.FetchUserInfo(callCtx, tok.AccessToken)
+				if uErr == nil && info != nil {
 					resolvedEmail = strings.TrimSpace(info.Email)
+				} else if uErr != nil {
+					lastErr = uErr
 				}
 			}
+		} else if err != nil {
+			lastErr = err
 		}
 	}
 
 	d.stateMu.Lock()
+	if len(d.emailCache) >= maxEmailCacheSize {
+		d.emailCache = make(map[string]cachedResolvedEmail)
+	}
 	d.emailCache[fp] = cachedResolvedEmail{
 		email:     resolvedEmail,
 		checkedAt: now,
 	}
 	d.stateMu.Unlock()
-	return resolvedEmail
+
+	if resolvedEmail == "" && lastErr != nil {
+		return "", fmt.Errorf("联网解析本机凭据邮箱失败: %w", lastErr)
+	}
+	return resolvedEmail, nil
 }
 
 func findAccountByEmail(accounts []model.Account, email string) (model.Account, bool) {

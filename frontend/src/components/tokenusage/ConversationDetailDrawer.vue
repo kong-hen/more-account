@@ -124,7 +124,7 @@ const emit = defineEmits<{
 
             <div class="flex items-center justify-between flex-wrap gap-x-2 gap-y-0.5 text-[11px] font-mono-num" style="color: var(--text-muted)">
               <span v-if="turn.isExact">
-                入 {{ formatTokenCount(turn.exact.inputTokens) }} · 出 {{ formatTokenCount(turn.exact.outputTokens) }} · 思 {{ formatTokenCount(turn.exact.thinkingTokens) }} · 缓 {{ formatTokenCount(turn.exact.cacheReadTokens) }}
+                入 {{ formatTokenCount(turn.exact.inputTokens) }} · 出 {{ formatTokenCount(turn.exact.outputTokens) }} · 思 {{ formatTokenCount(turn.exact.thinkingTokens) }} · 缓 {{ formatTokenCount(turn.exact.cacheReadTokens + turn.exact.cacheWriteTokens) }}
               </span>
               <span v-else>启发式估算</span>
               <span class="shrink-0">{{ formatDateTime(turn.timestamp) }}</span>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
-// 基于原生 <dialog> + showModal() 的模态弹窗封装，支持 Esc 与外点击轻关闭（兼容 Safari/WKWebView）。
-import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
+// 基于原生 <dialog> + showModal() 的模态弹窗封装，支持 Esc 与外点击轻关闭（兼容 Safari/WKWebView），
+// 并支持通过 preventClose 在加载/破坏性操作执行期间拦截关闭。
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { X } from 'lucide-vue-next'
 
 const props = withDefaults(
@@ -10,11 +11,13 @@ const props = withDefaults(
     subtitle?: string
     widthClass?: string
     closeOnOutside?: boolean
+    preventClose?: boolean
   }>(),
   {
     subtitle: '',
     widthClass: 'w-[520px]',
     closeOnOutside: true,
+    preventClose: false,
   },
 )
 
@@ -25,6 +28,11 @@ const emit = defineEmits<{
 const dialogRef = ref<HTMLDialogElement | null>(null)
 const titleId = `dlg-title-${Math.random().toString(36).slice(2, 9)}`
 let pressedOutside = false
+
+const closedByAttr = computed(() => {
+  if (props.preventClose) return 'none'
+  return props.closeOnOutside ? 'any' : 'closerequest'
+})
 
 function syncOpenState(isOpen: boolean) {
   const el = dialogRef.value
@@ -63,23 +71,32 @@ function isPointerOutside(e: PointerEvent): boolean {
 }
 
 function handlePointerDown(e: PointerEvent) {
-  if (!props.closeOnOutside) return
+  if (props.preventClose || !props.closeOnOutside) return
   pressedOutside = isPointerOutside(e)
 }
 
 function handlePointerUp(e: PointerEvent) {
-  if (!props.closeOnOutside) return
+  if (props.preventClose || !props.closeOnOutside) return
   if (pressedOutside && isPointerOutside(e)) {
     emit('close')
   }
   pressedOutside = false
 }
 
+// 兼容 Safari/WKWebView 等尚未原生支持 closedby="none" 的环境，在 cancel 事件中拦截 Esc。
+function handleNativeCancel(e: Event) {
+  if (props.preventClose) {
+    e.preventDefault()
+  }
+}
+
 function handleNativeClose() {
   const el = dialogRef.value
   if (el) el.returnValue = ''
-  if (props.open) {
+  if (props.open && !props.preventClose) {
     emit('close')
+  } else if (props.open && props.preventClose && el && !el.open) {
+    el.showModal()
   }
 }
 </script>
@@ -90,8 +107,10 @@ function handleNativeClose() {
     class="app-dialog"
     :class="widthClass"
     :aria-labelledby="titleId"
+    :closedby="closedByAttr"
     @pointerdown="handlePointerDown"
     @pointerup="handlePointerUp"
+    @cancel="handleNativeCancel"
     @close="handleNativeClose"
   >
     <header
@@ -109,7 +128,8 @@ function handleNativeClose() {
       <button
         type="button"
         aria-label="关闭弹窗"
-        class="p-1.5 rounded-lg cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+        :disabled="preventClose"
+        class="p-1.5 rounded-lg cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
         style="color: var(--text-muted)"
         @click="emit('close')"
       >

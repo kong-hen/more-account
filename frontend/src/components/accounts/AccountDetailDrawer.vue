@@ -11,6 +11,7 @@ import {
   RefreshCw,
   ArrowRightLeft,
   Zap,
+  Square,
   ShieldCheck,
   User,
   KeyRound,
@@ -70,10 +71,15 @@ const copiedField = ref('')
 const totpResult = ref<TotpCodeResult | null>(null)
 const totpError = ref('')
 let totpTimer: number | null = null
+let totpGeneration = 0
+let unmounted = false
 
 const isCurrent = computed(() => props.account && appStore.currentAccountId === props.account.id)
 const isRefreshing = computed(() => Boolean(props.account && appStore.refreshingIds[props.account.id]))
 const isSwitching = computed(() => Boolean(props.account && appStore.switchingId === props.account.id))
+const isTestingCurrent = computed(
+  () => Boolean(props.account && wakeupStore.testingScopeId && wakeupStore.testingAccountId === props.account.id),
+)
 const abnormal = computed(() => (props.account ? isAccountAbnormal(props.account) : false))
 const tier = computed(() => (props.account ? getTierLabel(props.account) : 'UNKNOWN'))
 const groupOptions = computed(() => [
@@ -116,8 +122,11 @@ const totpDashOffset = computed(() => {
   return circumference * (1 - Math.max(0, Math.min(1, rem / period)))
 })
 
-function syncFormFromAccount(acc: Account | null) {
+let lastSyncedSecret = ''
+
+function syncFormFromAccount(acc: Account | null, resetVisibility: boolean) {
   if (!acc) {
+    lastSyncedSecret = ''
     stopTotpLoop()
     return
   }
@@ -127,16 +136,30 @@ function syncFormFromAccount(acc: Account | null) {
   formPassword.value = acc.accountPassword ?? ''
   formTwoFactorSecret.value = acc.twoFactorSecret ?? ''
   detailsDirty.value = false
-  showPassword.value = false
-  showSecretInput.value = false
-  showRefreshToken.value = false
-  void refreshTotp(acc.twoFactorSecret ?? '')
+  if (resetVisibility) {
+    showPassword.value = false
+    showSecretInput.value = false
+    showRefreshToken.value = false
+  }
+  const nextSecret = (acc.twoFactorSecret ?? '').trim()
+  if (resetVisibility || nextSecret !== lastSyncedSecret) {
+    lastSyncedSecret = nextSecret
+    void refreshTotp(nextSecret)
+  }
 }
 
 watch(
   () => props.account,
-  (acc) => {
-    syncFormFromAccount(acc)
+  (acc, prevAcc) => {
+    const switchedAccount = (acc?.id ?? '') !== (prevAcc?.id ?? '')
+    if (!acc || switchedAccount) {
+      syncFormFromAccount(acc, true)
+      return
+    }
+    // 同一账号被后台自动刷新更新引用时，若用户正在编辑表单则绝不覆盖未保存内容
+    if (!detailsDirty.value) {
+      syncFormFromAccount(acc, false)
+    }
   },
   { immediate: true },
 )
@@ -146,12 +169,13 @@ watch([formGroupId, formLoginAccount, formNotes, formPassword, formTwoFactorSecr
   detailsDirty.value =
     formGroupId.value !== (props.account.groupId ?? '') ||
     formLoginAccount.value.trim() !== getEffectiveLoginAccount(props.account) ||
-    formNotes.value !== (props.account.notes ?? '') ||
+    formNotes.value.trim() !== (props.account.notes ?? '').trim() ||
     formPassword.value !== (props.account.accountPassword ?? '') ||
-    formTwoFactorSecret.value !== (props.account.twoFactorSecret ?? '')
+    formTwoFactorSecret.value.trim() !== (props.account.twoFactorSecret ?? '').trim()
 })
 
 function stopTotpLoop() {
+  totpGeneration++
   if (totpTimer !== null) {
     window.clearInterval(totpTimer)
     totpTimer = null
@@ -162,21 +186,34 @@ function stopTotpLoop() {
 
 async function refreshTotp(secret: string) {
   stopTotpLoop()
+  const gen = totpGeneration
   const trimmed = secret.trim()
   if (!trimmed) return
 
   const pull = async () => {
     try {
-      totpResult.value = await api.generateTOTP(trimmed)
+      const res = await api.generateTOTP(trimmed)
+      if (unmounted || gen !== totpGeneration) return
+      totpResult.value = res
       totpError.value = ''
     } catch (err) {
+      if (unmounted || gen !== totpGeneration) return
       totpResult.value = null
       totpError.value = extractErrorMessage(err)
     }
   }
 
   await pull()
+  // 防止在 IPC 异步等待期间切换账号或卸载组件后创建孤儿定时器
+  if (unmounted || gen !== totpGeneration) return
   totpTimer = window.setInterval(() => {
+    if (unmounted || gen !== totpGeneration) {
+      if (totpTimer !== null) {
+        window.clearInterval(totpTimer)
+        totpTimer = null
+      }
+      return
+    }
     if (!totpResult.value) return
     const nextRem = totpResult.value.remainingSeconds - 1
     if (nextRem <= 0) {
@@ -191,6 +228,7 @@ async function refreshTotp(secret: string) {
 }
 
 onBeforeUnmount(() => {
+  unmounted = true
   stopTotpLoop()
 })
 
@@ -221,9 +259,14 @@ async function handleSaveDetails() {
       accountPassword: formPassword.value,
       twoFactorSecret: formTwoFactorSecret.value,
     })
+    formGroupId.value = updated.groupId ?? ''
     formLoginAccount.value = getEffectiveLoginAccount(updated)
+    formNotes.value = updated.notes ?? ''
+    formPassword.value = updated.accountPassword ?? ''
+    formTwoFactorSecret.value = updated.twoFactorSecret ?? ''
     detailsDirty.value = false
-    void refreshTotp(updated.twoFactorSecret ?? '')
+    lastSyncedSecret = (updated.twoFactorSecret ?? '').trim()
+    void refreshTotp(lastSyncedSecret)
   } catch (err) {
     appStore.notify(`保存失败：${extractErrorMessage(err)}`, 'error')
   } finally {
@@ -375,6 +418,18 @@ async function openValidationUrl(url: string) {
         </button>
 
         <button
+          v-if="isTestingCurrent"
+          type="button"
+          class="inline-flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl border text-xs font-medium cursor-pointer hover:opacity-90"
+          style="border-color: var(--danger); color: var(--danger-text); background-color: var(--danger-soft)"
+          @click="wakeupStore.cancelCurrentTest()"
+        >
+          <Square class="w-3.5 h-3.5" />
+          <span>取消唤醒</span>
+        </button>
+
+        <button
+          v-else
           type="button"
           :disabled="Boolean(wakeupStore.testingScopeId)"
           class="inline-flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl border text-xs font-medium cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-60"
@@ -382,7 +437,7 @@ async function openValidationUrl(url: string) {
           @click="handleQuickWakeup"
         >
           <Zap class="w-3.5 h-3.5" />
-          <span>{{ wakeupStore.testingScopeId ? '唤醒中...' : '唤醒测试' }}</span>
+          <span>{{ wakeupStore.testingScopeId ? '其他唤醒中...' : '唤醒测试' }}</span>
         </button>
       </section>
 
@@ -693,7 +748,7 @@ async function openValidationUrl(url: string) {
               aria-label="复制完整 Refresh Token"
               class="p-1.5 rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-40"
               style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-secondary)"
-              @click="handleCopy('refreshToken', refreshTokenValue, ' Refresh Token')"
+              @click="handleCopy('refreshToken', refreshTokenValue, 'Refresh Token')"
             >
               <Check v-if="copiedField === 'refreshToken'" class="w-3.5 h-3.5" style="color: var(--success)" />
               <Copy v-else class="w-3.5 h-3.5" />

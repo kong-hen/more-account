@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 账号工作台主视图：宽松单行顶栏（搜索 + 聚合筛选下拉含可选低配额/异常 + 排序 + 双视图切换 + 刷新 + 添加）、
 // 浮现式多选批量栏、高舒适度卡片网格 / 紧凑表格双视图。
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Search,
   SlidersHorizontal,
@@ -21,6 +21,7 @@ import AccountCard from '@/components/accounts/AccountCard.vue'
 import AccountTable from '@/components/accounts/AccountTable.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore, type AccountSortBy } from '@/stores/appStore'
+import { extractErrorMessage } from '@/services/api'
 import type { Account } from '@/types/models'
 
 const emit = defineEmits<{
@@ -33,6 +34,71 @@ const appStore = useAppStore()
 const filterMenuOpen = ref(false)
 const filterWrapRef = ref<HTMLElement | null>(null)
 const batchGroupTarget = ref('')
+const draggingAccountId = ref<string | null>(null)
+const dragOverAccountId = ref<string | null>(null)
+
+const canReorder = computed(
+  () => appStore.sortBy === 'custom' && appStore.filteredAccounts.length > 1,
+)
+
+// 分组被删除时自动复位失效的批量归组目标，避免提交已不存在的 groupId
+watch(
+  () => appStore.groups,
+  (groups) => {
+    if (batchGroupTarget.value && !groups.some((g) => g.id === batchGroupTarget.value)) {
+      batchGroupTarget.value = ''
+    }
+  },
+)
+
+function handleDragStart(accountId: string, event: DragEvent) {
+  if (!canReorder.value) return
+  draggingAccountId.value = accountId
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', accountId)
+  }
+}
+
+function handleDragOver(accountId: string, event: DragEvent) {
+  if (!canReorder.value || !draggingAccountId.value) return
+  event.preventDefault()
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move'
+  }
+  if (draggingAccountId.value !== accountId) {
+    dragOverAccountId.value = accountId
+  }
+}
+
+function handleDragEnd() {
+  draggingAccountId.value = null
+  dragOverAccountId.value = null
+}
+
+async function handleDrop(targetId: string, event: DragEvent) {
+  event.preventDefault()
+  const sourceId = draggingAccountId.value
+  handleDragEnd()
+  if (!canReorder.value || !sourceId || sourceId === targetId) return
+
+  const visibleIds = appStore.filteredAccounts.map((a) => a.id)
+  const fromIdx = visibleIds.indexOf(sourceId)
+  const toIdx = visibleIds.indexOf(targetId)
+  if (fromIdx < 0 || toIdx < 0) return
+
+  const reorderedVisible = [...visibleIds]
+  const [moved] = reorderedVisible.splice(fromIdx, 1)
+  reorderedVisible.splice(toIdx, 0, moved)
+
+  // 将可见子列表的新顺序回填到全量账号对应的槽位中，确保不影响其他分组的相对顺序
+  const visibleSet = new Set(visibleIds)
+  let cursor = 0
+  const nextAllIds = appStore.accounts.map((acc) =>
+    visibleSet.has(acc.id) ? reorderedVisible[cursor++] : acc.id,
+  )
+  await appStore.reorderAccounts(nextAllIds)
+}
 
 const currentGroupTitle = computed(() => {
   if (appStore.selectedGroupFilter === 'all') return '全部账号'
@@ -79,7 +145,11 @@ function toggleSelectAllVisible() {
 
 async function applyBatchGroup() {
   if (appStore.selectedAccountIds.length === 0) return
-  await appStore.assignAccountsToGroup(appStore.selectedAccountIds, batchGroupTarget.value)
+  try {
+    await appStore.assignAccountsToGroup(appStore.selectedAccountIds, batchGroupTarget.value)
+  } catch (err) {
+    appStore.notify(`批量归组失败：${extractErrorMessage(err)}`, 'error')
+  }
 }
 
 const sortOptions = [
@@ -525,8 +595,15 @@ const refreshButtonTooltip = computed(() => {
           :account="acc"
           :selected="appStore.selectedAccountIds.includes(acc.id)"
           :active-detail="appStore.activeDetailAccountId === acc.id"
+          :reorderable="canReorder"
+          :dragging="draggingAccountId === acc.id"
+          :drag-over="dragOverAccountId === acc.id"
           @open-detail="handleOpenDetail"
           @toggle-select="appStore.toggleSelectAccount"
+          @drag-start="handleDragStart"
+          @drag-over="handleDragOver"
+          @drop="handleDrop"
+          @drag-end="handleDragEnd"
         />
       </div>
 
@@ -534,9 +611,16 @@ const refreshButtonTooltip = computed(() => {
       <AccountTable
         v-else
         :accounts="appStore.filteredAccounts"
+        :reorderable="canReorder"
+        :dragging-id="draggingAccountId"
+        :drag-over-id="dragOverAccountId"
         @open-detail="handleOpenDetail"
         @toggle-select="appStore.toggleSelectAccount"
         @toggle-select-all="toggleSelectAllVisible"
+        @drag-start="handleDragStart"
+        @drag-over="handleDragOver"
+        @drop="handleDrop"
+        @drag-end="handleDragEnd"
       />
     </div>
   </section>

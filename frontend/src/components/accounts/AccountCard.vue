@@ -10,6 +10,7 @@ import {
   Check,
   CheckCircle2,
   KeyRound,
+  GripVertical,
 } from 'lucide-vue-next'
 import QuotaBar from '@/components/common/QuotaBar.vue'
 import { useAppStore } from '@/stores/appStore'
@@ -29,11 +30,18 @@ const props = defineProps<{
   account: Account
   selected: boolean
   activeDetail: boolean
+  reorderable?: boolean
+  dragging?: boolean
+  dragOver?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'open-detail', account: Account): void
   (e: 'toggle-select', accountId: string): void
+  (e: 'drag-start', accountId: string, event: DragEvent): void
+  (e: 'drag-over', accountId: string, event: DragEvent): void
+  (e: 'drop', accountId: string, event: DragEvent): void
+  (e: 'drag-end'): void
 }>()
 
 const appStore = useAppStore()
@@ -63,25 +71,35 @@ function quotaValueStyle(percentage: number) {
 
 <template>
   <article
+    :draggable="Boolean(reorderable)"
     class="group relative overflow-hidden flex flex-col justify-between p-4 rounded-2xl border cursor-pointer transition-all"
+    :class="[dragging ? 'opacity-50 scale-[0.98]' : '']"
     :style="{
       background: isCurrent
         ? 'linear-gradient(180deg, var(--success-soft) 0%, var(--bg-surface) 38%)'
         : 'var(--bg-surface)',
-      borderColor: activeDetail
+      borderColor: dragOver
         ? 'var(--accent)'
-        : isCurrent
-          ? 'var(--success)'
-          : 'var(--border-subtle)',
-      boxShadow: activeDetail
-        ? isCurrent
-          ? '0 0 0 1px var(--accent), 0 8px 20px -6px rgba(16, 185, 129, 0.24)'
-          : '0 0 0 1px var(--accent), var(--shadow-card)'
-        : isCurrent
-          ? '0 0 0 1px var(--success), 0 8px 20px -6px rgba(16, 185, 129, 0.24)'
-          : 'var(--shadow-card)',
+        : activeDetail
+          ? 'var(--accent)'
+          : isCurrent
+            ? 'var(--success)'
+            : 'var(--border-subtle)',
+      boxShadow: dragOver
+        ? '0 0 0 2px var(--accent), var(--shadow-elevated)'
+        : activeDetail
+          ? isCurrent
+            ? '0 0 0 1px var(--accent), 0 8px 20px -6px rgba(16, 185, 129, 0.24)'
+            : '0 0 0 1px var(--accent), var(--shadow-card)'
+          : isCurrent
+            ? '0 0 0 1px var(--success), 0 8px 20px -6px rgba(16, 185, 129, 0.24)'
+            : 'var(--shadow-card)',
     }"
     @click="emit('open-detail', account)"
+    @dragstart="reorderable && emit('drag-start', account.id, $event)"
+    @dragover="reorderable && emit('drag-over', account.id, $event)"
+    @drop="reorderable && emit('drop', account.id, $event)"
+    @dragend="reorderable && emit('drag-end')"
   >
     <!-- 当前正在使用账号的顶部翠绿强调条，一眼识别 -->
     <div
@@ -93,7 +111,19 @@ function quotaValueStyle(percentage: number) {
     <!-- 顶部信息行 -->
     <div class="space-y-2.5">
       <div class="flex items-start justify-between gap-2">
-        <div class="flex items-start gap-2.5 min-w-0">
+        <div class="flex items-start gap-2 min-w-0">
+          <!-- 默认排序模式下提供拖拽手柄，悬停显示 -->
+          <span
+            v-if="reorderable"
+            title="拖拽调整账号顺序"
+            aria-label="拖拽调整账号顺序"
+            class="mt-0.5 -ml-1 p-0.5 rounded cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+            style="color: var(--text-muted)"
+            @click.stop
+          >
+            <GripVertical class="w-3.5 h-3.5" />
+          </span>
+
           <!-- 多选复选框（平时悬浮或已勾选可见，保持卡片干净） -->
           <button
             type="button"

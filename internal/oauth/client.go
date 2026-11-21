@@ -300,6 +300,5 @@ func MergeRefreshedToken(current model.TokenData, resp *TokenResponse) model.Tok
 		IsGcpTos:        current.IsGcpTos,
 		OAuthClientKey:  DefaultOAuthClientKey,
 		IDToken:         idToken,
-		SessionID:       current.SessionID,
 	}
 }

@@ -19,6 +19,7 @@ export const useWakeupStore = defineStore('wakeup', () => {
   const loading = ref(false)
   const runningTaskId = ref<string | null>(null)
   const testingScopeId = ref<string | null>(null)
+  const testingAccountId = ref<string | null>(null)
 
   async function loadAll() {
     if (!isWailsRuntime()) return
@@ -40,6 +41,7 @@ export const useWakeupStore = defineStore('wakeup', () => {
       appStore.notify('定时唤醒配置已保存', 'success')
     } catch (err) {
       appStore.notify(`保存唤醒配置失败：${extractErrorMessage(err)}`, 'error')
+      throw err
     }
   }
 
@@ -47,7 +49,7 @@ export const useWakeupStore = defineStore('wakeup', () => {
     await saveState({
       ...state.value,
       enabled: !state.value.enabled,
-    })
+    }).catch(() => {})
   }
 
   async function upsertTask(task: WakeupTask) {
@@ -70,7 +72,7 @@ export const useWakeupStore = defineStore('wakeup', () => {
     const tasks = state.value.tasks.map((t) =>
       t.id === taskId ? { ...t, enabled: !t.enabled } : t,
     )
-    await saveState({ ...state.value, tasks })
+    await saveState({ ...state.value, tasks }).catch(() => {})
   }
 
   async function runTaskNow(taskId: string) {
@@ -96,8 +98,12 @@ export const useWakeupStore = defineStore('wakeup', () => {
 
   async function runSingleTest(req: WakeupTestRequest) {
     const appStore = useAppStore()
+    if (testingScopeId.value) {
+      await api.cancelWakeupTest(testingScopeId.value).catch(() => {})
+    }
     const scopeId = req.scopeId || `scope_${Date.now()}`
     testingScopeId.value = scopeId
+    testingAccountId.value = req.accountId
     try {
       const result = await api.runWakeupTest({ ...req, scopeId })
       await loadAll()
@@ -108,26 +114,43 @@ export const useWakeupStore = defineStore('wakeup', () => {
       }
       return result
     } catch (err) {
-      appStore.notify(`唤醒测试失败：${extractErrorMessage(err)}`, 'error', 4500)
+      // 用户主动取消后 testingScopeId 已被置空，不再弹出冗余错误提示
+      if (testingScopeId.value === scopeId) {
+        appStore.notify(`唤醒测试失败：${extractErrorMessage(err)}`, 'error', 4500)
+      }
       return null
     } finally {
       if (testingScopeId.value === scopeId) {
         testingScopeId.value = null
+        testingAccountId.value = null
       }
     }
   }
 
   async function cancelCurrentTest() {
-    if (!testingScopeId.value) return
-    await api.cancelWakeupTest(testingScopeId.value)
+    const scopeId = testingScopeId.value
+    if (!scopeId) return
+    const appStore = useAppStore()
     testingScopeId.value = null
+    testingAccountId.value = null
+    try {
+      await api.cancelWakeupTest(scopeId)
+      appStore.notify('已取消当前唤醒测试', 'info')
+    } catch (err) {
+      appStore.notify(`取消唤醒测试失败：${extractErrorMessage(err)}`, 'error')
+    }
   }
 
   async function clearHistory() {
     const appStore = useAppStore()
-    await api.clearWakeupHistory()
-    history.value = []
-    appStore.notify('唤醒历史已清空', 'success')
+    try {
+      await api.clearWakeupHistory()
+      history.value = []
+      appStore.notify('唤醒历史已清空', 'success')
+    } catch (err) {
+      appStore.notify(`清空唤醒历史失败：${extractErrorMessage(err)}`, 'error')
+      throw err
+    }
   }
 
   return {
@@ -136,8 +159,8 @@ export const useWakeupStore = defineStore('wakeup', () => {
     loading,
     runningTaskId,
     testingScopeId,
+    testingAccountId,
     loadAll,
-    saveState,
     toggleGlobalEnabled,
     upsertTask,
     deleteTask,

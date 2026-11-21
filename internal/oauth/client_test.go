@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -100,5 +101,83 @@ func TestLoginManagerManualCallbackSubmission(t *testing.T) {
 	}
 	if code != "auth-code-999" {
 		t.Fatalf("期望授权码 auth-code-999，实际 %s", code)
+	}
+}
+
+func TestLoginManagerRejectsMissingAndMismatchedState(t *testing.T) {
+	mgr := NewLoginManager()
+	session, err := mgr.StartSession()
+	if err != nil {
+		t.Fatalf("启动 OAuth 会话失败: %v", err)
+	}
+	defer mgr.Cancel()
+
+	// 手动粘贴缺少 state 的回调链接应被拒绝
+	if err := mgr.SubmitCallbackURL(session.RedirectURI + "?code=forged-code"); err == nil {
+		t.Fatal("缺少 state 的手动回调链接应当被拒绝")
+	}
+	if err := mgr.SubmitCallbackURL(session.RedirectURI + "?code=forged-code&state=wrong-state"); err == nil {
+		t.Fatal("state 不匹配的手动回调链接应当被拒绝")
+	}
+
+	// HTTP 回调缺少 state 时应返回 400 并让等待者收到错误（防止 Login CSRF）
+	resp, err := http.Get(session.RedirectURI + "?code=forged-http-code")
+	if err != nil {
+		t.Fatalf("请求本地 OAuth 回调失败: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("缺少 state 的回调应返回 400，实际 %d", resp.StatusCode)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := mgr.WaitForState(ctx, session.State); err == nil {
+		t.Fatal("收到伪造回调后 WaitForState 不应成功返回 code")
+	}
+}
+
+func TestLoginManagerWaitForStateDoesNotCancelNewerSession(t *testing.T) {
+	mgr := NewLoginManager()
+	defer mgr.Cancel()
+
+	s1, err := mgr.StartSession()
+	if err != nil {
+		t.Fatalf("启动会话 1 失败: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, waitErr := mgr.WaitForState(ctx, s1.State)
+		errCh <- waitErr
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+
+	// 并发发起会话 2 应取消会话 1，且会话 1 退出时不得误杀会话 2
+	s2, err := mgr.StartSession()
+	if err != nil {
+		t.Fatalf("启动会话 2 失败: %v", err)
+	}
+
+	select {
+	case waitErr := <-errCh:
+		if !errors.Is(waitErr, ErrOAuthCanceled) {
+			t.Fatalf("会话 1 应返回 ErrOAuthCanceled，实际 %v", waitErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("等待会话 1 退出超时")
+	}
+
+	if err := mgr.SubmitCallbackURL(s2.RedirectURI + "?code=code-from-s2&state=" + s2.State); err != nil {
+		t.Fatalf("向会话 2 提交回调失败（可能被会话 1 误杀）: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	gotCode, err := mgr.WaitForState(ctx, s2.State)
+	if err != nil || gotCode != "code-from-s2" {
+		t.Fatalf("会话 2 期望收到 code-from-s2，实际 code=%q err=%v", gotCode, err)
 	}
 }

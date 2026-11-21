@@ -214,7 +214,8 @@ func FormatModelDisplayName(modelID string) string {
 			} else if len(lw) > 1 && lw[len(lw)-1] == 'b' && isDigits(lw[:len(lw)-1]) {
 				tokens = append(tokens, strings.ToUpper(lw))
 			} else {
-				tokens = append(tokens, strings.ToUpper(lw[:1])+lw[1:])
+				runes := []rune(lw)
+				tokens = append(tokens, strings.ToUpper(string(runes[0]))+string(runes[1:]))
 			}
 		}
 		i++

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 紧凑数据表格视图：适合账号数量较多时高效率浏览、批量多选与快速切号。
+// 紧凑数据表格视图：适合账号数量较多时高效率浏览、批量多选、默认排序拖拽重排与快速切号。
 import { computed } from 'vue'
 import {
   RefreshCw,
@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   ShieldCheck,
   Check,
+  GripVertical,
 } from 'lucide-vue-next'
 import { useAppStore } from '@/stores/appStore'
 import { maskEmail } from '@/utils/privacy'
@@ -23,12 +24,19 @@ import type { Account } from '@/types/models'
 
 const props = defineProps<{
   accounts: Account[]
+  reorderable?: boolean
+  draggingId?: string | null
+  dragOverId?: string | null
 }>()
 
 const emit = defineEmits<{
   (e: 'open-detail', account: Account): void
   (e: 'toggle-select', accountId: string): void
   (e: 'toggle-select-all'): void
+  (e: 'drag-start', accountId: string, event: DragEvent): void
+  (e: 'drag-over', accountId: string, event: DragEvent): void
+  (e: 'drop', accountId: string, event: DragEvent): void
+  (e: 'drag-end'): void
 }>()
 
 const appStore = useAppStore()
@@ -37,6 +45,18 @@ const allSelected = computed(
   () =>
     props.accounts.length > 0 &&
     props.accounts.every((a) => appStore.selectedAccountIds.includes(a.id)),
+)
+
+// 预先计算每行账号的配额分类、异常态、等级与最近重置时间，避免模板渲染期重复多次计算
+const tableRows = computed(() =>
+  props.accounts.map((acc) => ({
+    account: acc,
+    abnormal: isAccountAbnormal(acc),
+    tier: getTierLabel(acc),
+    categories: summarizeQuotaCategories(acc),
+    earliestReset: getEarliestResetTime(acc),
+    group: acc.groupId ? (appStore.groupMap.get(acc.groupId) ?? null) : null,
+  })),
 )
 
 function toneDotColor(percentage: number): string {
@@ -77,6 +97,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
             class="border-b text-[11.5px] font-medium"
             style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
           >
+            <th v-if="reorderable" class="py-2.5 pl-2 pr-0 w-6" aria-label="拖拽排序" />
             <th class="py-2.5 pl-3 pr-2 w-9">
               <button
                 type="button"
@@ -102,29 +123,48 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
         </thead>
         <tbody class="divide-y divide-[var(--border-hairline)] text-xs">
           <tr
-            v-for="acc in accounts"
-            :key="acc.id"
+            v-for="row in tableRows"
+            :key="row.account.id"
+            :draggable="Boolean(reorderable)"
             class="cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+            :class="[draggingId === row.account.id ? 'opacity-50' : '']"
             :style="
-              appStore.activeDetailAccountId === acc.id
-                ? { backgroundColor: 'var(--accent-soft)' }
-                : {}
+              dragOverId === row.account.id
+                ? { boxShadow: 'inset 0 2px 0 0 var(--accent)', backgroundColor: 'var(--accent-soft)' }
+                : appStore.activeDetailAccountId === row.account.id
+                  ? { backgroundColor: 'var(--accent-soft)' }
+                  : {}
             "
-            @click="emit('open-detail', acc)"
+            @click="emit('open-detail', row.account)"
+            @dragstart="reorderable && emit('drag-start', row.account.id, $event)"
+            @dragover="reorderable && emit('drag-over', row.account.id, $event)"
+            @drop="reorderable && emit('drop', row.account.id, $event)"
+            @dragend="reorderable && emit('drag-end')"
           >
+            <td v-if="reorderable" class="py-3 pl-2 pr-0 w-6" @click.stop>
+              <span
+                title="拖拽调整账号顺序"
+                aria-label="拖拽调整账号顺序"
+                class="inline-flex items-center justify-center p-0.5 rounded cursor-grab active:cursor-grabbing"
+                style="color: var(--text-muted)"
+              >
+                <GripVertical class="w-3.5 h-3.5" />
+              </span>
+            </td>
+
             <td class="py-3 pl-3 pr-2" @click.stop>
               <button
                 type="button"
                 aria-label="选择账号"
                 class="w-4 h-4 rounded border flex items-center justify-center cursor-pointer"
                 :style="
-                  appStore.selectedAccountIds.includes(acc.id)
+                  appStore.selectedAccountIds.includes(row.account.id)
                     ? { backgroundColor: 'var(--accent)', borderColor: 'var(--accent)', color: '#fff' }
                     : { borderColor: 'var(--border-strong)', backgroundColor: 'var(--bg-surface)' }
                 "
-                @click="emit('toggle-select', acc.id)"
+                @click="emit('toggle-select', row.account.id)"
               >
-                <Check v-if="appStore.selectedAccountIds.includes(acc.id)" class="w-3 h-3" />
+                <Check v-if="appStore.selectedAccountIds.includes(row.account.id)" class="w-3 h-3" />
               </button>
             </td>
 
@@ -134,9 +174,9 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
                   class="w-2 h-2 rounded-full shrink-0"
                   :style="{
                     backgroundColor:
-                      appStore.currentAccountId === acc.id
+                      appStore.currentAccountId === row.account.id
                         ? 'var(--success)'
-                        : isAccountAbnormal(acc)
+                        : row.abnormal
                           ? 'var(--danger)'
                           : 'transparent',
                   }"
@@ -144,17 +184,17 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
                 <div class="min-w-0">
                   <div class="font-medium flex items-center gap-1.5" style="color: var(--text-primary)">
                     <span class="truncate max-w-[165px] xl:max-w-[220px]">
-                      {{ maskEmail(acc.email, appStore.settings.privacyMode) }}
+                      {{ maskEmail(row.account.email, appStore.settings.privacyMode) }}
                     </span>
                     <ShieldCheck
-                      v-if="acc.twoFactorSecret"
+                      v-if="row.account.twoFactorSecret"
                       class="w-3.5 h-3.5 shrink-0"
                       style="color: var(--text-muted)"
                       title="已配置 2FA 动态码"
                     />
                   </div>
-                  <div v-if="acc.notes" class="text-[11px] truncate max-w-[165px] xl:max-w-[220px]" style="color: var(--text-muted)">
-                    {{ acc.notes }}
+                  <div v-if="row.account.notes" class="text-[11px] truncate max-w-[165px] xl:max-w-[220px]" style="color: var(--text-muted)">
+                    {{ row.account.notes }}
                   </div>
                 </div>
               </div>
@@ -162,38 +202,38 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
 
             <td class="py-3 px-2.5 whitespace-nowrap">
               <span
-                v-if="acc.groupId && appStore.groupMap.get(acc.groupId)"
+                v-if="row.group"
                 class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] whitespace-nowrap"
                 style="background-color: var(--bg-subtle); color: var(--text-secondary)"
               >
                 <span
                   class="w-1.5 h-1.5 rounded-full shrink-0"
-                  :style="{ backgroundColor: appStore.groupMap.get(acc.groupId)?.color }"
+                  :style="{ backgroundColor: row.group.color }"
                 />
-                {{ appStore.groupMap.get(acc.groupId)?.name }}
+                {{ row.group.name }}
               </span>
               <span v-else class="text-[11px] whitespace-nowrap" style="color: var(--text-muted)">未分组</span>
             </td>
 
             <td class="py-3 px-2.5 whitespace-nowrap">
               <span
-                v-if="getTierLabel(acc) !== 'UNKNOWN'"
+                v-if="row.tier !== 'UNKNOWN'"
                 class="px-1.5 py-0.5 rounded text-[10.5px] font-semibold"
                 style="background-color: var(--bg-subtle); color: var(--text-secondary)"
               >
-                {{ getTierLabel(acc) }}
+                {{ row.tier }}
               </span>
               <span v-else style="color: var(--text-muted)">—</span>
             </td>
 
             <td class="py-3 px-2.5">
-              <div v-if="isAccountAbnormal(acc)" class="inline-flex items-center gap-1 text-[11.5px] font-medium whitespace-nowrap" style="color: var(--danger-text)">
+              <div v-if="row.abnormal" class="inline-flex items-center gap-1 text-[11.5px] font-medium whitespace-nowrap" style="color: var(--danger-text)">
                 <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
-                <span>{{ acc.disabled ? '令牌失效' : '状态异常' }}</span>
+                <span>{{ row.account.disabled ? '令牌失效' : '状态异常' }}</span>
               </div>
-              <div v-else-if="summarizeQuotaCategories(acc).length > 0" class="flex items-center flex-wrap gap-1.5">
+              <div v-else-if="row.categories.length > 0" class="flex items-center flex-wrap gap-1.5">
                 <span
-                  v-for="cat in summarizeQuotaCategories(acc)"
+                  v-for="cat in row.categories"
                   :key="cat.key"
                   :title="categoryTooltip(cat)"
                   class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] font-mono-num whitespace-nowrap"
@@ -205,7 +245,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
                     <span :style="{ color: toneTextColor(cat.fiveHour.percentage) }">5h {{ cat.fiveHour.percentage }}%</span>
                     <span style="color: var(--text-muted)">/</span>
                     <span v-if="cat.weekly" :style="{ color: toneTextColor(cat.weekly.percentage) }">周 {{ cat.weekly.percentage }}%</span>
-                    <span v-else style="color: var(--text-muted)">周 {{ appStore.refreshingIds[acc.id] ? '同步中' : '--' }}</span>
+                    <span v-else style="color: var(--text-muted)">周 {{ appStore.refreshingIds[row.account.id] ? '同步中' : '--' }}</span>
                   </template>
                   <template v-else-if="cat.weekly">
                     <span :style="{ color: toneTextColor(cat.weekly.percentage) }">周 {{ cat.weekly.percentage }}%</span>
@@ -216,7 +256,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
             </td>
 
             <td class="py-3 px-2.5 font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-muted)">
-              {{ formatResetCountdown(getEarliestResetTime(acc), appStore.nowMs) }}
+              {{ formatResetCountdown(row.earliestReset, appStore.nowMs) }}
             </td>
 
             <td class="py-3 pl-2.5 pr-3 text-right whitespace-nowrap" @click.stop>
@@ -225,26 +265,26 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
                   type="button"
                   title="刷新配额"
                   aria-label="刷新配额"
-                  :disabled="Boolean(appStore.refreshingIds[acc.id])"
+                  :disabled="Boolean(appStore.refreshingIds[row.account.id])"
                   class="p-1.5 rounded-lg border shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
                   style="border-color: var(--border-subtle); color: var(--text-secondary); background-color: var(--bg-surface)"
-                  @click="appStore.refreshAccount(acc.id)"
+                  @click="appStore.refreshAccount(row.account.id)"
                 >
-                  <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': Boolean(appStore.refreshingIds[acc.id]) }" />
+                  <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': Boolean(appStore.refreshingIds[row.account.id]) }" />
                 </button>
                 <button
                   type="button"
-                  :disabled="appStore.switchingId === acc.id"
+                  :disabled="appStore.switchingId === row.account.id"
                   class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                   :style="
-                    appStore.currentAccountId === acc.id
+                    appStore.currentAccountId === row.account.id
                       ? { backgroundColor: 'var(--success-soft)', color: 'var(--success-text)' }
                       : { backgroundColor: 'var(--accent)', color: '#ffffff' }
                   "
-                  @click="appStore.switchToAccount(acc.id)"
+                  @click="appStore.switchToAccount(row.account.id)"
                 >
                   <ArrowRightLeft class="w-3 h-3 shrink-0" />
-                  <span>{{ appStore.currentAccountId === acc.id ? '当前' : '切换' }}</span>
+                  <span>{{ appStore.currentAccountId === row.account.id ? '当前' : '切换' }}</span>
                 </button>
               </div>
             </td>

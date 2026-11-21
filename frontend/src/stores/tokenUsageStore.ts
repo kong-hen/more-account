@@ -32,61 +32,94 @@ export const useTokenUsageStore = defineStore('tokenUsage', () => {
   const detailLoading = ref(false)
   const activeDetail = ref<ConversationDetail | null>(null)
 
+  let querySeq = 0
+  let detailSeq = 0
+
   async function fetchQuery(patch?: Partial<TokenUsageQuery>) {
     if (patch) {
       query.value = { ...query.value, ...patch }
     }
     if (!isWailsRuntime()) return
+    const seq = ++querySeq
     loading.value = true
     error.value = ''
     try {
-      bundle.value = await api.queryTokenUsage(query.value)
+      const res = await api.queryTokenUsage(query.value)
+      if (seq !== querySeq) return
+      bundle.value = res
     } catch (err) {
+      if (seq !== querySeq) return
       error.value = extractErrorMessage(err)
     } finally {
-      loading.value = false
+      if (seq === querySeq) {
+        loading.value = false
+      }
     }
   }
 
   async function sync(rebuild = false) {
     if (!isWailsRuntime()) return
     const appStore = useAppStore()
+    const seq = ++querySeq
     syncing.value = true
     error.value = ''
     try {
-      bundle.value = await api.syncTokenUsage(rebuild, query.value)
+      const res = await api.syncTokenUsage(rebuild, query.value)
+      if (seq !== querySeq) return
+      bundle.value = res
       appStore.notify(
         rebuild
-          ? `已重建索引（扫描 ${bundle.value.overview.scannedFiles} 个会话）`
-          : `增量同步完成（耗时 ${bundle.value.overview.scanDurationMs}ms）`,
+          ? `已重建索引（扫描 ${res.overview.scannedFiles} 个会话）`
+          : `增量同步完成（耗时 ${res.overview.scanDurationMs}ms）`,
         'success',
       )
     } catch (err) {
+      if (seq !== querySeq) return
       error.value = extractErrorMessage(err)
       appStore.notify(`同步 Token 用量失败：${error.value}`, 'error')
     } finally {
-      syncing.value = false
+      if (seq === querySeq) {
+        syncing.value = false
+      }
+    }
+  }
+
+  // 当用户在设置中更改自定义扫描目录时清空旧缓存并按需刷新
+  function invalidate(reloadNow = false) {
+    querySeq++
+    bundle.value = null
+    closeConversationDetail()
+    if (reloadNow) {
+      void fetchQuery({ page: 1 })
     }
   }
 
   async function openConversationDetail(conversationId: string) {
     if (!isWailsRuntime()) return
     const appStore = useAppStore()
+    const seq = ++detailSeq
     detailOpen.value = true
     detailLoading.value = true
     activeDetail.value = null
     try {
-      activeDetail.value = await api.getConversationDetail(conversationId)
+      const res = await api.getConversationDetail(conversationId)
+      if (seq !== detailSeq || !detailOpen.value) return
+      activeDetail.value = res
     } catch (err) {
+      if (seq !== detailSeq) return
       appStore.notify(`加载对话明细失败：${extractErrorMessage(err)}`, 'error')
       detailOpen.value = false
     } finally {
-      detailLoading.value = false
+      if (seq === detailSeq) {
+        detailLoading.value = false
+      }
     }
   }
 
   function closeConversationDetail() {
+    detailSeq++
     detailOpen.value = false
+    detailLoading.value = false
     activeDetail.value = null
   }
 
@@ -101,6 +134,7 @@ export const useTokenUsageStore = defineStore('tokenUsage', () => {
     activeDetail,
     fetchQuery,
     sync,
+    invalidate,
     openConversationDetail,
     closeConversationDetail,
   }

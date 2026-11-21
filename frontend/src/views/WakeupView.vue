@@ -4,6 +4,7 @@ import { onMounted, ref } from 'vue'
 import {
   Plus,
   Play,
+  Square,
   Pencil,
   Trash2,
   Clock,
@@ -19,10 +20,10 @@ import WakeupTaskModal from '@/components/wakeup/WakeupTaskModal.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
-import { api } from '@/services/api'
+import { api, extractErrorMessage } from '@/services/api'
 import { maskEmail } from '@/utils/privacy'
 import { formatDateTime } from '@/utils/quota'
-import type { WakeupTask } from '@/types/models'
+import type { WakeupHistoryItem, WakeupTask } from '@/types/models'
 
 const appStore = useAppStore()
 const wakeupStore = useWakeupStore()
@@ -31,7 +32,9 @@ const activeTab = ref<'tasks' | 'history'>('tasks')
 const taskModalOpen = ref(false)
 const editingTask = ref<WakeupTask | null>(null)
 const deletingTask = ref<WakeupTask | null>(null)
+const deleting = ref(false)
 const clearHistoryConfirm = ref(false)
+const clearingHistory = ref(false)
 
 onMounted(() => {
   void wakeupStore.loadAll()
@@ -68,19 +71,44 @@ function describeSchedule(task: WakeupTask): string {
   }
 }
 
+function formatHistorySource(item: WakeupHistoryItem): string {
+  if (item.taskName) {
+    return item.triggerType === 'scheduled' ? item.taskName : `${item.taskName}（手动）`
+  }
+  return item.triggerType === 'scheduled' ? '定时任务' : '手动测试'
+}
+
 async function confirmDeleteTask() {
   if (!deletingTask.value) return
-  await wakeupStore.deleteTask(deletingTask.value.id)
-  deletingTask.value = null
+  deleting.value = true
+  try {
+    await wakeupStore.deleteTask(deletingTask.value.id)
+    deletingTask.value = null
+  } catch {
+    // store 内已提示错误，保留对话框状态
+  } finally {
+    deleting.value = false
+  }
 }
 
 async function confirmClearHistory() {
-  await wakeupStore.clearHistory()
-  clearHistoryConfirm.value = false
+  clearingHistory.value = true
+  try {
+    await wakeupStore.clearHistory()
+    clearHistoryConfirm.value = false
+  } catch {
+    // store 内已提示错误
+  } finally {
+    clearingHistory.value = false
+  }
 }
 
-function openUrl(url: string) {
-  void api.openExternalURL(url)
+async function openUrl(url: string) {
+  try {
+    await api.openExternalURL(url)
+  } catch (err) {
+    appStore.notify(`打开验证链接失败：${extractErrorMessage(err)}`, 'error')
+  }
 }
 </script>
 
@@ -130,6 +158,18 @@ function openUrl(url: string) {
       </div>
 
       <div class="wails-no-drag flex items-center gap-1.5 shrink-0">
+        <!-- 若有进行中的单账号唤醒测试，提供顶栏一键中断入口 -->
+        <button
+          v-if="wakeupStore.testingScopeId"
+          type="button"
+          class="h-8 inline-flex items-center gap-1.5 px-3 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:opacity-90"
+          style="border-color: var(--danger); background-color: var(--danger-soft); color: var(--danger-text)"
+          @click="wakeupStore.cancelCurrentTest()"
+        >
+          <Square class="w-3.5 h-3.5" />
+          <span>取消唤醒测试</span>
+        </button>
+
         <!-- 调度器总开关 -->
         <button
           type="button"
@@ -268,14 +308,14 @@ function openUrl(url: string) {
               <div class="flex items-center gap-1.5 shrink-0">
                 <button
                   type="button"
-                  :disabled="wakeupStore.runningTaskId === task.id"
+                  :disabled="Boolean(wakeupStore.runningTaskId)"
                   class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
                   style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
                   @click="wakeupStore.runTaskNow(task.id)"
                 >
                   <Loader2 v-if="wakeupStore.runningTaskId === task.id" class="w-3.5 h-3.5 animate-spin" />
                   <Play v-else class="w-3.5 h-3.5" />
-                  <span>立即执行</span>
+                  <span>{{ wakeupStore.runningTaskId === task.id ? '执行中...' : '立即执行' }}</span>
                 </button>
                 <button
                   type="button"
@@ -334,7 +374,7 @@ function openUrl(url: string) {
                       class="px-1.5 py-0.5 rounded text-[10.5px] font-medium"
                       style="background-color: var(--bg-subtle); color: var(--text-secondary)"
                     >
-                      {{ item.triggerType === 'scheduled' ? (item.taskName || '定时任务') : '手动测试' }}
+                      {{ formatHistorySource(item) }}
                     </span>
                   </td>
                   <td class="py-3 px-3 font-medium max-w-[200px] truncate whitespace-nowrap" style="color: var(--text-primary)">
@@ -392,6 +432,7 @@ function openUrl(url: string) {
       title="删除唤醒任务"
       :message="`确定删除定时唤醒任务「${deletingTask?.name ?? ''}」吗？此操作无法撤销。`"
       confirm-text="删除任务"
+      :loading="deleting"
       @cancel="deletingTask = null"
       @confirm="confirmDeleteTask"
     />
@@ -401,6 +442,7 @@ function openUrl(url: string) {
       title="清空唤醒历史"
       message="确定清空全部唤醒执行历史记录吗？"
       confirm-text="清空"
+      :loading="clearingHistory"
       @cancel="clearHistoryConfirm = false"
       @confirm="confirmClearHistory"
     />

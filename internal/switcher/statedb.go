@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,38 +15,86 @@ import (
 	"more-account/internal/model"
 )
 
-// InjectAccountToStateDB 将账号凭据以 Protobuf + Base64 格式注入 Antigravity IDE / 旧版 state.vscdb。
+// buildSQLiteURI 构造安全转义后的 SQLite file: URI，避免路径中的 ?/#/% 与 Windows 反斜杠破坏 DSN，并正确启用 busy_timeout。
+func buildSQLiteURI(dbPath string, readOnly bool) string {
+	slashPath := filepath.ToSlash(dbPath)
+	if len(slashPath) >= 2 && slashPath[1] == ':' {
+		// Windows 盘符路径转为 file:///C:/... 形式
+		slashPath = "/" + slashPath
+	}
+	u := url.URL{
+		Scheme: "file",
+		Path:   slashPath,
+	}
+	q := url.Values{}
+	if readOnly {
+		q.Set("mode", "ro")
+	}
+	q.Add("_pragma", "busy_timeout(5000)")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func readExistingTopic(tx *sql.Tx, key string) ([]byte, error) {
+	var existingVal string
+	err := tx.QueryRow(`SELECT value FROM ItemTable WHERE key = ?`, key).Scan(&existingVal)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if strings.TrimSpace(existingVal) == "" {
+		return nil, nil
+	}
+	decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(existingVal))
+	if decErr != nil {
+		return nil, nil
+	}
+	return decoded, nil
+}
+
+func upsertTopicSentinel(tx *sql.Tx, tableKey, sentinelKey string, payload []byte) error {
+	currentTopic, err := readExistingTopic(tx, tableKey)
+	if err != nil {
+		return fmt.Errorf("读取既有 %s 失败: %w", tableKey, err)
+	}
+	topic, err := RemoveUnifiedTopicEntry(currentTopic, sentinelKey)
+	if err != nil {
+		topic = nil
+	}
+	if len(payload) > 0 {
+		topic = append(topic, CreateUnifiedTopicEntry(sentinelKey, payload)...)
+	}
+	if len(topic) == 0 {
+		_, err = tx.Exec(`DELETE FROM ItemTable WHERE key = ?`, tableKey)
+		return err
+	}
+	_, err = tx.Exec(`INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)`,
+		tableKey, base64.StdEncoding.EncodeToString(topic))
+	return err
+}
+
+// InjectAccountToStateDB 将账号凭据以事务 + Protobuf/Base64 格式原子注入 Antigravity IDE / 旧版 state.vscdb。
 func InjectAccountToStateDB(dbPath string, account model.Account) error {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		return fmt.Errorf("创建 state.vscdb 目录失败: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", buildSQLiteURI(dbPath, false))
 	if err != nil {
 		return fmt.Errorf("打开 state.vscdb 失败: %w", err)
 	}
 	defer db.Close()
 
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT)`); err != nil {
-		return fmt.Errorf("初始化 ItemTable 失败: %w", err)
-	}
-
-	// 读取现有 unified oauthToken 并仅替换 oauthTokenInfoSentinelKey
-	var currentTopic []byte
-	var existingVal string
-	err = db.QueryRow(`SELECT value FROM ItemTable WHERE key = ?`, "antigravityUnifiedStateSync.oauthToken").Scan(&existingVal)
-	if err == nil && strings.TrimSpace(existingVal) != "" {
-		decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(existingVal))
-		if decErr == nil {
-			currentTopic = decoded
-		}
-	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("读取既有 Unified OAuth 失败: %w", err)
-	}
-
-	topic, err := RemoveUnifiedTopicEntry(currentTopic, "oauthTokenInfoSentinelKey")
+	tx, err := db.Begin()
 	if err != nil {
-		topic = nil
+		return fmt.Errorf("开启 state.vscdb 事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT)`); err != nil {
+		return fmt.Errorf("初始化 ItemTable 失败: %w", err)
 	}
 
 	oauthInfo := CreateOAuthTokenInfo(
@@ -56,37 +105,35 @@ func InjectAccountToStateDB(dbPath string, account model.Account) error {
 		account.Token.IDToken,
 		account.Email,
 	)
-	topic = append(topic, CreateUnifiedTopicEntry("oauthTokenInfoSentinelKey", oauthInfo)...)
-	topicB64 := base64.StdEncoding.EncodeToString(topic)
-
-	if _, err := db.Exec(`INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)`,
-		"antigravityUnifiedStateSync.oauthToken", topicB64); err != nil {
+	if err := upsertTopicSentinel(tx, "antigravityUnifiedStateSync.oauthToken", "oauthTokenInfoSentinelKey", oauthInfo); err != nil {
 		return fmt.Errorf("写入 oauthToken 失败: %w", err)
 	}
 
 	if email := strings.TrimSpace(account.Email); email != "" {
-		userStatus := CreateUnifiedTopicEntry("userStatusSentinelKey", CreateMinimalUserStatusPayload(email))
-		if _, err := db.Exec(`INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)`,
-			"antigravityUnifiedStateSync.userStatus", base64.StdEncoding.EncodeToString(userStatus)); err != nil {
+		if err := upsertTopicSentinel(tx, "antigravityUnifiedStateSync.userStatus", "userStatusSentinelKey", CreateMinimalUserStatusPayload(email)); err != nil {
 			return fmt.Errorf("写入 userStatus 失败: %w", err)
 		}
 	}
 
 	if proj := strings.TrimSpace(account.Token.ProjectID); proj != "" {
-		pref := CreateUnifiedTopicEntry("enterpriseGcpProjectId", CreateStringValuePayload(proj))
-		if _, err := db.Exec(`INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)`,
-			"antigravityUnifiedStateSync.enterprisePreferences", base64.StdEncoding.EncodeToString(pref)); err != nil {
+		if err := upsertTopicSentinel(tx, "antigravityUnifiedStateSync.enterprisePreferences", "enterpriseGcpProjectId", CreateStringValuePayload(proj)); err != nil {
 			return fmt.Errorf("写入 enterprisePreferences 失败: %w", err)
 		}
 	} else {
-		_, _ = db.Exec(`DELETE FROM ItemTable WHERE key = ?`, "antigravityUnifiedStateSync.enterprisePreferences")
+		// 仅移除 enterpriseGcpProjectId sentinel，保留同 key 下其他偏好项。
+		if err := upsertTopicSentinel(tx, "antigravityUnifiedStateSync.enterprisePreferences", "enterpriseGcpProjectId", nil); err != nil {
+			return fmt.Errorf("清理 enterpriseGcpProjectId 失败: %w", err)
+		}
 	}
 
-	if _, err := db.Exec(`INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)`,
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)`,
 		"antigravityOnboarding", "true"); err != nil {
 		return fmt.Errorf("写入 Onboarding 标记失败: %w", err)
 	}
 
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交 state.vscdb 事务失败: %w", err)
+	}
 	return nil
 }
 
@@ -100,7 +147,7 @@ func ReadRefreshTokenFromStateDB(dbPath string) (string, error) {
 }
 
 // ReadCredentialFromStateDB 以只读方式从 state.vscdb 中提取当前账号的令牌与邮箱信息。
-// 若数据库文件不存在或未写入登录态，返回 (nil, nil)。
+// 若数据库文件不存在、尚无 ItemTable 表或未写入登录态，返回 (nil, nil)。
 func ReadCredentialFromStateDB(dbPath string) (*SystemCredential, error) {
 	if strings.TrimSpace(dbPath) == "" {
 		return nil, nil
@@ -111,8 +158,7 @@ func ReadCredentialFromStateDB(dbPath string) (*SystemCredential, error) {
 		}
 		return nil, err
 	}
-	dsn := fmt.Sprintf("file:%s?mode=ro", dbPath)
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", buildSQLiteURI(dbPath, true))
 	if err != nil {
 		return nil, fmt.Errorf("只读打开 state.vscdb 失败: %w", err)
 	}
@@ -127,6 +173,9 @@ func ReadCredentialFromStateDB(dbPath string) (*SystemCredential, error) {
 			accessTok, refreshTok, idTok = ExtractOAuthInfoFromUnifiedOAuth(raw)
 		}
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("读取 state.vscdb oauthToken 失败: %w", err)
 	}
 

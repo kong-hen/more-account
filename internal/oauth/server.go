@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +13,9 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrOAuthCanceled 表示用户主动取消或由新会话替代了旧的 OAuth 授权等待。
+var ErrOAuthCanceled = errors.New("已取消 OAuth 授权")
 
 // LoginSession 表示一次进行中的浏览器 OAuth 授权会话。
 type LoginSession struct {
@@ -103,11 +107,12 @@ func (m *LoginManager) StartSession() (LoginSession, error) {
 			_, _ = w.Write([]byte(callbackHTML(false, "授权失败，请返回 More Account 查看详情。")))
 			return
 		}
-		if gotState := strings.TrimSpace(q.Get("state")); gotState != "" && gotState != sess.state {
-			sess.deliverErr(fmt.Errorf("OAuth state 校验不匹配"))
+		// 严格强制校验 state 非空且与本次会话一致，防止本地 OAuth Login CSRF 攻击。
+		if gotState := strings.TrimSpace(q.Get("state")); gotState == "" || gotState != sess.state {
+			sess.deliverErr(fmt.Errorf("OAuth state 校验失败或缺失"))
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(callbackHTML(false, "安全校验失败（state 不匹配），请重新发起授权。")))
+			_, _ = w.Write([]byte(callbackHTML(false, "安全校验失败（state 缺失或不匹配），请重新发起授权。")))
 			return
 		}
 		code := strings.TrimSpace(q.Get("code"))
@@ -125,8 +130,12 @@ func (m *LoginManager) StartSession() (LoginSession, error) {
 	sess.server = &http.Server{Handler: mux}
 
 	m.mu.Lock()
+	prev := m.current
 	m.current = sess
 	m.mu.Unlock()
+	if prev != nil {
+		prev.close()
+	}
 
 	go func() {
 		_ = sess.server.Serve(listener)
@@ -139,37 +148,49 @@ func (m *LoginManager) StartSession() (LoginSession, error) {
 	}, nil
 }
 
-// CurrentRedirectURI 返回当前会话对应的 redirect_uri。
-func (m *LoginManager) CurrentRedirectURI() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.current == nil {
-		return ""
-	}
-	return m.current.redirectURI
+// WaitForCode 阻塞等待当前会话的浏览器回调、手动提交回调链接或取消信号。
+func (m *LoginManager) WaitForCode(ctx context.Context) (string, error) {
+	return m.WaitForState(ctx, "")
 }
 
-// WaitForCode 阻塞等待浏览器回调、手动提交回调链接或取消信号。
-func (m *LoginManager) WaitForCode(ctx context.Context) (string, error) {
+// WaitForState 按指定 state 绑定等待对应会话，退出时仅清理自身会话，绝不误杀并发重启的新会话。
+func (m *LoginManager) WaitForState(ctx context.Context, expectedState string) (string, error) {
 	m.mu.Lock()
 	sess := m.current
 	m.mu.Unlock()
 	if sess == nil {
+		if expectedState != "" {
+			return "", ErrOAuthCanceled
+		}
 		return "", fmt.Errorf("当前没有进行中的 OAuth 授权会话")
+	}
+	if expectedState != "" && sess.state != expectedState {
+		return "", ErrOAuthCanceled
 	}
 
 	select {
 	case code := <-sess.codeCh:
-		m.Cancel()
+		m.cancelIfCurrent(sess)
 		return code, nil
 	case err := <-sess.errCh:
-		m.Cancel()
+		m.cancelIfCurrent(sess)
 		return "", err
 	case <-sess.cancelCh:
-		return "", fmt.Errorf("已取消 OAuth 授权")
+		return "", ErrOAuthCanceled
 	case <-ctx.Done():
-		m.Cancel()
+		m.cancelIfCurrent(sess)
 		return "", fmt.Errorf("等待 OAuth 授权超时")
+	}
+}
+
+func (m *LoginManager) cancelIfCurrent(target *activeSession) {
+	m.mu.Lock()
+	if m.current == target {
+		m.current = nil
+	}
+	m.mu.Unlock()
+	if target != nil {
+		target.close()
 	}
 }
 
@@ -195,8 +216,8 @@ func (m *LoginManager) SubmitCallbackURL(rawURL string) error {
 		sess.deliverErr(fmt.Errorf("Google 授权返回错误: %s", errParam))
 		return nil
 	}
-	if gotState := strings.TrimSpace(q.Get("state")); gotState != "" && gotState != sess.state {
-		return fmt.Errorf("回调链接中的 state 与本次授权不匹配，请重新发起授权")
+	if gotState := strings.TrimSpace(q.Get("state")); gotState == "" || gotState != sess.state {
+		return fmt.Errorf("回调链接缺少 state 或与本次授权不匹配，请重新发起授权")
 	}
 	code := strings.TrimSpace(q.Get("code"))
 	if code == "" {

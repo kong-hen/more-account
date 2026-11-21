@@ -247,24 +247,25 @@ func ReadActiveCredentialForTarget(target string) (*SystemCredential, string, er
 	var probes []credProbe
 	switch normalizeTarget(target) {
 	case "ide":
+		// IDE 模式优先读取 IDE 专属 state.vscdb，其次兼容共享系统凭据，避免误串旧版桌面端 state.vscdb。
 		probes = []credProbe{
 			{source: "ide_statedb", read: func() (*SystemCredential, error) { return ReadCredentialFromStateDB(DefaultIDEStateDBPath()) }},
 			{source: "keychain", read: readParsedOSSystemCredential},
 			{source: "desktop_fallback", read: readDesktopFallbackCredential},
-			{source: "desktop_statedb", read: func() (*SystemCredential, error) { return ReadCredentialFromStateDB(DefaultDesktopStateDBPath()) }},
 		}
 	case "cli":
+		// CLI 模式优先读取独立 CLI 凭据文件，缺失时兼容共享系统凭据。
 		probes = []credProbe{
 			{source: "cli_file", read: ReadCLICredential},
 			{source: "keychain", read: readParsedOSSystemCredential},
 			{source: "desktop_fallback", read: readDesktopFallbackCredential},
 		}
 	default:
+		// 桌面版模式读取系统凭据库、桌面回退文件及旧版桌面 state.vscdb，避免串读 IDE state.vscdb。
 		probes = []credProbe{
 			{source: "keychain", read: readParsedOSSystemCredential},
 			{source: "desktop_fallback", read: readDesktopFallbackCredential},
 			{source: "desktop_statedb", read: func() (*SystemCredential, error) { return ReadCredentialFromStateDB(DefaultDesktopStateDBPath()) }},
-			{source: "ide_statedb", read: func() (*SystemCredential, error) { return ReadCredentialFromStateDB(DefaultIDEStateDBPath()) }},
 		}
 	}
 

@@ -160,36 +160,166 @@ func normalizeSettings(in model.AppSettings) model.AppSettings {
 	} else if in.InactiveAutoRefreshMinutes > 1440 {
 		in.InactiveAutoRefreshMinutes = 1440
 	}
+	in.DesktopAppPath = strings.TrimSpace(in.DesktopAppPath)
+	in.IdeAppPath = strings.TrimSpace(in.IdeAppPath)
+	in.TokenUsageDataDir = strings.TrimSpace(in.TokenUsageDataDir)
 	return in
 }
 
-func (s *Store) saveAccountsLocked() error {
+func cloneBoolPtr(p *bool) *bool {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+func cloneQuotaData(q *model.QuotaData) *model.QuotaData {
+	if q == nil {
+		return nil
+	}
+	cp := *q
+	if q.Models != nil {
+		cp.Models = make([]model.ModelQuota, len(q.Models))
+		copy(cp.Models, q.Models)
+	}
+	if q.SummaryBuckets != nil {
+		cp.SummaryBuckets = make([]model.QuotaBucket, len(q.SummaryBuckets))
+		copy(cp.SummaryBuckets, q.SummaryBuckets)
+	}
+	if q.Credits != nil {
+		cp.Credits = make([]model.CreditInfo, len(q.Credits))
+		copy(cp.Credits, q.Credits)
+	}
+	cp.IsGcpTos = cloneBoolPtr(q.IsGcpTos)
+	return &cp
+}
+
+func cloneQuotaError(e *model.QuotaErrorInfo) *model.QuotaErrorInfo {
+	if e == nil {
+		return nil
+	}
+	cp := *e
+	return &cp
+}
+
+func cloneAccount(acc model.Account) model.Account {
+	cp := acc
+	cp.Token.IsGcpTos = cloneBoolPtr(acc.Token.IsGcpTos)
+	cp.Quota = cloneQuotaData(acc.Quota)
+	cp.QuotaError = cloneQuotaError(acc.QuotaError)
+	return cp
+}
+
+func cloneAccounts(src []model.Account) []model.Account {
+	out := make([]model.Account, len(src))
+	for i := range src {
+		out[i] = cloneAccount(src[i])
+	}
+	return out
+}
+
+func cloneStrings(src []string) []string {
+	if src == nil {
+		return nil
+	}
+	out := make([]string, len(src))
+	copy(out, src)
+	return out
+}
+
+func cloneInts(src []int) []int {
+	if src == nil {
+		return nil
+	}
+	out := make([]int, len(src))
+	copy(out, src)
+	return out
+}
+
+func cloneWakeupTask(t model.WakeupTask) model.WakeupTask {
+	cp := t
+	cp.Schedule.DailyTimes = cloneStrings(t.Schedule.DailyTimes)
+	cp.Schedule.WeeklyDays = cloneInts(t.Schedule.WeeklyDays)
+	cp.Schedule.WeeklyTimes = cloneStrings(t.Schedule.WeeklyTimes)
+	cp.Schedule.SelectedModels = cloneStrings(t.Schedule.SelectedModels)
+	cp.Schedule.SelectedAccounts = cloneStrings(t.Schedule.SelectedAccounts)
+	return cp
+}
+
+func cloneWakeupState(st model.WakeupState) model.WakeupState {
+	out := model.WakeupState{
+		Enabled: st.Enabled,
+		Tasks:   make([]model.WakeupTask, len(st.Tasks)),
+	}
+	for i := range st.Tasks {
+		out.Tasks[i] = cloneWakeupTask(st.Tasks[i])
+	}
+	return out
+}
+
+func maxAccountSortOrder(accounts []model.Account) int {
+	if len(accounts) == 0 {
+		return -1
+	}
+	maxVal := accounts[0].SortOrder
+	for i := 1; i < len(accounts); i++ {
+		if accounts[i].SortOrder > maxVal {
+			maxVal = accounts[i].SortOrder
+		}
+	}
+	return maxVal
+}
+
+func maxGroupSortOrder(groups []model.AccountGroup) int {
+	if len(groups) == 0 {
+		return -1
+	}
+	maxVal := groups[0].SortOrder
+	for i := 1; i < len(groups); i++ {
+		if groups[i].SortOrder > maxVal {
+			maxVal = groups[i].SortOrder
+		}
+	}
+	return maxVal
+}
+
+func (s *Store) hasGroupLocked(groupID string) bool {
+	for _, g := range s.groups {
+		if g.ID == groupID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) writeAccountsFile(currentID string, accounts []model.Account) error {
 	payload := persistedAccountsFile{
 		Version:          "1.0",
-		CurrentAccountID: s.currentAccountID,
-		Accounts:         s.accounts,
+		CurrentAccountID: currentID,
+		Accounts:         accounts,
 	}
 	return WriteJSONAtomic(filepath.Join(s.dataDir, accountsFileName), payload, 0600)
 }
 
-func (s *Store) saveGroupsLocked() error {
-	return WriteJSONAtomic(filepath.Join(s.dataDir, groupsFileName), s.groups, 0600)
+func (s *Store) writeGroupsFile(groups []model.AccountGroup) error {
+	return WriteJSONAtomic(filepath.Join(s.dataDir, groupsFileName), groups, 0600)
 }
 
-func (s *Store) saveSettingsLocked() error {
-	return WriteJSONAtomic(filepath.Join(s.dataDir, settingsFileName), s.settings, 0600)
+func (s *Store) writeSettingsFile(settings model.AppSettings) error {
+	return WriteJSONAtomic(filepath.Join(s.dataDir, settingsFileName), settings, 0600)
 }
 
-func (s *Store) saveSwitchHistoryLocked() error {
-	return WriteJSONAtomic(filepath.Join(s.dataDir, switchHistoryFileName), s.switchHistory, 0600)
+func (s *Store) writeSwitchHistoryFile(items []model.SwitchHistoryItem) error {
+	return WriteJSONAtomic(filepath.Join(s.dataDir, switchHistoryFileName), items, 0600)
 }
 
-func (s *Store) saveWakeupStateLocked() error {
-	return WriteJSONAtomic(filepath.Join(s.dataDir, wakeupStateFileName), s.wakeupState, 0600)
+func (s *Store) writeWakeupStateFile(state model.WakeupState) error {
+	return WriteJSONAtomic(filepath.Join(s.dataDir, wakeupStateFileName), state, 0600)
 }
 
-func (s *Store) saveWakeupHistoryLocked() error {
-	return WriteJSONAtomic(filepath.Join(s.dataDir, wakeupHistoryFileName), s.wakeupHistory, 0600)
+func (s *Store) writeWakeupHistoryFile(items []model.WakeupHistoryItem) error {
+	return WriteJSONAtomic(filepath.Join(s.dataDir, wakeupHistoryFileName), items, 0600)
 }
 
 // ListAccounts 返回按自定义排序顺序排列的账号深拷贝切片。
@@ -197,8 +327,7 @@ func (s *Store) ListAccounts() []model.Account {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	out := make([]model.Account, len(s.accounts))
-	copy(out, s.accounts)
+	out := cloneAccounts(s.accounts)
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].SortOrder != out[j].SortOrder {
 			return out[i].SortOrder < out[j].SortOrder
@@ -208,28 +337,14 @@ func (s *Store) ListAccounts() []model.Account {
 	return out
 }
 
-// GetAccount 根据 ID 查找账号。
+// GetAccount 根据 ID 查找账号并返回深拷贝，避免并发共享内部指针。
 func (s *Store) GetAccount(id string) (model.Account, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	for _, acc := range s.accounts {
 		if acc.ID == id {
-			return acc, true
-		}
-	}
-	return model.Account{}, false
-}
-
-// GetAccountByEmail 按邮箱（忽略大小写）查找账号。
-func (s *Store) GetAccountByEmail(email string) (model.Account, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	target := strings.ToLower(strings.TrimSpace(email))
-	for _, acc := range s.accounts {
-		if strings.ToLower(strings.TrimSpace(acc.Email)) == target {
-			return acc, true
+			return cloneAccount(acc), true
 		}
 	}
 	return model.Account{}, false
@@ -242,17 +357,18 @@ func (s *Store) GetCurrentAccountID() string {
 	return s.currentAccountID
 }
 
-// SetCurrentAccountID 设置当前激活账号并更新其最近使用时间。
+// SetCurrentAccountID 设置当前激活账号并更新其最近使用时间（落盘成功后才提交内存）。
 func (s *Store) SetCurrentAccountID(accountID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	nextAccounts := cloneAccounts(s.accounts)
 	if accountID != "" {
 		found := false
 		now := time.Now().Unix()
-		for i := range s.accounts {
-			if s.accounts[i].ID == accountID {
-				s.accounts[i].LastUsed = now
+		for i := range nextAccounts {
+			if nextAccounts[i].ID == accountID {
+				nextAccounts[i].LastUsed = now
 				found = true
 				break
 			}
@@ -261,11 +377,15 @@ func (s *Store) SetCurrentAccountID(accountID string) error {
 			return fmt.Errorf("账号不存在: %s", accountID)
 		}
 	}
+	if err := s.writeAccountsFile(accountID, nextAccounts); err != nil {
+		return err
+	}
+	s.accounts = nextAccounts
 	s.currentAccountID = accountID
-	return s.saveAccountsLocked()
+	return nil
 }
 
-// UpsertAccount 按邮箱去重插入或更新账号，保留既有分组、备注、密码和 2FA 密钥。
+// UpsertAccount 按邮箱去重插入或更新账号，保留既有分组、备注、密码和 2FA 密钥（写盘失败不污染内存）。
 func (s *Store) UpsertAccount(input model.Account) (model.Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -274,18 +394,25 @@ func (s *Store) UpsertAccount(input model.Account) (model.Account, error) {
 	if email == "" {
 		return model.Account{}, fmt.Errorf("账号邮箱不能为空")
 	}
+
+	groupID := strings.TrimSpace(input.GroupID)
+	if groupID != "" && !s.hasGroupLocked(groupID) {
+		groupID = ""
+	}
+
 	now := time.Now().Unix()
 	targetLower := strings.ToLower(email)
+	nextAccounts := cloneAccounts(s.accounts)
 
-	for i := range s.accounts {
-		if strings.ToLower(strings.TrimSpace(s.accounts[i].Email)) == targetLower {
-			existing := &s.accounts[i]
+	for i := range nextAccounts {
+		if strings.ToLower(strings.TrimSpace(nextAccounts[i].Email)) == targetLower {
+			existing := &nextAccounts[i]
 			existing.Email = email
 			if strings.TrimSpace(input.Name) != "" {
 				existing.Name = strings.TrimSpace(input.Name)
 			}
-			if input.GroupID != "" {
-				existing.GroupID = input.GroupID
+			if groupID != "" {
+				existing.GroupID = groupID
 			}
 			if input.Notes != "" {
 				existing.Notes = input.Notes
@@ -303,55 +430,72 @@ func (s *Store) UpsertAccount(input model.Account) (model.Account, error) {
 				existing.Token = mergeTokenData(existing.Token, input.Token)
 			}
 			if input.Quota != nil {
-				existing.Quota = input.Quota
+				existing.Quota = cloneQuotaData(input.Quota)
 			}
 			existing.Disabled = input.Disabled
 			existing.DisabledReason = input.DisabledReason
 			existing.DisabledAt = input.DisabledAt
-			existing.QuotaError = input.QuotaError
+			existing.QuotaError = cloneQuotaError(input.QuotaError)
 			existing.LastUsed = now
-			if err := s.saveAccountsLocked(); err != nil {
+			if err := s.writeAccountsFile(s.currentAccountID, nextAccounts); err != nil {
 				return model.Account{}, err
 			}
-			return *existing, nil
+			s.accounts = nextAccounts
+			return cloneAccount(*existing), nil
 		}
 	}
 
-	if input.ID == "" {
-		input.ID = uuid.NewString()
+	created := cloneAccount(input)
+	if created.ID == "" {
+		created.ID = uuid.NewString()
 	}
-	input.Email = email
-	if input.CreatedAt == 0 {
-		input.CreatedAt = now
+	created.Email = email
+	created.GroupID = groupID
+	if created.CreatedAt == 0 {
+		created.CreatedAt = now
 	}
-	if input.LastUsed == 0 {
-		input.LastUsed = now
+	if created.LastUsed == 0 {
+		created.LastUsed = now
 	}
-	if input.Token.TokenType == "" {
-		input.Token.TokenType = "Bearer"
+	if created.Token.TokenType == "" {
+		created.Token.TokenType = "Bearer"
 	}
-	input.SortOrder = len(s.accounts)
+	created.SortOrder = maxAccountSortOrder(nextAccounts) + 1
 
-	s.accounts = append(s.accounts, input)
-	if err := s.saveAccountsLocked(); err != nil {
+	nextAccounts = append(nextAccounts, created)
+	if err := s.writeAccountsFile(s.currentAccountID, nextAccounts); err != nil {
 		return model.Account{}, err
 	}
-	return input, nil
+	s.accounts = nextAccounts
+	return cloneAccount(created), nil
 }
 
 func mergeTokenData(oldTok, newTok model.TokenData) model.TokenData {
 	merged := newTok
+	merged.IsGcpTos = cloneBoolPtr(newTok.IsGcpTos)
+	if strings.TrimSpace(merged.AccessToken) == "" {
+		merged.AccessToken = oldTok.AccessToken
+		if merged.ExpiresIn == 0 {
+			merged.ExpiresIn = oldTok.ExpiresIn
+		}
+		if merged.ExpiryTimestamp == 0 {
+			merged.ExpiryTimestamp = oldTok.ExpiryTimestamp
+		}
+	}
 	if strings.TrimSpace(merged.RefreshToken) == "" {
 		merged.RefreshToken = oldTok.RefreshToken
 	}
 	if strings.TrimSpace(merged.TokenType) == "" {
 		merged.TokenType = "Bearer"
 	}
+	if strings.TrimSpace(merged.Email) == "" {
+		merged.Email = oldTok.Email
+	}
 	if strings.TrimSpace(merged.ProjectID) == "" {
 		merged.ProjectID = oldTok.ProjectID
 	}
 	if merged.IsGcpTos == nil {
-		merged.IsGcpTos = oldTok.IsGcpTos
+		merged.IsGcpTos = cloneBoolPtr(oldTok.IsGcpTos)
 	}
 	if strings.TrimSpace(merged.IDToken) == "" {
 		merged.IDToken = oldTok.IDToken
@@ -362,39 +506,60 @@ func mergeTokenData(oldTok, newTok model.TokenData) model.TokenData {
 	return merged
 }
 
-// SaveAccount 原地替换已有账号（按 ID 匹配）。
-func (s *Store) SaveAccount(acc model.Account) (model.Account, error) {
+// UpdateAccount 在持锁状态下对目标账号执行原子局部修改并落盘，避免后台刷新覆盖并发编辑的备注、密码与分组。
+func (s *Store) UpdateAccount(accountID string, mutate func(acc *model.Account) error) (model.Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for i := range s.accounts {
-		if s.accounts[i].ID == acc.ID {
-			s.accounts[i] = acc
-			if err := s.saveAccountsLocked(); err != nil {
+	nextAccounts := cloneAccounts(s.accounts)
+	for i := range nextAccounts {
+		if nextAccounts[i].ID == accountID {
+			if mutate != nil {
+				if err := mutate(&nextAccounts[i]); err != nil {
+					return model.Account{}, err
+				}
+			}
+			if err := s.writeAccountsFile(s.currentAccountID, nextAccounts); err != nil {
 				return model.Account{}, err
 			}
-			return acc, nil
+			s.accounts = nextAccounts
+			return cloneAccount(nextAccounts[i]), nil
 		}
 	}
-	return model.Account{}, fmt.Errorf("账号不存在: %s", acc.ID)
+	return model.Account{}, fmt.Errorf("账号不存在: %s", accountID)
 }
 
-// UpdateAccountDetails 更新账号的备注、登录账号、密码、2FA 密钥及所属分组。
+// SaveAccount 原地替换已有账号（按 ID 匹配，写盘失败不污染内存）。
+func (s *Store) SaveAccount(acc model.Account) (model.Account, error) {
+	return s.UpdateAccount(acc.ID, func(target *model.Account) error {
+		*target = cloneAccount(acc)
+		return nil
+	})
+}
+
+// UpdateAccountDetails 更新账号的备注、登录账号、密码、2FA 密钥及所属分组（校验分组存在性）。
 func (s *Store) UpdateAccountDetails(accountID string, update model.AccountDetailsUpdate) (model.Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for i := range s.accounts {
-		if s.accounts[i].ID == accountID {
-			s.accounts[i].Notes = strings.TrimSpace(update.Notes)
-			s.accounts[i].LoginAccount = strings.TrimSpace(update.LoginAccount)
-			s.accounts[i].AccountPassword = update.AccountPassword
-			s.accounts[i].TwoFactorSecret = strings.TrimSpace(update.TwoFactorSecret)
-			s.accounts[i].GroupID = strings.TrimSpace(update.GroupID)
-			if err := s.saveAccountsLocked(); err != nil {
+	groupID := strings.TrimSpace(update.GroupID)
+	if groupID != "" && !s.hasGroupLocked(groupID) {
+		return model.Account{}, fmt.Errorf("目标分组不存在: %s", groupID)
+	}
+
+	nextAccounts := cloneAccounts(s.accounts)
+	for i := range nextAccounts {
+		if nextAccounts[i].ID == accountID {
+			nextAccounts[i].Notes = strings.TrimSpace(update.Notes)
+			nextAccounts[i].LoginAccount = strings.TrimSpace(update.LoginAccount)
+			nextAccounts[i].AccountPassword = update.AccountPassword
+			nextAccounts[i].TwoFactorSecret = strings.TrimSpace(update.TwoFactorSecret)
+			nextAccounts[i].GroupID = groupID
+			if err := s.writeAccountsFile(s.currentAccountID, nextAccounts); err != nil {
 				return model.Account{}, err
 			}
-			return s.accounts[i], nil
+			s.accounts = nextAccounts
+			return cloneAccount(nextAccounts[i]), nil
 		}
 	}
 	return model.Account{}, fmt.Errorf("账号不存在: %s", accountID)
@@ -406,29 +571,25 @@ func (s *Store) UpdateAccountGroup(accountIDs []string, groupID string) error {
 	defer s.mu.Unlock()
 
 	groupID = strings.TrimSpace(groupID)
-	if groupID != "" {
-		exists := false
-		for _, g := range s.groups {
-			if g.ID == groupID {
-				exists = true
-				break
-			}
-		}
-		if !exists {
-			return fmt.Errorf("目标分组不存在: %s", groupID)
-		}
+	if groupID != "" && !s.hasGroupLocked(groupID) {
+		return fmt.Errorf("目标分组不存在: %s", groupID)
 	}
 
 	targets := make(map[string]struct{}, len(accountIDs))
 	for _, id := range accountIDs {
 		targets[id] = struct{}{}
 	}
-	for i := range s.accounts {
-		if _, ok := targets[s.accounts[i].ID]; ok {
-			s.accounts[i].GroupID = groupID
+	nextAccounts := cloneAccounts(s.accounts)
+	for i := range nextAccounts {
+		if _, ok := targets[nextAccounts[i].ID]; ok {
+			nextAccounts[i].GroupID = groupID
 		}
 	}
-	return s.saveAccountsLocked()
+	if err := s.writeAccountsFile(s.currentAccountID, nextAccounts); err != nil {
+		return err
+	}
+	s.accounts = nextAccounts
+	return nil
 }
 
 // DeleteAccounts 批量删除账号；如果删除了当前激活账号则同步清空 currentAccountID。
@@ -446,37 +607,65 @@ func (s *Store) DeleteAccounts(accountIDs []string) error {
 		if _, drop := delSet[acc.ID]; drop {
 			continue
 		}
-		remaining = append(remaining, acc)
+		remaining = append(remaining, cloneAccount(acc))
 	}
+	sort.SliceStable(remaining, func(i, j int) bool {
+		if remaining[i].SortOrder != remaining[j].SortOrder {
+			return remaining[i].SortOrder < remaining[j].SortOrder
+		}
+		return remaining[i].CreatedAt < remaining[j].CreatedAt
+	})
 	for i := range remaining {
 		remaining[i].SortOrder = i
 	}
-	s.accounts = remaining
-	if _, dropped := delSet[s.currentAccountID]; dropped {
-		s.currentAccountID = ""
+
+	nextCurrentID := s.currentAccountID
+	if _, dropped := delSet[nextCurrentID]; dropped {
+		nextCurrentID = ""
 	}
-	return s.saveAccountsLocked()
+	if err := s.writeAccountsFile(nextCurrentID, remaining); err != nil {
+		return err
+	}
+	s.accounts = remaining
+	s.currentAccountID = nextCurrentID
+	return nil
 }
 
-// ReorderAccounts 按传入的账号 ID 序列更新自定义排序。
+// ReorderAccounts 按传入的账号 ID 序列更新自定义排序（未在序列中的账号按原有排序依次顺延）。
 func (s *Store) ReorderAccounts(orderedIDs []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	rank := make(map[string]int, len(orderedIDs))
-	for idx, id := range orderedIDs {
-		rank[id] = idx
-	}
-	nextOrder := len(orderedIDs)
-	for i := range s.accounts {
-		if pos, ok := rank[s.accounts[i].ID]; ok {
-			s.accounts[i].SortOrder = pos
-		} else {
-			s.accounts[i].SortOrder = nextOrder
-			nextOrder++
+	for _, id := range orderedIDs {
+		if _, exists := rank[id]; !exists {
+			rank[id] = len(rank)
 		}
 	}
-	return s.saveAccountsLocked()
+
+	nextAccounts := cloneAccounts(s.accounts)
+	sort.SliceStable(nextAccounts, func(i, j int) bool {
+		pi, oki := rank[nextAccounts[i].ID]
+		pj, okj := rank[nextAccounts[j].ID]
+		if oki && okj {
+			return pi < pj
+		}
+		if oki != okj {
+			return oki
+		}
+		if nextAccounts[i].SortOrder != nextAccounts[j].SortOrder {
+			return nextAccounts[i].SortOrder < nextAccounts[j].SortOrder
+		}
+		return nextAccounts[i].CreatedAt < nextAccounts[j].CreatedAt
+	})
+	for i := range nextAccounts {
+		nextAccounts[i].SortOrder = i
+	}
+	if err := s.writeAccountsFile(s.currentAccountID, nextAccounts); err != nil {
+		return err
+	}
+	s.accounts = nextAccounts
+	return nil
 }
 
 // ListGroups 返回按顺序排列的全部自建分组。
@@ -509,15 +698,19 @@ func (s *Store) SaveGroup(group model.AccountGroup) (model.AccountGroup, error) 
 		color = "#2563EB"
 	}
 
+	nextGroups := make([]model.AccountGroup, len(s.groups))
+	copy(nextGroups, s.groups)
+
 	if group.ID != "" {
-		for i := range s.groups {
-			if s.groups[i].ID == group.ID {
-				s.groups[i].Name = name
-				s.groups[i].Color = color
-				if err := s.saveGroupsLocked(); err != nil {
+		for i := range nextGroups {
+			if nextGroups[i].ID == group.ID {
+				nextGroups[i].Name = name
+				nextGroups[i].Color = color
+				if err := s.writeGroupsFile(nextGroups); err != nil {
 					return model.AccountGroup{}, err
 				}
-				return s.groups[i], nil
+				s.groups = nextGroups
+				return nextGroups[i], nil
 			}
 		}
 	}
@@ -526,13 +719,14 @@ func (s *Store) SaveGroup(group model.AccountGroup) (model.AccountGroup, error) 
 		ID:        uuid.NewString(),
 		Name:      name,
 		Color:     color,
-		SortOrder: len(s.groups),
+		SortOrder: maxGroupSortOrder(nextGroups) + 1,
 		CreatedAt: time.Now().Unix(),
 	}
-	s.groups = append(s.groups, created)
-	if err := s.saveGroupsLocked(); err != nil {
+	nextGroups = append(nextGroups, created)
+	if err := s.writeGroupsFile(nextGroups); err != nil {
 		return model.AccountGroup{}, err
 	}
+	s.groups = nextGroups
 	return created, nil
 }
 
@@ -548,22 +742,28 @@ func (s *Store) DeleteGroup(groupID string) error {
 		}
 		remaining = append(remaining, g)
 	}
-	s.groups = remaining
 
+	nextAccounts := cloneAccounts(s.accounts)
 	accountsChanged := false
-	for i := range s.accounts {
-		if s.accounts[i].GroupID == groupID {
-			s.accounts[i].GroupID = ""
+	for i := range nextAccounts {
+		if nextAccounts[i].GroupID == groupID {
+			nextAccounts[i].GroupID = ""
 			accountsChanged = true
 		}
 	}
 
-	if err := s.saveGroupsLocked(); err != nil {
+	if err := s.writeGroupsFile(remaining); err != nil {
 		return err
 	}
 	if accountsChanged {
-		return s.saveAccountsLocked()
+		if err := s.writeAccountsFile(s.currentAccountID, nextAccounts); err != nil {
+			// 尽量恢复分组文件，保持磁盘一致性
+			_ = s.writeGroupsFile(s.groups)
+			return err
+		}
+		s.accounts = nextAccounts
 	}
+	s.groups = remaining
 	return nil
 }
 
@@ -579,11 +779,12 @@ func (s *Store) SaveSettings(next model.AppSettings) (model.AppSettings, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.settings = normalizeSettings(next)
-	if err := s.saveSettingsLocked(); err != nil {
+	normalized := normalizeSettings(next)
+	if err := s.writeSettingsFile(normalized); err != nil {
 		return model.AppSettings{}, err
 	}
-	return s.settings, nil
+	s.settings = normalized
+	return normalized, nil
 }
 
 // ListSwitchHistory 返回按时间倒序排列的切号历史。
@@ -607,32 +808,36 @@ func (s *Store) AppendSwitchHistory(item model.SwitchHistoryItem) error {
 	if item.Timestamp == 0 {
 		item.Timestamp = time.Now().UnixMilli()
 	}
-	s.switchHistory = append([]model.SwitchHistoryItem{item}, s.switchHistory...)
-	if len(s.switchHistory) > maxHistoryItems {
-		s.switchHistory = s.switchHistory[:maxHistoryItems]
+	next := make([]model.SwitchHistoryItem, 0, min(len(s.switchHistory)+1, maxHistoryItems))
+	next = append(next, item)
+	limit := maxHistoryItems - 1
+	if len(s.switchHistory) < limit {
+		limit = len(s.switchHistory)
 	}
-	return s.saveSwitchHistoryLocked()
+	next = append(next, s.switchHistory[:limit]...)
+	if err := s.writeSwitchHistoryFile(next); err != nil {
+		return err
+	}
+	s.switchHistory = next
+	return nil
 }
 
 // ClearSwitchHistory 清空全部切号历史。
 func (s *Store) ClearSwitchHistory() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.writeSwitchHistoryFile(nil); err != nil {
+		return err
+	}
 	s.switchHistory = nil
-	return s.saveSwitchHistoryLocked()
+	return nil
 }
 
-// GetWakeupState 返回唤醒调度器总开关和任务配置。
+// GetWakeupState 返回唤醒调度器总开关和任务配置的深拷贝。
 func (s *Store) GetWakeupState() model.WakeupState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	out := model.WakeupState{
-		Enabled: s.wakeupState.Enabled,
-		Tasks:   make([]model.WakeupTask, len(s.wakeupState.Tasks)),
-	}
-	copy(out.Tasks, s.wakeupState.Tasks)
-	return out
+	return cloneWakeupState(s.wakeupState)
 }
 
 // SaveWakeupState 保存唤醒任务配置。
@@ -640,17 +845,45 @@ func (s *Store) SaveWakeupState(state model.WakeupState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	next := cloneWakeupState(state)
 	now := time.Now().UnixMilli()
-	for i := range state.Tasks {
-		if strings.TrimSpace(state.Tasks[i].ID) == "" {
-			state.Tasks[i].ID = uuid.NewString()
+	for i := range next.Tasks {
+		if strings.TrimSpace(next.Tasks[i].ID) == "" {
+			next.Tasks[i].ID = uuid.NewString()
 		}
-		if state.Tasks[i].CreatedAt == 0 {
-			state.Tasks[i].CreatedAt = now
+		if next.Tasks[i].CreatedAt == 0 {
+			next.Tasks[i].CreatedAt = now
 		}
 	}
-	s.wakeupState = state
-	return s.saveWakeupStateLocked()
+	if err := s.writeWakeupStateFile(next); err != nil {
+		return err
+	}
+	s.wakeupState = next
+	return nil
+}
+
+// UpdateWakeupTaskLastRun 原子更新单条唤醒任务的最近运行时间戳，避免覆盖并发编辑的其他任务。
+func (s *Store) UpdateWakeupTaskLastRun(taskID string, lastRunAtMs int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := cloneWakeupState(s.wakeupState)
+	found := false
+	for i := range next.Tasks {
+		if next.Tasks[i].ID == taskID {
+			next.Tasks[i].LastRunAt = lastRunAtMs
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	if err := s.writeWakeupStateFile(next); err != nil {
+		return err
+	}
+	s.wakeupState = next
+	return nil
 }
 
 // ListWakeupHistory 返回按时间倒序排列的唤醒执行历史。
@@ -674,17 +907,27 @@ func (s *Store) AppendWakeupHistory(item model.WakeupHistoryItem) error {
 	if item.Timestamp == 0 {
 		item.Timestamp = time.Now().UnixMilli()
 	}
-	s.wakeupHistory = append([]model.WakeupHistoryItem{item}, s.wakeupHistory...)
-	if len(s.wakeupHistory) > maxHistoryItems {
-		s.wakeupHistory = s.wakeupHistory[:maxHistoryItems]
+	next := make([]model.WakeupHistoryItem, 0, min(len(s.wakeupHistory)+1, maxHistoryItems))
+	next = append(next, item)
+	limit := maxHistoryItems - 1
+	if len(s.wakeupHistory) < limit {
+		limit = len(s.wakeupHistory)
 	}
-	return s.saveWakeupHistoryLocked()
+	next = append(next, s.wakeupHistory[:limit]...)
+	if err := s.writeWakeupHistoryFile(next); err != nil {
+		return err
+	}
+	s.wakeupHistory = next
+	return nil
 }
 
 // ClearWakeupHistory 清空唤醒执行历史。
 func (s *Store) ClearWakeupHistory() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.writeWakeupHistoryFile(nil); err != nil {
+		return err
+	}
 	s.wakeupHistory = nil
-	return s.saveWakeupHistoryLocked()
+	return nil
 }

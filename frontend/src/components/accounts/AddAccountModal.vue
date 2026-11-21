@@ -6,7 +6,7 @@ import BaseModal from '@/components/common/BaseModal.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { api, extractErrorMessage, onWailsEvent } from '@/services/api'
-import { copyToClipboard } from '@/utils/privacy'
+import { copyToClipboard, maskEmail } from '@/utils/privacy'
 import type { Account } from '@/types/models'
 
 const props = defineProps<{
@@ -58,7 +58,10 @@ function bindOAuthEvents() {
     oauthCallbackInput.value = ''
     await appStore.reloadAccounts()
     if (p?.account?.email) {
-      appStore.notify(`已通过 Google 授权添加账号 ${p.account.email}`, 'success')
+      appStore.notify(
+        `已通过 Google 授权添加账号 ${maskEmail(p.account.email, appStore.settings.privacyMode)}`,
+        'success',
+      )
       appStore.activeDetailAccountId = p.account.id
     } else {
       appStore.notify('OAuth 授权成功', 'success')
@@ -160,8 +163,21 @@ async function handleImportLocal() {
   try {
     const acc = await api.importFromLocal(targetGroupId.value)
     await appStore.reloadAccounts()
+    // 同步侧边栏本机激活探测状态，消除外部未纳管账号提示残留
+    appStore.activeDetection = {
+      hasCredential: true,
+      managed: true,
+      matchedAccountId: acc.id,
+      detectedEmail: acc.email,
+      targetClient: appStore.settings.runtimeTarget,
+      changed: false,
+      detectedAt: Math.floor(Date.now() / 1000),
+    }
     appStore.activeDetailAccountId = acc.id
-    appStore.notify(`已从本机导入账号 ${acc.email}`, 'success')
+    appStore.notify(
+      `已从本机导入账号 ${maskEmail(acc.email, appStore.settings.privacyMode)}`,
+      'success',
+    )
     emit('close')
   } catch (err) {
     localError.value = extractErrorMessage(err)

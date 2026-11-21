@@ -42,9 +42,6 @@ const navItems: Array<{ id: AppSection; label: string; icon: typeof Users }> = [
 
 function selectSection(section: AppSection) {
   appStore.activeSection = section
-  if (section === 'history') {
-    void appStore.loadSwitchHistory()
-  }
 }
 
 function selectGroup(groupId: string) {

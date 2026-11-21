@@ -37,6 +37,7 @@ func WriteBytesAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("创建临时文件失败: %w", err)
 	}
 
+	closed := false
 	writeErr := func() error {
 		if _, err := file.Write(data); err != nil {
 			return err
@@ -47,19 +48,29 @@ func WriteBytesAtomic(path string, data []byte, perm os.FileMode) error {
 		if err := file.Close(); err != nil {
 			return err
 		}
+		closed = true
 		if err := os.Chmod(tmpPath, perm); err != nil {
 			return err
 		}
 		if err := os.Rename(tmpPath, path); err != nil {
-			// Windows 上目标文件已存在时 Rename 可能失败，退化为先删后移。
-			_ = os.Remove(path)
-			return os.Rename(tmpPath, path)
+			// Windows 上目标文件已存在时 Rename 可能失败：先将原文件移至备份路径，替换失败时恢复备份避免丢数据。
+			backupPath := fmt.Sprintf("%s.bak-%d-%d", path, os.Getpid(), time.Now().UnixNano())
+			if bakErr := os.Rename(path, backupPath); bakErr != nil {
+				return err
+			}
+			if retryErr := os.Rename(tmpPath, path); retryErr != nil {
+				_ = os.Rename(backupPath, path)
+				return retryErr
+			}
+			_ = os.Remove(backupPath)
 		}
 		return nil
 	}()
 
 	if writeErr != nil {
-		_ = file.Close()
+		if !closed {
+			_ = file.Close()
+		}
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("写入文件失败 %s: %w", path, writeErr)
 	}

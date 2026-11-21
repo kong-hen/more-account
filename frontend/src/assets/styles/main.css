@@ -20,7 +20,6 @@
   --text-muted: #64748b;
 
   --accent: #2563eb;
-  --accent-hover: #1d4ed8;
   --accent-soft: #eff6ff;
   --accent-border: #bfdbfe;
 
@@ -62,7 +61,6 @@
   --text-muted: #94a3b8;
 
   --accent: #3b82f6;
-  --accent-hover: #60a5fa;
   --accent-soft: rgba(59, 130, 246, 0.15);
   --accent-border: rgba(59, 130, 246, 0.38);
 
@@ -227,6 +225,25 @@ body,
 
   :root[data-theme="dark"] .drawer-backdrop {
     background-color: rgba(0, 0, 0, 0.45);
+  }
+
+  /* 原生 popover="manual" Toast Top Layer 宿主（重置用户代理居中与边框，确保永远浮于模态 <dialog> 之上） */
+  .toast-popover-host[popover] {
+    position: fixed;
+    inset: auto 16px 16px auto;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    overflow: visible;
+    pointer-events: none;
+    transition: opacity 0.18s ease, display 0.18s ease;
+    transition-behavior: allow-discrete;
+  }
+
+  .toast-popover-host[popover]:is(:popover-open, .\:popover-open) {
+    display: flex;
   }
 }
 

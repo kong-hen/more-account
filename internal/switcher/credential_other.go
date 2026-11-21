@@ -38,10 +38,18 @@ func readOSSystemCredential() (string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "secret-tool", "lookup", "service", "gemini", "username", "antigravity")
-			var stdout bytes.Buffer
+			var stdout, stderr bytes.Buffer
 			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
 			if err := cmd.Run(); err != nil {
-				return "", nil
+				errMsg := strings.TrimSpace(stderr.String())
+				// secret-tool 未查到条目时通常返回退出码 1 且 stderr 为空；若有 stderr 输出则属于真实故障（如 keyring 锁定/D-Bus 异常）。
+				if errMsg == "" {
+					if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+						return "", nil
+					}
+				}
+				return "", fmt.Errorf("Linux secret-tool 读取失败: %v (%s)", err, errMsg)
 			}
 			return strings.TrimSpace(stdout.String()), nil
 		}

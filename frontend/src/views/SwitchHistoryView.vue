@@ -4,6 +4,7 @@ import { computed, onMounted, ref } from 'vue'
 import { CheckCircle2, XCircle, AlertTriangle, Trash2, RefreshCw, History } from 'lucide-vue-next'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import { useAppStore } from '@/stores/appStore'
+import { extractErrorMessage } from '@/services/api'
 import { maskEmail } from '@/utils/privacy'
 import { formatDateTime } from '@/utils/quota'
 
@@ -11,6 +12,7 @@ const appStore = useAppStore()
 const statusFilter = ref<'all' | 'success' | 'failed'>('all')
 const clearConfirmOpen = ref(false)
 const loading = ref(false)
+const clearing = ref(false)
 
 async function refresh() {
   loading.value = true
@@ -40,8 +42,15 @@ function targetLabel(target: string): string {
 }
 
 async function handleClear() {
-  await appStore.clearSwitchHistory()
-  clearConfirmOpen.value = false
+  clearing.value = true
+  try {
+    await appStore.clearSwitchHistory()
+    clearConfirmOpen.value = false
+  } catch (err) {
+    appStore.notify(`清空切号历史失败：${extractErrorMessage(err)}`, 'error')
+  } finally {
+    clearing.value = false
+  }
 }
 </script>
 
@@ -208,6 +217,7 @@ async function handleClear() {
       title="清空切号历史"
       message="确定要清空全部切号历史记录吗？此操作无法撤销。"
       confirm-text="清空历史"
+      :loading="clearing"
       @cancel="clearConfirmOpen = false"
       @confirm="handleClear"
     />

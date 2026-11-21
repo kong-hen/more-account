@@ -22,14 +22,15 @@ import type {
   ThemeMode,
 } from '@/types/models'
 
-export interface ToastItem {
+interface ToastItem {
   id: number
   type: 'success' | 'error' | 'info' | 'warning'
   message: string
+  duration: number
 }
 
 export type AccountSortBy = 'custom' | 'quota_desc' | 'quota_asc' | 'last_used' | 'email'
-export type AccountViewMode = 'cards' | 'table'
+type AccountViewMode = 'cards' | 'table'
 
 export const useAppStore = defineStore('app', () => {
   const initialized = ref(false)
@@ -85,20 +86,47 @@ export const useAppStore = defineStore('app', () => {
   // 响应式当前时间戳（每 30 秒推进一次，驱动额度重置倒计时实时更新）
   const nowMs = ref(Date.now())
 
-  // Toast 队列
+  // Toast 队列（支持悬停/聚焦暂停自动消失，符合可访问性规范）
   const toasts = ref<ToastItem[]>([])
   let toastSeq = 1
+  const toastTimers = new Map<number, number>()
   const cleanups: Array<() => void> = []
+  let reloadSeq = 0
+
+  function scheduleToastDismiss(id: number, duration: number) {
+    clearToastTimer(id)
+    const timer = window.setTimeout(() => {
+      dismissToast(id)
+    }, duration)
+    toastTimers.set(id, timer)
+  }
+
+  function clearToastTimer(id: number) {
+    const timer = toastTimers.get(id)
+    if (timer !== undefined) {
+      window.clearTimeout(timer)
+      toastTimers.delete(id)
+    }
+  }
 
   function notify(message: string, type: ToastItem['type'] = 'info', duration = 3200) {
     const id = toastSeq++
-    toasts.value.push({ id, type, message })
-    window.setTimeout(() => {
-      dismissToast(id)
-    }, duration)
+    toasts.value.push({ id, type, message, duration })
+    scheduleToastDismiss(id, duration)
+  }
+
+  function pauseToast(id: number) {
+    clearToastTimer(id)
+  }
+
+  function resumeToast(id: number) {
+    const item = toasts.value.find((t) => t.id === id)
+    if (!item) return
+    scheduleToastDismiss(id, Math.min(item.duration, 2200))
   }
 
   function dismissToast(id: number) {
+    clearToastTimer(id)
     toasts.value = toasts.value.filter((t) => t.id !== id)
   }
 
@@ -159,7 +187,7 @@ export const useAppStore = defineStore('app', () => {
       cleanups.push(
         onWailsEvent('quota:updated', () => {
           nowMs.value = Date.now()
-          void reloadAccounts()
+          void reloadAccounts().catch(() => {})
         }),
       )
       cleanups.push(
@@ -215,15 +243,22 @@ export const useAppStore = defineStore('app', () => {
       const fn = cleanups.pop()
       fn?.()
     }
+    for (const timer of toastTimers.values()) {
+      window.clearTimeout(timer)
+    }
+    toastTimers.clear()
   }
 
   async function reloadAccounts() {
     if (!isWailsRuntime()) return
+    const seq = ++reloadSeq
     const [list, currId, groupList] = await Promise.all([
       api.listAccounts(),
       api.getCurrentAccountID(),
       api.listGroups(),
     ])
+    // 防止较早发起的慢请求覆盖较新的刷新结果
+    if (seq !== reloadSeq) return
     accounts.value = list ?? []
     currentAccountId.value = currId ?? ''
     groups.value = groupList ?? []
@@ -235,7 +270,8 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  async function updateSettings(patch: Partial<AppSettings>) {
+  async function updateSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
+    const previous = { ...settings.value }
     const next: AppSettings = {
       ...settings.value,
       ...patch,
@@ -243,22 +279,29 @@ export const useAppStore = defineStore('app', () => {
     }
     settings.value = next
     applyTheme(next.theme)
-    if (!isWailsRuntime()) return
+    if (!isWailsRuntime()) return next
     try {
-      settings.value = await api.saveSettings(next)
+      const saved = await api.saveSettings(next)
+      settings.value = saved
+      applyTheme(saved.theme)
       clientInfo.value = await api.detectInstalledClients()
+      return saved
     } catch (err) {
+      // 落盘失败时回滚本地内存与主题，并向上抛出供设置弹窗阻止关闭
+      settings.value = previous
+      applyTheme(previous.theme)
       notify(`保存设置失败：${extractErrorMessage(err)}`, 'error')
+      throw err
     }
   }
 
   async function toggleTheme() {
     const nextTheme: ThemeMode = settings.value.theme === 'dark' ? 'light' : 'dark'
-    await updateSettings({ theme: nextTheme })
+    await updateSettings({ theme: nextTheme }).catch(() => {})
   }
 
   async function togglePrivacyMode() {
-    await updateSettings({ privacyMode: !settings.value.privacyMode })
+    await updateSettings({ privacyMode: !settings.value.privacyMode }).catch(() => {})
   }
 
   async function refreshAccount(accountId: string) {
@@ -267,13 +310,14 @@ export const useAppStore = defineStore('app', () => {
     try {
       const updated = await api.refreshAccountQuota(accountId)
       replaceAccountInList(updated)
+      const displayEmail = maskEmail(updated.email, settings.value.privacyMode)
       if (updated.quotaError) {
-        notify(`${updated.email} 配额状态异常：${updated.quotaError.message}`, 'warning', 4500)
+        notify(`${displayEmail} 配额状态异常：${updated.quotaError.message}`, 'warning', 4500)
       } else {
-        notify(`已更新 ${updated.email} 的最新配额`, 'success')
+        notify(`已更新 ${displayEmail} 的最新配额`, 'success')
       }
     } catch (err) {
-      await reloadAccounts()
+      await reloadAccounts().catch(() => {})
       notify(`刷新配额失败：${extractErrorMessage(err)}`, 'error', 4500)
     } finally {
       const next = { ...refreshingIds.value }
@@ -323,12 +367,13 @@ export const useAppStore = defineStore('app', () => {
         changed: false,
         detectedAt: Math.floor(Date.now() / 1000),
       }
+      const displayEmail = maskEmail(outcome.account.email, settings.value.privacyMode)
       if (outcome.launchWarning) {
-        notify(`账号已切换为 ${outcome.account.email}，但重启客户端失败：${outcome.launchWarning}`, 'warning', 5500)
+        notify(`账号已切换为 ${displayEmail}，但重启客户端失败：${outcome.launchWarning}`, 'warning', 5500)
       } else if (outcome.launched) {
-        notify(`已切换至 ${outcome.account.email} 并重启客户端`, 'success')
+        notify(`已切换至 ${displayEmail} 并重启客户端`, 'success')
       } else {
-        notify(`已将本地凭据切换至 ${outcome.account.email}`, 'success')
+        notify(`已将本地凭据切换至 ${displayEmail}`, 'success')
       }
       if (activeSection.value === 'history') {
         await loadSwitchHistory()
@@ -361,6 +406,33 @@ export const useAppStore = defineStore('app', () => {
     await reloadAccounts()
     selectedAccountIds.value = []
     notify(`已删除 ${accountIds.length} 个账号`, 'success')
+  }
+
+  // 自定义拖拽排序并持久化到后端 ReorderAccounts
+  async function reorderAccounts(orderedIds: string[]) {
+    if (orderedIds.length === 0) return
+    const previous = accounts.value.map((a) => ({ ...a }))
+    const rank = new Map<string, number>()
+    orderedIds.forEach((id, idx) => rank.set(id, idx))
+
+    const next = [...accounts.value].sort((a, b) => {
+      const ra = rank.has(a.id) ? rank.get(a.id)! : Number.MAX_SAFE_INTEGER
+      const rb = rank.has(b.id) ? rank.get(b.id)! : Number.MAX_SAFE_INTEGER
+      if (ra !== rb) return ra - rb
+      return a.sortOrder - b.sortOrder
+    })
+    next.forEach((acc, idx) => {
+      acc.sortOrder = idx
+    })
+    accounts.value = next
+
+    if (!isWailsRuntime()) return
+    try {
+      await api.reorderAccounts(next.map((a) => a.id))
+    } catch (err) {
+      accounts.value = previous
+      notify(`保存排序失败：${extractErrorMessage(err)}`, 'error')
+    }
   }
 
   async function saveGroup(group: Partial<AccountGroup> & { name: string; color: string }) {
@@ -421,7 +493,7 @@ export const useAppStore = defineStore('app', () => {
     const idChanged = nextId !== currentAccountId.value
     if (idChanged) {
       currentAccountId.value = nextId
-      void reloadAccounts()
+      void reloadAccounts().catch(() => {})
     }
 
     if (fromBackgroundEvent && res.changed) {
@@ -606,7 +678,6 @@ export const useAppStore = defineStore('app', () => {
   })
 
   return {
-    initialized,
     loading,
     activeSection,
     accounts,
@@ -644,6 +715,8 @@ export const useAppStore = defineStore('app', () => {
     nowMs,
     toasts,
     notify,
+    pauseToast,
+    resumeToast,
     dismissToast,
     bootstrap,
     disposeEvents,
@@ -659,11 +732,11 @@ export const useAppStore = defineStore('app', () => {
     saveAccountDetails,
     assignAccountsToGroup,
     deleteAccountIds,
+    reorderAccounts,
     saveGroup,
     deleteGroup,
     loadSwitchHistory,
     clearSwitchHistory,
-    replaceAccountInList,
     toggleSelectAccount,
     clearAdvancedFilters,
   }

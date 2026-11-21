@@ -5,11 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 
 	"more-account/internal/model"
+	"more-account/internal/oauth"
 	"more-account/internal/storage"
 )
 
@@ -192,5 +195,67 @@ func TestActiveDetectorDetectsExternalSwitches(t *testing.T) {
 	res = detector.DetectOnce(context.Background())
 	if !res.Changed || res.HasCredential || store.GetCurrentAccountID() != "" {
 		t.Fatalf("退出登录后应清空激活态: res=%+v current=%q", res, store.GetCurrentAccountID())
+	}
+}
+
+func TestActiveDetectorPreservesCurrentOnOAuthNetworkFailureAndSilentMode(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("初始化 store 失败: %v", err)
+	}
+	accA, err := store.UpsertAccount(model.Account{
+		Email: "keep@gmail.com",
+		Token: model.TokenData{RefreshToken: "rt-old"},
+	})
+	if err != nil {
+		t.Fatalf("写入账号失败: %v", err)
+	}
+	if err := store.SetCurrentAccountID(accA.ID); err != nil {
+		t.Fatalf("设置激活账号失败: %v", err)
+	}
+
+	// 模拟 Google OAuth/UserInfo 网络不可用（返回 500）
+	failingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("upstream down"))
+	}))
+	defer failingSrv.Close()
+
+	oauthClient := &oauth.Client{
+		HTTPClient:  failingSrv.Client(),
+		TokenURL:    failingSrv.URL + "/token",
+		UserInfoURL: failingSrv.URL + "/userinfo",
+	}
+
+	notifyCount := 0
+	detector := NewActiveDetector(store, oauthClient, nil, func(res ActiveDetectionResult) {
+		notifyCount++
+	})
+	detector.readLocal = func(target string) (*SystemCredential, string, error) {
+		// 返回一个与 store 中不同的 RT 且无 id_token 邮箱，触发远程解析但网络失败
+		return &SystemCredential{RefreshToken: "rt-rotated-no-email"}, "keychain", nil
+	}
+
+	res := detector.DetectOnce(context.Background())
+	if res.Error == "" {
+		t.Fatalf("OAuth 远程邮箱解析失败时应返回错误信息: %+v", res)
+	}
+	if store.GetCurrentAccountID() != accA.ID {
+		t.Fatalf("网络故障期间不应清空已有激活账号: 期望 %s，实际 %q", accA.ID, store.GetCurrentAccountID())
+	}
+	if notifyCount != 0 {
+		t.Fatalf("网络瞬时失败不应触发切换通知，实际 notifyCount=%d", notifyCount)
+	}
+
+	// 验证 DetectOnceSilent 在确实发生变更时不触发 onChange 回调（避免前端手动刷新时重复弹通知）
+	detector.readLocal = func(target string) (*SystemCredential, string, error) {
+		return &SystemCredential{RefreshToken: "rt-external", Email: "ext@example.com"}, "keychain", nil
+	}
+	resSilent := detector.DetectOnceSilent(context.Background())
+	if !resSilent.Changed || resSilent.DetectedEmail != "ext@example.com" {
+		t.Fatalf("DetectOnceSilent 应正确返回变更结果: %+v", resSilent)
+	}
+	if notifyCount != 0 {
+		t.Fatalf("DetectOnceSilent 不应触发 onChange 回调，实际 notifyCount=%d", notifyCount)
 	}
 }

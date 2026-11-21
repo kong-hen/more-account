@@ -12,6 +12,7 @@ import (
 	"more-account/internal/quota"
 	"more-account/internal/storage"
 	"more-account/internal/switcher"
+	"more-account/internal/totp"
 )
 
 // ExportAccountItem 描述 JSON 导入导出用的标准轻量账号结构（不包含标签和辅助邮箱）。
@@ -63,6 +64,15 @@ func (s *Service) AddByRefreshToken(ctx context.Context, refreshToken string, gr
 		return model.Account{}, fmt.Errorf("refresh_token 不能为空")
 	}
 
+	var normalizedSecret string
+	if meta != nil && strings.TrimSpace(meta.TwoFactorSecret) != "" {
+		norm, err := totp.NormalizeSecret(meta.TwoFactorSecret)
+		if err != nil {
+			return model.Account{}, fmt.Errorf("2FA 密钥格式无效: %w", err)
+		}
+		normalizedSecret = norm
+	}
+
 	tokenResp, err := s.oauthClient.RefreshAccessToken(ctx, rt)
 	if err != nil {
 		return model.Account{}, fmt.Errorf("验证 Refresh Token 失败: %w", err)
@@ -96,8 +106,9 @@ func (s *Service) AddByRefreshToken(ctx context.Context, refreshToken string, gr
 	if meta != nil {
 		candidate.Notes = strings.TrimSpace(meta.Notes)
 		candidate.LoginAccount = strings.TrimSpace(meta.LoginAccount)
+		// 登录密码保留原始首尾字符，不执行 TrimSpace
 		candidate.AccountPassword = meta.AccountPassword
-		candidate.TwoFactorSecret = strings.TrimSpace(meta.TwoFactorSecret)
+		candidate.TwoFactorSecret = normalizedSecret
 		if strings.TrimSpace(meta.GroupID) != "" {
 			candidate.GroupID = strings.TrimSpace(meta.GroupID)
 		}
@@ -125,12 +136,7 @@ func (s *Service) ImportFromLocal(ctx context.Context, groupID string) (model.Ac
 		refreshToken = cred.RefreshToken
 	}
 
-	if refreshToken == "" {
-		if cred, err := switcher.ReadDesktopCredential(); err == nil && cred != nil && strings.TrimSpace(cred.RefreshToken) != "" {
-			refreshToken = cred.RefreshToken
-		}
-	}
-
+	// 若首选客户端未检测到有效凭据，回退扫描本机其余存在的 state.vscdb（兼容切换前曾在另一客户端登录）
 	if refreshToken == "" {
 		for _, dbPath := range switcher.AllExistingStateDBPaths() {
 			if rt, err := switcher.ReadRefreshTokenFromStateDB(dbPath); err == nil && strings.TrimSpace(rt) != "" {
@@ -178,12 +184,8 @@ func (s *Service) ImportRefreshTokens(ctx context.Context, rawInput string, grou
 		}
 		acc, err := s.AddByRefreshToken(ctx, token, groupID, nil)
 		if err != nil {
-			label := token
-			if len(label) > 16 {
-				label = label[:12] + "..."
-			}
 			res.Failed = append(res.Failed, BatchImportFailed{
-				Source: label,
+				Source: truncateLabelRunes(token, 12),
 				Error:  err.Error(),
 			})
 			continue
@@ -193,7 +195,7 @@ func (s *Service) ImportRefreshTokens(ctx context.Context, rawInput string, grou
 	return res, nil
 }
 
-// ImportJSON 解析标准账号 JSON（兼容数组与单对象、camelCase 与 snake_case 字段），并同步创建缺失的分组。
+// ImportJSON 解析标准账号 JSON（兼容数组与单对象、camelCase 与 snake_case 字段），仅在账号导入成功后按需创建缺失分组。
 func (s *Service) ImportJSON(ctx context.Context, jsonContent string, defaultGroupID string) (*BatchImportResult, error) {
 	trimmed := strings.TrimSpace(jsonContent)
 	if trimmed == "" {
@@ -252,20 +254,20 @@ func (s *Service) ImportJSON(ctx context.Context, jsonContent string, defaultGro
 		}
 
 		targetGroupID := strings.TrimSpace(defaultGroupID)
+		pendingGroupName := ""
 		if groupName := pickString(item, "group_name", "groupName"); groupName != "" {
 			key := strings.ToLower(groupName)
 			if gid, exists := groupByName[key]; exists {
 				targetGroupID = gid
-			} else if created, err := s.store.SaveGroup(model.AccountGroup{Name: groupName}); err == nil {
-				groupByName[key] = created.ID
-				targetGroupID = created.ID
+			} else {
+				pendingGroupName = groupName
 			}
 		}
 
 		meta := &model.AccountDetailsUpdate{
 			Notes:           pickString(item, "notes", "note"),
 			LoginAccount:    pickString(item, "login_account", "loginAccount", "account_username", "username"),
-			AccountPassword: pickString(item, "account_password", "accountPassword"),
+			AccountPassword: pickStringRaw(item, "account_password", "accountPassword"),
 			TwoFactorSecret: pickString(item, "two_factor_secret", "twoFactorSecret"),
 			GroupID:         targetGroupID,
 		}
@@ -278,16 +280,52 @@ func (s *Service) ImportJSON(ctx context.Context, jsonContent string, defaultGro
 			})
 			continue
 		}
+
+		// 仅在账号验证并入库成功后，才创建 JSON 中声明的缺失分组，避免导入失败残留空分组。
+		if pendingGroupName != "" {
+			key := strings.ToLower(pendingGroupName)
+			gid, exists := groupByName[key]
+			if !exists {
+				if created, gErr := s.store.SaveGroup(model.AccountGroup{Name: pendingGroupName}); gErr == nil {
+					gid = created.ID
+					groupByName[key] = gid
+				}
+			}
+			if gid != "" {
+				if uErr := s.store.UpdateAccountGroup([]string{acc.ID}, gid); uErr == nil {
+					acc.GroupID = gid
+				}
+			}
+		}
+
 		res.Imported = append(res.Imported, acc)
 	}
 
 	return res, nil
 }
 
+func truncateLabelRunes(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes+4 {
+		return s
+	}
+	return string(runes[:maxRunes]) + "..."
+}
+
 func pickString(m map[string]any, keys ...string) string {
 	for _, k := range keys {
 		if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// pickStringRaw 用于密码等敏感字符串，保留原始首尾空白字符。
+func pickStringRaw(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k].(string); ok && v != "" {
+			return v
 		}
 	}
 	return ""

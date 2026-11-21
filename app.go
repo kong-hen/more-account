@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -96,6 +98,13 @@ func NewApp() *App {
 		},
 	)
 
+	// 在切号服务释放 switching 锁前同步内部切号基线，彻底消除误报外部切号的竞态窗口
+	switchSvc.SetOnSwitched(func(acc model.Account) {
+		if app.activeDetector != nil {
+			app.activeDetector.SyncAfterInternalSwitch(acc)
+		}
+	})
+
 	app.wakeupService = wakeup.NewService(store, oauthClient, quotaSvc, func() {
 		app.emitEvent("wakeup:updated", nil)
 	})
@@ -138,11 +147,6 @@ func (a *App) GetBootstrapState() *BootstrapState {
 	}
 }
 
-// GetSettings 获取当前全局设置。
-func (a *App) GetSettings() model.AppSettings {
-	return a.store.GetSettings()
-}
-
 // SaveSettings 保存全局设置，并通知后台自动刷新与账号探测器立即应用新配置。
 func (a *App) SaveSettings(settings model.AppSettings) (model.AppSettings, error) {
 	saved, err := a.store.SaveSettings(settings)
@@ -164,14 +168,18 @@ func (a *App) TriggerAutoRefreshIfDue() {
 	}
 }
 
-// DetectActiveAccount 立即同步探测本机当前正在使用的反重力账号，并返回最新探测结果。
+// DetectActiveAccount 立即同步探测本机当前正在使用的反重力账号，并返回最新探测结果（不重复推送后台事件）。
 func (a *App) DetectActiveAccount() switcher.ActiveDetectionResult {
 	if a.activeDetector == nil {
 		return switcher.ActiveDetectionResult{DetectedAt: time.Now().Unix()}
 	}
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 15*time.Second)
 	defer cancel()
-	return a.activeDetector.DetectOnce(ctx)
+	res := a.activeDetector.DetectOnceSilent(ctx)
+	if res.Changed && res.Managed && a.autoRefresher != nil {
+		a.autoRefresher.TriggerCheck()
+	}
+	return res
 }
 
 // TriggerActiveDetect 异步唤醒后台探测器检查本机是否在其他程序中切换了账号。
@@ -187,22 +195,42 @@ func (a *App) DetectInstalledClients() switcher.ClientInstallInfo {
 	return switcher.DetectInstalledClients(s.DesktopAppPath, s.IdeAppPath)
 }
 
-// OpenExternalURL 使用系统默认浏览器打开外部链接。
-func (a *App) OpenExternalURL(rawURL string) error {
+// validateExternalHTTPURL 校验外部链接仅允许标准 http / https 协议且包含有效主机名，防止本地文件/协议执行或命令注入。
+func validateExternalHTTPURL(rawURL string) (string, error) {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
-		return fmt.Errorf("链接不能为空")
+		return "", fmt.Errorf("链接不能为空")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("无效的外部链接: %w", err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("出于安全限制，仅允许打开 http/https 链接")
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return "", fmt.Errorf("外部链接缺少有效主机名")
+	}
+	return parsed.String(), nil
+}
+
+// OpenExternalURL 使用系统默认浏览器安全打开外部 http/https 链接。
+func (a *App) OpenExternalURL(rawURL string) error {
+	safeURL, err := validateExternalHTTPURL(rawURL)
+	if err != nil {
+		return err
 	}
 	if a.ctx != nil {
-		wailsRuntime.BrowserOpenURL(a.ctx, trimmed)
+		wailsRuntime.BrowserOpenURL(a.ctx, safeURL)
 		return nil
 	}
-	return openWithOS(trimmed)
+	return openExternalBrowserWithOS(safeURL)
 }
 
 // OpenDataFolder 在系统文件管理器中打开 ~/.more-account 数据目录。
 func (a *App) OpenDataFolder() error {
-	return openWithOS(a.store.DataDir())
+	return openDirectoryWithOS(a.store.DataDir())
 }
 
 // PickDirectory 弹出系统原生目录选择器（用于自定义 Token 用量扫描目录等）。
@@ -218,14 +246,36 @@ func (a *App) PickDirectory(title string) (string, error) {
 	})
 }
 
-func openWithOS(target string) error {
+func startAndReap(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func(c *exec.Cmd) {
+		_ = c.Wait()
+	}(cmd)
+	return nil
+}
+
+func openExternalBrowserWithOS(safeURL string) error {
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.Command("open", target).Start()
+		return startAndReap(exec.Command("open", safeURL))
 	case "windows":
-		return exec.Command("cmd", "/c", "start", "", target).Start()
+		// 使用 rundll32 直接交由系统默认浏览器打开，避免经过 cmd.exe 解析 shell 元字符引发注入风险。
+		return startAndReap(exec.Command("rundll32", "url.dll,FileProtocolHandler", safeURL))
 	default:
-		return exec.Command("xdg-open", target).Start()
+		return startAndReap(exec.Command("xdg-open", safeURL))
+	}
+}
+
+func openDirectoryWithOS(dir string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return startAndReap(exec.Command("open", dir))
+	case "windows":
+		return startAndReap(exec.Command("explorer", dir))
+	default:
+		return startAndReap(exec.Command("xdg-open", dir))
 	}
 }
 
@@ -241,24 +291,18 @@ func (a *App) GetCurrentAccountID() string {
 	return a.store.GetCurrentAccountID()
 }
 
-// AddAccountByRefreshToken 使用单个 Refresh Token 添加账号。
-func (a *App) AddAccountByRefreshToken(refreshToken, groupID string) (model.Account, error) {
-	ctx, cancel := context.WithTimeout(a.baseCtx(), 45*time.Second)
-	defer cancel()
-	acc, err := a.importerService.AddByRefreshToken(ctx, refreshToken, groupID, nil)
-	if err == nil && a.activeDetector != nil {
-		a.activeDetector.TriggerCheck()
-	}
-	return acc, err
-}
-
 // ImportRefreshTokens 批量导入多行 Refresh Token 或 JSON 文本。
 func (a *App) ImportRefreshTokens(rawInput, groupID string) (*importer.BatchImportResult, error) {
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 3*time.Minute)
 	defer cancel()
 	res, err := a.importerService.ImportRefreshTokens(ctx, rawInput, groupID)
-	if err == nil && a.activeDetector != nil {
-		a.activeDetector.TriggerCheck()
+	if err == nil {
+		if a.activeDetector != nil {
+			a.activeDetector.TriggerCheck()
+		}
+		if a.autoRefresher != nil {
+			a.autoRefresher.TriggerCheck()
+		}
 	}
 	return res, err
 }
@@ -277,17 +321,6 @@ func (a *App) ImportFromLocal(groupID string) (model.Account, error) {
 		}
 	}
 	return acc, err
-}
-
-// ImportFromJSON 通过 JSON 文本批量导入账号。
-func (a *App) ImportFromJSON(jsonContent, groupID string) (*importer.BatchImportResult, error) {
-	ctx, cancel := context.WithTimeout(a.baseCtx(), 3*time.Minute)
-	defer cancel()
-	res, err := a.importerService.ImportJSON(ctx, jsonContent, groupID)
-	if err == nil && a.activeDetector != nil {
-		a.activeDetector.TriggerCheck()
-	}
-	return res, err
 }
 
 // ExportAccounts 将选中账号（为空则全部）导出为 JSON 字符串。
@@ -355,7 +388,7 @@ func (a *App) ReorderAccounts(orderedIDs []string) error {
 	return a.store.ReorderAccounts(orderedIDs)
 }
 
-// GenerateTOTP 根据密钥实时计算 6 位 2FA 验证码与剩余倒计时秒数。
+// GenerateTOTP 根据密钥实时计算 2FA 验证码与剩余倒计时秒数。
 func (a *App) GenerateTOTP(secret string) (totp.CodeResult, error) {
 	return totp.GenerateNow(secret)
 }
@@ -371,12 +404,16 @@ func (a *App) StartOAuthLogin(groupID string) (oauth.LoginSession, error) {
 
 	_ = a.OpenExternalURL(sess.AuthURL)
 
-	go func(redirectURI, targetGroupID string) {
+	go func(sessionState, redirectURI, targetGroupID string) {
 		ctx, cancel := context.WithTimeout(a.baseCtx(), 5*time.Minute)
 		defer cancel()
 
-		code, waitErr := a.oauthManager.WaitForCode(ctx)
+		code, waitErr := a.oauthManager.WaitForState(ctx, sessionState)
 		if waitErr != nil {
+			// 用户主动取消或被新会话替代时静默结束，不再误报 oauth:failed 打断界面或弹出错误条
+			if errors.Is(waitErr, oauth.ErrOAuthCanceled) {
+				return
+			}
 			a.emitEvent("oauth:failed", map[string]any{"error": waitErr.Error()})
 			return
 		}
@@ -403,7 +440,7 @@ func (a *App) StartOAuthLogin(groupID string) (oauth.LoginSession, error) {
 			a.activeDetector.TriggerCheck()
 		}
 		a.emitEvent("oauth:completed", map[string]any{"account": acc})
-	}(sess.RedirectURI, groupID)
+	}(sess.State, sess.RedirectURI, groupID)
 
 	return sess, nil
 }
@@ -446,13 +483,8 @@ func (a *App) SwitchAccount(req switcher.SwitchRequest) (*switcher.SwitchOutcome
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 60*time.Second)
 	defer cancel()
 	res, err := a.switcherService.SwitchAccount(ctx, req)
-	if err == nil && res != nil {
-		if a.activeDetector != nil {
-			a.activeDetector.SyncAfterInternalSwitch(res.Account)
-		}
-		if a.autoRefresher != nil {
-			a.autoRefresher.TriggerCheck()
-		}
+	if err == nil && res != nil && a.autoRefresher != nil {
+		a.autoRefresher.TriggerCheck()
 	}
 	return res, err
 }

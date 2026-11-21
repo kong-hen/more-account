@@ -143,3 +143,149 @@ func TestStoreHistoryCapAndTrim(t *testing.T) {
 		t.Fatal("清空后历史记录应为空")
 	}
 }
+
+func TestStoreDeepCopyAndAtomicPartialUpdates(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("初始化存储失败: %v", err)
+	}
+
+	isGcp := true
+	acc1, err := store.UpsertAccount(model.Account{
+		Email:           "deep@example.com",
+		Notes:           "初始备注",
+		AccountPassword: "init-password",
+		Token: model.TokenData{
+			AccessToken:  "at-1",
+			RefreshToken: "rt-1",
+			IsGcpTos:     &isGcp,
+		},
+		Quota: &model.QuotaData{
+			SubscriptionTier: "PRO",
+			Models:           []model.ModelQuota{{Name: "gemini-3.8-flash-high", Percentage: 80}},
+		},
+		QuotaError: &model.QuotaErrorInfo{Message: "old-err"},
+	})
+	if err != nil {
+		t.Fatalf("插入账号失败: %v", err)
+	}
+
+	// 1. 深拷贝隔离校验：修改返回副本内部指针/切片不得污染 Store 内部状态
+	got, ok := store.GetAccount(acc1.ID)
+	if !ok {
+		t.Fatal("未找到刚插入的账号")
+	}
+	got.Quota.Models[0].Percentage = 0
+	got.QuotaError.Message = "tampered"
+	*got.Token.IsGcpTos = false
+
+	fresh, _ := store.GetAccount(acc1.ID)
+	if fresh.Quota.Models[0].Percentage != 80 || fresh.QuotaError.Message != "old-err" || fresh.Token.IsGcpTos == nil || !*fresh.Token.IsGcpTos {
+		t.Fatalf("深拷贝隔离失效，Store 内部状态被外部修改污染: %+v", fresh)
+	}
+
+	// 2. UpdateAccountDetails 拒绝不存在的 GroupID
+	if _, err := store.UpdateAccountDetails(acc1.ID, model.AccountDetailsUpdate{
+		Notes:   "新备注",
+		GroupID: "non-existent-group-id",
+	}); err == nil {
+		t.Fatal("传入不存在的 GroupID 应当返回错误")
+	}
+
+	// 3. UpdateAccount 原子局部更新仅修改配额，不覆盖期间用户写入的备注/密码
+	if _, err := store.UpdateAccountDetails(acc1.ID, model.AccountDetailsUpdate{
+		Notes:           "并发编辑后的备注",
+		AccountPassword: "updated-password",
+	}); err != nil {
+		t.Fatalf("更新详情失败: %v", err)
+	}
+	updated, err := store.UpdateAccount(acc1.ID, func(target *model.Account) error {
+		target.Quota = &model.QuotaData{SubscriptionTier: "ULTRA"}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("原子局部更新失败: %v", err)
+	}
+	if updated.Notes != "并发编辑后的备注" || updated.AccountPassword != "updated-password" || updated.Quota.SubscriptionTier != "ULTRA" {
+		t.Fatalf("原子局部更新未保留并发字段: %+v", updated)
+	}
+
+	// 4. SortOrder 删除账号/分组后新增应严格大于当前最大值，不产生重复 SortOrder
+	acc2, err := store.UpsertAccount(model.Account{
+		Email: "second@example.com",
+		Token: model.TokenData{RefreshToken: "rt-2"},
+	})
+	if err != nil {
+		t.Fatalf("插入账号 2 失败: %v", err)
+	}
+	if err := store.DeleteAccounts([]string{acc1.ID}); err != nil {
+		t.Fatalf("删除账号 1 失败: %v", err)
+	}
+	acc3, err := store.UpsertAccount(model.Account{
+		Email: "third@example.com",
+		Token: model.TokenData{RefreshToken: "rt-3"},
+	})
+	if err != nil {
+		t.Fatalf("插入账号 3 失败: %v", err)
+	}
+	acc2Now, _ := store.GetAccount(acc2.ID)
+	if acc3.SortOrder <= acc2Now.SortOrder {
+		t.Fatalf("删除旧账号后新增账号 SortOrder 应严格大于已有最大值: acc2=%d acc3=%d", acc2Now.SortOrder, acc3.SortOrder)
+	}
+
+	g1, err := store.SaveGroup(model.AccountGroup{Name: "G1"})
+	if err != nil {
+		t.Fatalf("创建分组 1 失败: %v", err)
+	}
+	g2, err := store.SaveGroup(model.AccountGroup{Name: "G2"})
+	if err != nil {
+		t.Fatalf("创建分组 2 失败: %v", err)
+	}
+	if err := store.DeleteGroup(g1.ID); err != nil {
+		t.Fatalf("删除分组 1 失败: %v", err)
+	}
+	g3, err := store.SaveGroup(model.AccountGroup{Name: "G3"})
+	if err != nil {
+		t.Fatalf("创建分组 3 失败: %v", err)
+	}
+	if g3.SortOrder <= g2.SortOrder {
+		t.Fatalf("删除旧分组后新增分组 SortOrder 应严格大于已有最大值: g2=%d g3=%d", g2.SortOrder, g3.SortOrder)
+	}
+
+	// 5. WakeupState 深拷贝隔离 & UpdateWakeupTaskLastRun 不覆盖并发修改
+	ws := model.WakeupState{
+		Enabled: true,
+		Tasks: []model.WakeupTask{
+			{
+				ID:      "task-1",
+				Name:    "原任务名",
+				Enabled: true,
+				Schedule: model.WakeupSchedule{
+					SelectedAccounts: []string{acc2.ID},
+					SelectedModels:   []string{"gemini-3.8-flash-high"},
+				},
+			},
+		},
+	}
+	if err := store.SaveWakeupState(ws); err != nil {
+		t.Fatalf("保存唤醒状态失败: %v", err)
+	}
+	gotWS := store.GetWakeupState()
+	gotWS.Tasks[0].Schedule.SelectedAccounts[0] = "tampered-acc"
+	if store.GetWakeupState().Tasks[0].Schedule.SelectedAccounts[0] != acc2.ID {
+		t.Fatal("WakeupState 深拷贝隔离失效")
+	}
+	// 并发修改任务名称后再调用 UpdateWakeupTaskLastRun
+	ws2 := store.GetWakeupState()
+	ws2.Tasks[0].Name = "改名后的任务"
+	if err := store.SaveWakeupState(ws2); err != nil {
+		t.Fatalf("更新任务名称失败: %v", err)
+	}
+	if err := store.UpdateWakeupTaskLastRun("task-1", 1700000000000); err != nil {
+		t.Fatalf("原子更新任务 LastRunAt 失败: %v", err)
+	}
+	finalWS := store.GetWakeupState()
+	if finalWS.Tasks[0].Name != "改名后的任务" || finalWS.Tasks[0].LastRunAt != 1700000000000 {
+		t.Fatalf("UpdateWakeupTaskLastRun 状态异常: %+v", finalWS.Tasks[0])
+	}
+}

@@ -49,6 +49,9 @@ func ReadVarint(data []byte, offset int) (uint64, int, error) {
 			return 0, pos, fmt.Errorf("protobuf 数据不完整")
 		}
 		b := data[pos]
+		if shift == 63 && b > 0x01 {
+			return 0, pos, fmt.Errorf("protobuf varint 溢出")
+		}
 		result |= uint64(b&0x7F) << shift
 		pos++
 		if b&0x80 == 0 {
@@ -60,6 +63,19 @@ func ReadVarint(data []byte, offset int) (uint64, int, error) {
 		}
 	}
 	return result, pos, nil
+}
+
+// sliceLenDelim 安全读取长度分隔字段切片，使用无符号剩余长度比较彻底防止大 varint 转换溢出导致切片越界 panic。
+func sliceLenDelim(data []byte, offset int) ([]byte, int, error) {
+	length, contentOffset, err := ReadVarint(data, offset)
+	if err != nil {
+		return nil, offset, err
+	}
+	if contentOffset < 0 || contentOffset > len(data) || length > uint64(len(data)-contentOffset) {
+		return nil, offset, fmt.Errorf("长度分隔字段越界")
+	}
+	end := contentOffset + int(length)
+	return data[contentOffset:end], end, nil
 }
 
 // SkipField 按 wire_type 跳过当前字段。
@@ -74,15 +90,8 @@ func SkipField(data []byte, offset int, wireType uint8) (int, error) {
 		}
 		return offset + 8, nil
 	case 2:
-		length, contentOffset, err := ReadVarint(data, offset)
-		if err != nil {
-			return offset, err
-		}
-		end := contentOffset + int(length)
-		if end > len(data) || end < contentOffset {
-			return offset, fmt.Errorf("长度分隔字段越界")
-		}
-		return end, nil
+		_, end, err := sliceLenDelim(data, offset)
+		return end, err
 	case 5:
 		if offset+4 > len(data) {
 			return offset, fmt.Errorf("fixed32 数据不足")
@@ -163,15 +172,11 @@ func RemoveUnifiedTopicEntry(data []byte, targetKey string) ([]byte, error) {
 
 		shouldRemove := false
 		if fieldNum == 1 && wireType == 2 {
-			length, contentOffset, err := ReadVarint(data, afterTag)
+			entryBytes, _, err := sliceLenDelim(data, afterTag)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("Topic.data entry 数据不完整: %w", err)
 			}
-			end := contentOffset + int(length)
-			if end > len(data) {
-				return nil, fmt.Errorf("Topic.data entry 数据不完整")
-			}
-			if unifiedTopicEntryKey(data[contentOffset:end]) == targetKey {
+			if unifiedTopicEntryKey(entryBytes) == targetKey {
 				shouldRemove = true
 			}
 		}
@@ -194,15 +199,11 @@ func unifiedTopicEntryKey(entry []byte) string {
 		wireType := uint8(tag & 7)
 		fieldNum := uint32(tag >> 3)
 		if fieldNum == 1 && wireType == 2 {
-			length, contentOffset, err := ReadVarint(entry, afterTag)
+			val, _, err := sliceLenDelim(entry, afterTag)
 			if err != nil {
 				return ""
 			}
-			end := contentOffset + int(length)
-			if end > len(entry) {
-				return ""
-			}
-			return string(entry[contentOffset:end])
+			return string(val)
 		}
 		next, err := SkipField(entry, afterTag, wireType)
 		if err != nil {
@@ -211,12 +212,6 @@ func unifiedTopicEntryKey(entry []byte) string {
 		offset = next
 	}
 	return ""
-}
-
-// ExtractRefreshTokenFromUnifiedOAuth 从 antigravityUnifiedStateSync.oauthToken 原始字节中提取 refresh_token。
-func ExtractRefreshTokenFromUnifiedOAuth(data []byte) string {
-	_, rt, _ := ExtractOAuthInfoFromUnifiedOAuth(data)
-	return rt
 }
 
 // ExtractOAuthInfoFromUnifiedOAuth 从 antigravityUnifiedStateSync.oauthToken 中提取 access_token、refresh_token 与 id_token。
@@ -252,17 +247,15 @@ func extractUnifiedTopicPayload(data []byte, targetKey string) []byte {
 		wireType := uint8(tag & 7)
 		fieldNum := uint32(tag >> 3)
 		if fieldNum == 1 && wireType == 2 {
-			length, contentOffset, err := ReadVarint(data, afterTag)
+			entryBytes, next, err := sliceLenDelim(data, afterTag)
 			if err != nil {
 				return nil
 			}
-			end := contentOffset + int(length)
-			if end > len(data) {
-				return nil
-			}
-			if payload := extractPayloadFromEntry(data[contentOffset:end], targetKey); len(payload) > 0 {
+			if payload := extractPayloadFromEntry(entryBytes, targetKey); len(payload) > 0 {
 				return payload
 			}
+			offset = next
+			continue
 		}
 		next, err := SkipField(data, afterTag, wireType)
 		if err != nil {
@@ -286,20 +279,17 @@ func extractPayloadFromEntry(entry []byte, targetKey string) []byte {
 		wireType := uint8(tag & 7)
 		fieldNum := uint32(tag >> 3)
 		if wireType == 2 {
-			length, contentOffset, err := ReadVarint(entry, afterTag)
+			val, next, err := sliceLenDelim(entry, afterTag)
 			if err != nil {
 				return nil
 			}
-			end := contentOffset + int(length)
-			if end > len(entry) {
-				return nil
-			}
-			val := entry[contentOffset:end]
 			if fieldNum == 1 && string(val) == targetKey {
 				matched = true
 			} else if fieldNum == 2 {
 				rowData = val
 			}
+			offset = next
+			continue
 		}
 		next, err := SkipField(entry, afterTag, wireType)
 		if err != nil {
@@ -332,15 +322,11 @@ func extractStringField(data []byte, targetField uint32) string {
 		wireType := uint8(tag & 7)
 		fieldNum := uint32(tag >> 3)
 		if fieldNum == targetField && wireType == 2 {
-			length, contentOffset, err := ReadVarint(data, afterTag)
+			val, _, err := sliceLenDelim(data, afterTag)
 			if err != nil {
 				return ""
 			}
-			end := contentOffset + int(length)
-			if end > len(data) {
-				return ""
-			}
-			return string(data[contentOffset:end])
+			return string(val)
 		}
 		next, err := SkipField(data, afterTag, wireType)
 		if err != nil {

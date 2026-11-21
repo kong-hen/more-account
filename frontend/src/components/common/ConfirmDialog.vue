@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 通用破坏性操作二次确认对话框，默认将焦点放在安全取消按钮上。
+// 通用破坏性操作二次确认对话框，默认将焦点放在安全取消按钮上，提交中禁止误关。
 import BaseModal from './BaseModal.vue'
 
 withDefaults(
@@ -25,7 +25,14 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <BaseModal :open="open" :title="title" width-class="w-[420px]" @close="emit('cancel')">
+  <BaseModal
+    :open="open"
+    :title="title"
+    width-class="w-[420px]"
+    :close-on-outside="!loading"
+    :prevent-close="loading"
+    @close="emit('cancel')"
+  >
     <p class="text-sm leading-relaxed" style="color: var(--text-secondary)">
       {{ message }}
     </p>
@@ -33,7 +40,8 @@ const emit = defineEmits<{
       <button
         type="button"
         autofocus
-        class="px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+        :disabled="loading"
+        class="px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
         style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
         @click="emit('cancel')"
       >

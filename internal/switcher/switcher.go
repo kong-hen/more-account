@@ -35,6 +35,7 @@ type Service struct {
 	switching   atomic.Bool
 	store       *storage.Store
 	oauthClient *oauth.Client
+	onSwitched  func(acc model.Account)
 }
 
 // NewService 创建切号服务实例。
@@ -48,12 +49,19 @@ func NewService(store *storage.Store, oauthClient *oauth.Client) *Service {
 	}
 }
 
+// SetOnSwitched 注册内部切号成功回调，在释放 switching 状态前同步探测器基线，彻底消除误报外部切号的竞态窗口。
+func (s *Service) SetOnSwitched(fn func(acc model.Account)) {
+	s.mu.Lock()
+	s.onSwitched = fn
+	s.mu.Unlock()
+}
+
 // IsSwitching 返回当前是否正在执行切换操作，用于避免后台账号探测器在写凭据中途并发误判。
 func (s *Service) IsSwitching() bool {
 	return s.switching.Load()
 }
 
-// SwitchAccount 执行完整切号流程：令牌预刷新 -> 停客户端 -> 写入系统凭据/数据库 -> 提交状态 -> 记历史 -> 重启客户端。
+// SwitchAccount 执行完整切号流程：令牌预刷新 -> 停客户端/共享 hub -> 写入系统凭据/数据库 -> 提交状态 -> 记历史 -> 重启客户端。
 func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*SwitchOutcome, error) {
 	if !s.mu.TryLock() {
 		return nil, fmt.Errorf("正在执行另一次账号切换，请稍候再试")
@@ -77,7 +85,7 @@ func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*Switch
 			AccountID:    acc.ID,
 			TargetEmail:  acc.Email,
 			TargetClient: target,
-			Launched:     req.Launch,
+			Launched:     false,
 			Success:      false,
 			DurationMs:   time.Since(started).Milliseconds(),
 			ErrorStage:   stage,
@@ -86,24 +94,30 @@ func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*Switch
 		return nil, err
 	}
 
-	// 1. 切号前检查并自动刷新临期令牌
+	// 1. 切号前检查并自动刷新临期令牌（使用原子局部更新，不覆盖用户并发编辑的备注与密码）
 	freshTok, refreshed, err := s.oauthClient.EnsureFreshToken(ctx, acc.Token)
 	if err != nil {
 		return recordFailure("token_refresh", fmt.Errorf("切号前刷新令牌失败: %w", err))
 	}
 	if refreshed {
-		acc.Token = freshTok
-		if saved, saveErr := s.store.SaveAccount(acc); saveErr == nil {
+		if saved, saveErr := s.store.UpdateAccount(acc.ID, func(targetAcc *model.Account) error {
+			targetAcc.Token = freshTok
+			return nil
+		}); saveErr == nil {
 			acc = saved
+		} else {
+			acc.Token = freshTok
 		}
 	}
 
 	settings := s.store.GetSettings()
 
-	// 2. 若需重启客户端，先停止客户端及 macOS 共享 agy --hub
+	// 2. 停止客户端（若需重启）并协同暂停 macOS 共享 agy --hub（无论是否重启，都需避免 hub 内存缓存覆写新凭据）
 	var stoppedHubs []runningHub
-	if req.Launch && target != "cli" {
-		_ = stopClientProcesses(target)
+	if target != "cli" {
+		if req.Launch {
+			_ = stopClientProcesses(target, settings.DesktopAppPath, settings.IdeAppPath)
+		}
 		stoppedHubs = snapshotAndStopMacHubs()
 	}
 
@@ -127,11 +141,15 @@ func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*Switch
 	case "ide":
 		// Antigravity IDE 同时写入 state.vscdb 与共享系统凭据，兼容新旧版本
 		ideDB := DefaultIDEStateDBPath()
-		if ideDB != "" {
+		if ideDB == "" {
+			writeErr = fmt.Errorf("无法定位 Antigravity IDE state.vscdb 路径")
+		} else {
 			writeErr = InjectAccountToStateDB(ideDB, acc)
 		}
 		if writeErr == nil {
-			_ = WriteSystemCredentials(acc, false)
+			if sysErr := WriteSystemCredentials(acc, false); sysErr != nil {
+				writeErr = sysErr
+			}
 		}
 	}
 
@@ -143,12 +161,15 @@ func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*Switch
 		return recordFailure("credential_write", writeErr)
 	}
 
-	// 4. 仅在真实凭据写入成功后提交当前激活账号状态
+	// 4. 仅在真实凭据写入成功后提交当前激活账号状态，并在释放 switching 锁前同步内部切号基线
 	if err := s.store.SetCurrentAccountID(acc.ID); err != nil {
 		return recordFailure("state_commit", fmt.Errorf("凭据已写入，但保存当前账号状态失败: %w", err))
 	}
 	if updated, found := s.store.GetAccount(acc.ID); found {
 		acc = updated
+	}
+	if s.onSwitched != nil {
+		s.onSwitched(acc)
 	}
 
 	// 5. 按需重启客户端（重启失败不回滚已成功的凭据切换）
@@ -159,12 +180,13 @@ func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*Switch
 		}
 	}
 
+	launchedOK := req.Launch && target != "cli" && launchWarning == ""
 	durationMs := time.Since(started).Milliseconds()
 	_ = s.store.AppendSwitchHistory(model.SwitchHistoryItem{
 		AccountID:    acc.ID,
 		TargetEmail:  acc.Email,
 		TargetClient: target,
-		Launched:     req.Launch && target != "cli",
+		Launched:     launchedOK,
 		Success:      true,
 		DurationMs:   durationMs,
 		ErrorStage:   warningStage(launchWarning),
@@ -174,7 +196,7 @@ func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*Switch
 	return &SwitchOutcome{
 		Account:       acc,
 		TargetClient:  target,
-		Launched:      req.Launch && target != "cli" && launchWarning == "",
+		Launched:      launchedOK,
 		LaunchWarning: launchWarning,
 		DurationMs:    durationMs,
 	}, nil

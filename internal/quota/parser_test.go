@@ -6,8 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"more-account/internal/model"
+	"more-account/internal/oauth"
+	"more-account/internal/storage"
 )
 
 func TestResolveCloudCodeBaseURL(t *testing.T) {
@@ -252,5 +255,77 @@ func TestParseQuotaSummaryBucketsHandlesZeroOmittedFraction(t *testing.T) {
 	}
 	if buckets[0].BucketID != "3p-weekly" || buckets[0].Percentage != 0 || !buckets[0].Exhausted {
 		t.Fatalf("省略 remainingFraction 且带 resetTime 的桶应视为 0%% 已耗尽: %+v", buckets[0])
+	}
+}
+
+func TestRefreshAccountPreservesDetailsAndPriorTierSummaryOnPartialFailure(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("初始化存储失败: %v", err)
+	}
+	acc, err := store.UpsertAccount(model.Account{
+		Email:           "keep@example.com",
+		Notes:           "重要备注",
+		AccountPassword: "secret-pass",
+		Token: model.TokenData{
+			AccessToken:     "valid-at",
+			RefreshToken:    "valid-rt",
+			ExpiryTimestamp: time.Now().Unix() + 3600,
+			ProjectID:       "proj-1",
+		},
+		Quota: &model.QuotaData{
+			SubscriptionTier: "PRO",
+			TierID:           "g1-pro-tier",
+			Credits:          []model.CreditInfo{{CreditType: "GOOGLE_ONE_AI", CreditAmount: "300"}},
+			SummaryBuckets:   []model.QuotaBucket{{BucketID: "gemini-weekly", Percentage: 88, ResetTime: "2026-11-28T00:00:00Z"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("写入测试账号失败: %v", err)
+	}
+
+	// 模拟 loadCodeAssist 与 retrieveUserQuotaSummary 瞬时 500，仅 fetchAvailableModels 正常返回
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + LoadCodeAssistPath, "/" + RetrieveUserQuotaSummaryPath:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"temporary"}`))
+		case "/" + FetchAvailableModelsPath:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"models": map[string]any{
+					"gemini-3-pro-high": map[string]any{
+						"displayName": "Gemini 3 Pro (High)",
+						"quotaInfo": map[string]any{
+							"remainingFraction": 0.72,
+							"resetTime":         "2026-11-21T16:00:00Z",
+						},
+					},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	svc := NewService(store, oauth.NewClient(), &Client{
+		HTTPClient:      srv.Client(),
+		BaseURLOverride: srv.URL,
+	})
+	updated, err := svc.RefreshAccount(context.Background(), acc.ID)
+	if err != nil {
+		t.Fatalf("部分子接口瞬时失败时 RefreshAccount 应容错成功，实际 err=%v", err)
+	}
+	if updated.Notes != "重要备注" || updated.AccountPassword != "secret-pass" {
+		t.Fatalf("配额刷新不应覆盖账号备注或密码: %+v", updated)
+	}
+	if updated.Quota == nil || len(updated.Quota.Models) != 1 || updated.Quota.Models[0].Percentage != 72 {
+		t.Fatalf("期望更新模型配额为 72%%，实际 %+v", updated.Quota)
+	}
+	if updated.Quota.SubscriptionTier != "PRO" || updated.Quota.TierID != "g1-pro-tier" || len(updated.Quota.Credits) != 1 {
+		t.Fatalf("loadCodeAssist 瞬时失败时应保留既有订阅与积分: %+v", updated.Quota)
+	}
+	if len(updated.Quota.SummaryBuckets) != 1 || updated.Quota.SummaryBuckets[0].BucketID != "gemini-weekly" {
+		t.Fatalf("retrieveUserQuotaSummary 瞬时失败时应保留既有共享额度桶: %+v", updated.Quota.SummaryBuckets)
 	}
 }

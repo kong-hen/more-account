@@ -16,7 +16,8 @@ import ToastContainer from '@/components/common/ToastContainer.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTokenUsageStore } from '@/stores/tokenUsageStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
-import { onWailsEvent } from '@/services/api'
+import { extractErrorMessage, onWailsEvent } from '@/services/api'
+import { maskEmail } from '@/utils/privacy'
 import type { Account, AccountGroup } from '@/types/models'
 
 const appStore = useAppStore()
@@ -77,7 +78,10 @@ function requestDeleteAccounts(ids: string[], label: string) {
 }
 
 function requestDeleteSingleAccount(account: Account) {
-  deleteAccountConfirm.value = { ids: [account.id], label: account.email }
+  deleteAccountConfirm.value = {
+    ids: [account.id],
+    label: maskEmail(account.email, appStore.settings.privacyMode),
+  }
 }
 
 async function confirmDeleteAccounts() {
@@ -86,6 +90,8 @@ async function confirmDeleteAccounts() {
   try {
     await appStore.deleteAccountIds(deleteAccountConfirm.value.ids)
     deleteAccountConfirm.value = null
+  } catch (err) {
+    appStore.notify(`删除账号失败：${extractErrorMessage(err)}`, 'error')
   } finally {
     deleting.value = false
   }
@@ -97,6 +103,8 @@ async function confirmDeleteGroup() {
   try {
     await appStore.deleteGroup(deleteGroupConfirm.value.id)
     deleteGroupConfirm.value = null
+  } catch (err) {
+    appStore.notify(`删除分组失败：${extractErrorMessage(err)}`, 'error')
   } finally {
     deleting.value = false
   }

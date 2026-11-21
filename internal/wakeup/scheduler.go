@@ -15,6 +15,10 @@ import (
 	"more-account/internal/storage"
 )
 
+type cancelScopeEntry struct {
+	cancel context.CancelFunc
+}
+
 // Service 管理定时唤醒后台调度器、手动立即测试、取消控制与执行历史记录。
 type Service struct {
 	store        *storage.Store
@@ -27,7 +31,7 @@ type Service struct {
 	stopCancel    context.CancelFunc
 	runningTasks  map[string]bool
 	lastResetSeen map[string]string // key: taskID:accountID:model -> resetTime
-	cancelScopes  map[string]context.CancelFunc
+	cancelScopes  map[string]*cancelScopeEntry
 }
 
 // NewService 创建定时唤醒服务实例。
@@ -43,7 +47,7 @@ func NewService(store *storage.Store, oauthClient *oauth.Client, quotaService *q
 		onUpdated:     onUpdated,
 		runningTasks:  make(map[string]bool),
 		lastResetSeen: make(map[string]string),
-		cancelScopes:  make(map[string]context.CancelFunc),
+		cancelScopes:  make(map[string]*cancelScopeEntry),
 	}
 }
 
@@ -53,6 +57,9 @@ func (s *Service) Start(parent context.Context) {
 	if s.stopCancel != nil {
 		s.mu.Unlock()
 		return
+	}
+	if parent == nil {
+		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
 	s.stopCancel = cancel
@@ -77,8 +84,8 @@ func (s *Service) Stop() {
 	s.mu.Lock()
 	cancel := s.stopCancel
 	s.stopCancel = nil
-	for k, fn := range s.cancelScopes {
-		fn()
+	for k, entry := range s.cancelScopes {
+		entry.cancel()
 		delete(s.cancelScopes, k)
 	}
 	s.mu.Unlock()
@@ -94,8 +101,8 @@ func (s *Service) CancelScope(scopeID string) {
 		return
 	}
 	s.mu.Lock()
-	if fn, ok := s.cancelScopes[scopeID]; ok {
-		fn()
+	if entry, ok := s.cancelScopes[scopeID]; ok {
+		entry.cancel()
 		delete(s.cancelScopes, scopeID)
 	}
 	s.mu.Unlock()
@@ -103,18 +110,25 @@ func (s *Service) CancelScope(scopeID string) {
 
 // TestNow 手动发起一次单账号单模型唤醒测试，可随时通过 CancelScope 取消。
 func (s *Service) TestNow(parent context.Context, req model.WakeupTestRequest) (*model.WakeupHistoryItem, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	ctx, cancel := context.WithTimeout(parent, 50*time.Second)
 	scopeID := strings.TrimSpace(req.ScopeID)
 	if scopeID != "" {
+		entry := &cancelScopeEntry{cancel: cancel}
 		s.mu.Lock()
 		if old, exists := s.cancelScopes[scopeID]; exists {
-			old()
+			old.cancel()
 		}
-		s.cancelScopes[scopeID] = cancel
+		s.cancelScopes[scopeID] = entry
 		s.mu.Unlock()
 		defer func() {
 			s.mu.Lock()
-			delete(s.cancelScopes, scopeID)
+			// 仅当当前注册项仍为本次调用创建的句柄时才移除，防止并发重入误删新测试的取消句柄。
+			if s.cancelScopes[scopeID] == entry {
+				delete(s.cancelScopes, scopeID)
+			}
 			s.mu.Unlock()
 			cancel()
 		}()
@@ -143,7 +157,10 @@ func (s *Service) RunTaskNow(parent context.Context, taskID string) ([]model.Wak
 	if target == nil {
 		return nil, fmt.Errorf("未找到唤醒任务: %s", taskID)
 	}
-	results := s.executeTask(parent, *target, "manual")
+	results, started := s.executeTask(parent, *target, "manual")
+	if !started {
+		return nil, fmt.Errorf("唤醒任务「%s」正在执行中，请稍候", target.Name)
+	}
 	return results, nil
 }
 
@@ -152,6 +169,12 @@ func (s *Service) tick(ctx context.Context, now time.Time) {
 	if !state.Enabled {
 		return
 	}
+
+	activeTaskIDs := make(map[string]struct{}, len(state.Tasks))
+	for _, task := range state.Tasks {
+		activeTaskIDs[task.ID] = struct{}{}
+	}
+	s.pruneResetCache(activeTaskIDs)
 
 	for _, task := range state.Tasks {
 		if !task.Enabled {
@@ -169,10 +192,33 @@ func (s *Service) tick(ctx context.Context, now time.Time) {
 	}
 }
 
-func (s *Service) checkQuotaResetTrigger(task model.WakeupTask, now time.Time) bool {
-	if task.LastRunAt > 0 && now.Sub(time.UnixMilli(task.LastRunAt)) < 10*time.Minute {
-		return false
+func (s *Service) pruneResetCache(activeTaskIDs map[string]struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.lastResetSeen {
+		colon := strings.IndexByte(k, ':')
+		if colon <= 0 {
+			delete(s.lastResetSeen, k)
+			continue
+		}
+		if _, ok := activeTaskIDs[k[:colon]]; !ok {
+			delete(s.lastResetSeen, k)
+		}
 	}
+}
+
+// checkQuotaResetTrigger 追踪任务选中模型（或全部模型）的 resetTime 变更。
+// 无论模型当前是否处于低配额状态都会记录其 resetTime，一旦检测到重置时间推进且当前额度恢复至 >= 95% 即触发唤醒。
+func (s *Service) checkQuotaResetTrigger(task model.WakeupTask, now time.Time) bool {
+	inCooldown := task.LastRunAt > 0 && now.Sub(time.UnixMilli(task.LastRunAt)) < 10*time.Minute
+
+	selectedModels := make(map[string]struct{}, len(task.Schedule.SelectedModels))
+	for _, m := range task.Schedule.SelectedModels {
+		if trimmed := strings.ToLower(strings.TrimSpace(m)); trimmed != "" {
+			selectedModels[trimmed] = struct{}{}
+		}
+	}
+
 	triggered := false
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -183,12 +229,17 @@ func (s *Service) checkQuotaResetTrigger(task model.WakeupTask, now time.Time) b
 			continue
 		}
 		for _, m := range acc.Quota.Models {
-			if m.ResetTime == "" || m.Percentage < 95 {
+			if strings.TrimSpace(m.ResetTime) == "" {
 				continue
+			}
+			if len(selectedModels) > 0 {
+				if _, want := selectedModels[strings.ToLower(strings.TrimSpace(m.Name))]; !want {
+					continue
+				}
 			}
 			key := task.ID + ":" + accID + ":" + m.Name
 			prevReset := s.lastResetSeen[key]
-			if prevReset != "" && prevReset != m.ResetTime {
+			if prevReset != "" && prevReset != m.ResetTime && m.Percentage >= 95 && !inCooldown {
 				triggered = true
 			}
 			s.lastResetSeen[key] = m.ResetTime
@@ -197,11 +248,14 @@ func (s *Service) checkQuotaResetTrigger(task model.WakeupTask, now time.Time) b
 	return triggered
 }
 
-func (s *Service) executeTask(parent context.Context, task model.WakeupTask, triggerType string) []model.WakeupHistoryItem {
+func (s *Service) executeTask(parent context.Context, task model.WakeupTask, triggerType string) ([]model.WakeupHistoryItem, bool) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	s.mu.Lock()
 	if s.runningTasks[task.ID] {
 		s.mu.Unlock()
-		return nil
+		return nil, false
 	}
 	s.runningTasks[task.ID] = true
 	s.mu.Unlock()
@@ -214,7 +268,7 @@ func (s *Service) executeTask(parent context.Context, task model.WakeupTask, tri
 
 	models := task.Schedule.SelectedModels
 	if len(models) == 0 {
-		models = []string{"gemini-3-flash"}
+		models = []string{defaultWakeupModel}
 	}
 	prompt := strings.TrimSpace(task.Schedule.CustomPrompt)
 	if prompt == "" {
@@ -240,21 +294,13 @@ func (s *Service) executeTask(parent context.Context, task model.WakeupTask, tri
 		}
 	}
 
-	// 更新该任务的最近执行时间戳
-	state := s.store.GetWakeupState()
-	nowMs := time.Now().UnixMilli()
-	for i := range state.Tasks {
-		if state.Tasks[i].ID == task.ID {
-			state.Tasks[i].LastRunAt = nowMs
-			break
-		}
-	}
-	_ = s.store.SaveWakeupState(state)
+	// 原子更新该任务的最近运行时间戳，避免覆盖并发编辑的其他任务配置
+	_ = s.store.UpdateWakeupTaskLastRun(task.ID, time.Now().UnixMilli())
 
 	if s.onUpdated != nil {
 		s.onUpdated()
 	}
-	return results
+	return results, true
 }
 
 func (s *Service) runSingleAccountWakeup(
@@ -270,7 +316,7 @@ func (s *Service) runSingleAccountWakeup(
 		prompt = defaultWakeupPrompt
 	}
 	if strings.TrimSpace(modelName) == "" {
-		modelName = "gemini-3-flash"
+		modelName = defaultWakeupModel
 	}
 
 	started := time.Now()
@@ -293,8 +339,14 @@ func (s *Service) runSingleAccountWakeup(
 		return &item, err
 	}
 	if refreshed {
-		acc.Token = freshTok
-		_, _ = s.store.SaveAccount(acc)
+		if saved, uErr := s.store.UpdateAccount(acc.ID, func(target *model.Account) error {
+			target.Token = freshTok
+			return nil
+		}); uErr == nil {
+			acc = saved
+		} else {
+			acc.Token = freshTok
+		}
 	}
 
 	// 若尚未有 projectId，可尝试先拉取一次配额补全项目上下文
@@ -415,7 +467,7 @@ func withinTimeWindow(nowHHMM, startHHMM, endHHMM string) bool {
 	return nowHHMM >= startHHMM || nowHHMM <= endHHMM
 }
 
-// matchFiveFieldCron 解析标准 5 段 Cron（分 时 日 月 周，支持 *, */n, a-b, a,b）。
+// matchFiveFieldCron 解析标准 5 段 Cron（分 时 日 月 周，支持 *, */n, a/n, a-b, a-b/n, a,b 及周字段 7=周日）。
 func matchFiveFieldCron(expr string, t time.Time) bool {
 	fields := strings.Fields(strings.TrimSpace(expr))
 	if len(fields) != 5 {
@@ -429,12 +481,15 @@ func matchFiveFieldCron(expr string, t time.Time) bool {
 }
 
 func matchCronField(field string, value, minVal, maxVal int) bool {
+	isWeekday := minVal == 0 && maxVal == 6
+
 	for _, part := range strings.Split(field, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
 		step := 1
+		hasStep := false
 		rangePart := part
 		if strings.Contains(part, "/") {
 			segs := strings.SplitN(part, "/", 2)
@@ -444,6 +499,7 @@ func matchCronField(field string, value, minVal, maxVal int) bool {
 				continue
 			}
 			step = s
+			hasStep = true
 		}
 
 		if rangePart == "*" {
@@ -460,13 +516,25 @@ func matchCronField(field string, value, minVal, maxVal int) bool {
 			if err1 != nil || err2 != nil {
 				continue
 			}
+			// 兼容周字段 1-7 / 5-7 中 7 表示周日（0）
+			if isWeekday && hi == 7 && lo <= 7 {
+				if lo < 0 {
+					lo = 0
+				}
+				for v := lo; v <= 7; v += step {
+					if v%7 == value {
+						return true
+					}
+				}
+				continue
+			}
 			if lo < minVal {
 				lo = minVal
 			}
 			if hi > maxVal {
 				hi = maxVal
 			}
-			if value >= lo && value <= hi && (value-lo)%step == 0 {
+			if lo <= hi && value >= lo && value <= hi && (value-lo)%step == 0 {
 				return true
 			}
 			continue
@@ -476,8 +544,18 @@ func matchCronField(field string, value, minVal, maxVal int) bool {
 		if err != nil {
 			continue
 		}
-		if exact == 7 && maxVal == 6 {
-			exact = 0 // 兼容 7 表示周日
+		if isWeekday && exact == 7 {
+			exact = 0
+		}
+		if exact < minVal || exact > maxVal {
+			continue
+		}
+		// 兼容标准 Cron 的 a/step 语法（从 exact 到 maxVal 按 step 递增）
+		if hasStep {
+			if value >= exact && value <= maxVal && (value-exact)%step == 0 {
+				return true
+			}
+			continue
 		}
 		if exact == value {
 			return true

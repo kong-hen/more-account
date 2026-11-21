@@ -86,6 +86,10 @@ func (s *Service) buildBundle(snap *scanSnapshot, query model.TokenUsageQuery) *
 		matchedAny := false
 
 		for _, b := range conv.Buckets {
+			// 防御旧缓存中可能残留的全零空桶，避免虚增对话数与空模型分布
+			if b.Exact.TotalTokens == 0 && b.EstInput == 0 && b.EstOutput == 0 && b.ExactTurnCount == 0 && b.EstimatedTurnCount == 0 {
+				continue
+			}
 			if minDayKey != "" && b.DayKey < minDayKey {
 				continue
 			}
@@ -143,7 +147,10 @@ func (s *Service) buildBundle(snap *scanSnapshot, query model.TokenUsageQuery) *
 		totalExactTurn += convExactTurns
 		totalTurns += convExactTurns + convEst.EstimatedTurnCount
 
-		wsKey := conv.Summary.WorkspaceName
+		wsKey := conv.Summary.WorkspacePath
+		if wsKey == "" {
+			wsKey = conv.Summary.WorkspaceName
+		}
 		wsSummary, ok := wsMap[wsKey]
 		if !ok {
 			wsSummary = &model.WorkspaceUsageSummary{
@@ -183,8 +190,12 @@ func (s *Service) buildBundle(snap *scanSnapshot, query model.TokenUsageQuery) *
 		models = append(models, *ms)
 	}
 	sort.Slice(models, func(i, j int) bool {
-		return models[i].Exact.TotalTokens+models[i].EstimatedTotalTokens >
-			models[j].Exact.TotalTokens+models[j].EstimatedTotalTokens
+		ti := models[i].Exact.TotalTokens + models[i].EstimatedTotalTokens
+		tj := models[j].Exact.TotalTokens + models[j].EstimatedTotalTokens
+		if ti != tj {
+			return ti > tj
+		}
+		return models[i].ModelID < models[j].ModelID
 	})
 
 	// 整理工作区列表
@@ -193,28 +204,46 @@ func (s *Service) buildBundle(snap *scanSnapshot, query model.TokenUsageQuery) *
 		workspaces = append(workspaces, *ws)
 	}
 	sort.Slice(workspaces, func(i, j int) bool {
-		return workspaces[i].Exact.TotalTokens+workspaces[i].EstimatedTotalTokens >
-			workspaces[j].Exact.TotalTokens+workspaces[j].EstimatedTotalTokens
+		ti := workspaces[i].Exact.TotalTokens + workspaces[i].EstimatedTotalTokens
+		tj := workspaces[j].Exact.TotalTokens + workspaces[j].EstimatedTotalTokens
+		if ti != tj {
+			return ti > tj
+		}
+		if workspaces[i].WorkspaceName != workspaces[j].WorkspaceName {
+			return workspaces[i].WorkspaceName < workspaces[j].WorkspaceName
+		}
+		return workspaces[i].WorkspacePath < workspaces[j].WorkspacePath
 	})
 
-	// 排序对话列表
+	// 排序对话列表（严格满足弱序契约，相等时以 ConversationID 稳定打破平局）
 	asc := strings.EqualFold(query.Order, "asc")
 	sort.Slice(filteredItems, func(i, j int) bool {
-		var less bool
+		var cmp int
 		switch query.Sort {
 		case "totalTokens":
 			ti := filteredItems[i].Exact.TotalTokens + filteredItems[i].Estimated.TotalTokens
 			tj := filteredItems[j].Exact.TotalTokens + filteredItems[j].Estimated.TotalTokens
-			less = ti < tj
+			if ti < tj {
+				cmp = -1
+			} else if ti > tj {
+				cmp = 1
+			}
 		case "turnCount":
-			less = filteredItems[i].TurnCount < filteredItems[j].TurnCount
+			if filteredItems[i].TurnCount < filteredItems[j].TurnCount {
+				cmp = -1
+			} else if filteredItems[i].TurnCount > filteredItems[j].TurnCount {
+				cmp = 1
+			}
 		default:
-			less = filteredItems[i].LastModifiedTime < filteredItems[j].LastModifiedTime
+			cmp = strings.Compare(filteredItems[i].LastModifiedTime, filteredItems[j].LastModifiedTime)
+		}
+		if cmp == 0 {
+			return filteredItems[i].ConversationID < filteredItems[j].ConversationID
 		}
 		if asc {
-			return less
+			return cmp < 0
 		}
-		return !less
+		return cmp > 0
 	})
 
 	totalItems := len(filteredItems)

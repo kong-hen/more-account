@@ -131,23 +131,26 @@ func (r *AutoRefresher) RunDueOnce(ctx context.Context) int {
 		inactiveInterval = time.Duration(settings.InactiveAutoRefreshMinutes) * time.Minute
 	}
 	currentAccountID := r.store.GetCurrentAccountID()
+	accounts := r.store.ListAccounts()
 
 	r.mu.Lock()
 	dueIDs, backfillIDs := selectDueAccountIDs(
-		r.store.ListAccounts(),
+		accounts,
 		currentAccountID,
 		now,
 		activeInterval,
 		inactiveInterval,
 		r.summaryBackfillTried,
 	)
-	for _, id := range backfillIDs {
-		r.summaryBackfillTried[id] = true
-	}
 	r.mu.Unlock()
 
 	if len(dueIDs) == 0 {
 		return 0
+	}
+
+	backfillSet := make(map[string]struct{}, len(backfillIDs))
+	for _, id := range backfillIDs {
+		backfillSet[id] = struct{}{}
 	}
 
 	if r.onStatusChange != nil {
@@ -155,16 +158,26 @@ func (r *AutoRefresher) RunDueOnce(ctx context.Context) int {
 		defer r.onStatusChange(false)
 	}
 
-	refreshed := r.refreshIDs(ctx, dueIDs, 4)
+	refreshed, succeededIDs := r.refreshIDs(ctx, dueIDs, 4)
+	if len(backfillSet) > 0 && len(succeededIDs) > 0 {
+		// 仅在补拉实际成功时记录，避免断网失败后永久不再立即补拉。
+		r.mu.Lock()
+		for _, id := range succeededIDs {
+			if _, ok := backfillSet[id]; ok {
+				r.summaryBackfillTried[id] = true
+			}
+		}
+		r.mu.Unlock()
+	}
 	if r.onUpdated != nil {
 		r.onUpdated(refreshed)
 	}
 	return refreshed
 }
 
-func (r *AutoRefresher) refreshIDs(ctx context.Context, ids []string, concurrency int) int {
+func (r *AutoRefresher) refreshIDs(ctx context.Context, ids []string, concurrency int) (int, []string) {
 	if len(ids) == 0 {
-		return 0
+		return 0, nil
 	}
 	if concurrency <= 0 {
 		concurrency = 4
@@ -180,8 +193,10 @@ func (r *AutoRefresher) refreshIDs(ctx context.Context, ids []string, concurrenc
 	close(jobs)
 
 	var (
-		wg      sync.WaitGroup
-		updated atomic.Int32
+		wg        sync.WaitGroup
+		updated   atomic.Int32
+		okMu      sync.Mutex
+		succeeded []string
 	)
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
@@ -196,12 +211,15 @@ func (r *AutoRefresher) refreshIDs(ctx context.Context, ids []string, concurrenc
 				cancel()
 				if err == nil {
 					updated.Add(1)
+					okMu.Lock()
+					succeeded = append(succeeded, id)
+					okMu.Unlock()
 				}
 			}
 		}()
 	}
 	wg.Wait()
-	return int(updated.Load())
+	return int(updated.Load()), succeeded
 }
 
 // selectDueAccountIDs 筛选需要自动刷新的账号 ID（跳过已失效、该类别已关闭自动刷新及处于失败退避期内的账号）：

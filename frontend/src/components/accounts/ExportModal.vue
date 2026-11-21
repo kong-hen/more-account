@@ -35,9 +35,23 @@ async function loadPreview() {
 }
 
 watch(
-  () => [props.open, includeSecrets.value] as const,
-  ([isOpen]) => {
+  () => props.open,
+  (isOpen) => {
     if (isOpen) {
+      // 每次打开导出弹窗均重置为默认不包含密码与 2FA 密钥，防止上次勾选导致意外明文暴露
+      includeSecrets.value = false
+      copied.value = false
+      void loadPreview()
+    } else {
+      jsonText.value = ''
+    }
+  },
+)
+
+watch(
+  () => [includeSecrets.value, props.accountIds.join(',')] as const,
+  () => {
+    if (props.open) {
       void loadPreview()
     }
   },

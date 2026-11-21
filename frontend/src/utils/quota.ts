@@ -15,10 +15,20 @@ export interface QuotaCategorySummary {
   shortLabel: string
   fiveHour?: QuotaWindowSlot
   weekly?: QuotaWindowSlot
-  /** 凡是有 5 小时限额的分类必然也有周限额；为 true 时始终保留双窗口展示（尚未拉到周桶时显示待同步占位）。 */
-  expectsWeekly: boolean
   percentage: number
   resetTime: string
+}
+
+// 按实际时间戳（而非字符串字典序）比较 candidate 是否早于 current，避免小数秒和时区偏移导致误判。
+function isEarlierISO(candidate: string, current: string): boolean {
+  if (!candidate) return false
+  if (!current) return true
+  const candTs = Date.parse(candidate)
+  const currTs = Date.parse(current)
+  if (!Number.isNaN(candTs) && !Number.isNaN(currTs)) {
+    return candTs < currTs
+  }
+  return candidate < current
 }
 
 export interface MergedModelVariant {
@@ -178,7 +188,7 @@ const SUMMARY_BUCKET_ID_SET = new Set([
   'gemini-carbon-wtu-weekly',
 ])
 
-export function isSummaryBucketId(rawName: string): boolean {
+function isSummaryBucketId(rawName: string): boolean {
   const lower = rawName.trim().toLowerCase()
   if (!lower) return false
   if (SUMMARY_BUCKET_ID_SET.has(lower)) return true
@@ -281,7 +291,7 @@ export function mergeModelList(models: ModelQuota[]): MergedModelQuota[] {
     for (const v of acc.variants) {
       if (v.percentage < minPct) minPct = v.percentage
       if (v.percentage !== firstPct) hasMixedPercentages = true
-      if (v.resetTime && (!earliestReset || v.resetTime < earliestReset)) {
+      if (isEarlierISO(v.resetTime, earliestReset)) {
         earliestReset = v.resetTime
       }
     }
@@ -440,7 +450,7 @@ export function summarizeQuotaCategories(account: Account | null | undefined): Q
     let earliestReset = ''
     for (const item of items) {
       if (item.percentage < minPct) minPct = item.percentage
-      if (item.resetTime && (!earliestReset || item.resetTime < earliestReset)) {
+      if (isEarlierISO(item.resetTime, earliestReset)) {
         earliestReset = item.resetTime
       }
     }
@@ -466,7 +476,7 @@ export function summarizeQuotaCategories(account: Account | null | undefined): Q
     let earliestReset = ''
     for (const s of slots) {
       if (s.percentage < minPct) minPct = s.percentage
-      if (s.resetTime && (!earliestReset || s.resetTime < earliestReset)) {
+      if (isEarlierISO(s.resetTime, earliestReset)) {
         earliestReset = s.resetTime
       }
     }
@@ -477,7 +487,6 @@ export function summarizeQuotaCategories(account: Account | null | undefined): Q
       shortLabel: def.shortLabel,
       fiveHour: entry.fiveHour,
       weekly: entry.weekly,
-      expectsWeekly: Boolean(entry.weekly || entry.fiveHour),
       percentage: minPct,
       resetTime: earliestReset,
     })
@@ -524,14 +533,14 @@ export function isAccountLowQuota(account: Account, threshold = 20): boolean {
 export function getEarliestResetTime(account: Account): string {
   let earliest = ''
   for (const cat of summarizeQuotaCategories(account)) {
-    if (cat.resetTime && (!earliest || cat.resetTime < earliest)) {
+    if (isEarlierISO(cat.resetTime, earliest)) {
       earliest = cat.resetTime
     }
   }
   if (earliest) return earliest
   const models = account.quota?.models ?? []
   for (const m of models) {
-    if (m.resetTime && (!earliest || m.resetTime < earliest)) {
+    if (m.resetTime && isEarlierISO(m.resetTime, earliest)) {
       earliest = m.resetTime
     }
   }

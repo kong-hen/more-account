@@ -1,6 +1,7 @@
 package totp
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,5 +38,46 @@ func TestGenerateAtInvalidSecret(t *testing.T) {
 	}
 	if _, err := GenerateAt("   ", time.Now()); err == nil {
 		t.Fatal("空白密钥应当返回错误")
+	}
+	if _, err := GenerateAt("otpauth://hotp/Test?secret=GEZDGNBVGY3TQOJQ", time.Now()); err == nil {
+		t.Fatal("非 totp 类型的 otpauth URI 应当被拒绝")
+	}
+	if _, err := GenerateAt("otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQ&algorithm=MD5", time.Now()); err == nil {
+		t.Fatal("不支持的算法 MD5 应当被拒绝")
+	}
+	if _, err := GenerateAt("otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQ&digits=9", time.Now()); err == nil {
+		t.Fatal("超出范围的 digits 应当被拒绝")
+	}
+	if _, err := GenerateAt("otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQ&period=0", time.Now()); err == nil {
+		t.Fatal("非法的 period 应当被拒绝")
+	}
+}
+
+func TestNormalizeSecretPreservesNonDefaultParamsAndSHA256(t *testing.T) {
+	// 默认参数 URI 应归一化为纯大写 Base32
+	plain, err := NormalizeSecret("otpauth://totp/Google:a@b.com?secret=gezd-gnbv gy3t qojq&digits=6&period=30&algorithm=SHA1")
+	if err != nil {
+		t.Fatalf("归一化默认参数 URI 失败: %v", err)
+	}
+	if plain != "GEZDGNBVGY3TQOJQ" {
+		t.Fatalf("期望纯 Base32 GEZDGNBVGY3TQOJQ，实际 %q", plain)
+	}
+
+	// RFC 6238 SHA256 测试向量："12345678901234567890123456789012" (32 字节) -> t=59s, digits=8 => 46119246
+	const rfcSha256Base32 = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA"
+	rawURI := "otpauth://totp/Corp:alice?secret=" + strings.ToLower(rfcSha256Base32) + "&algorithm=sha256&digits=8&period=30"
+	normURI, err := NormalizeSecret(rawURI)
+	if err != nil {
+		t.Fatalf("归一化非默认参数 URI 失败: %v", err)
+	}
+	if !strings.HasPrefix(normURI, "otpauth://totp/") {
+		t.Fatalf("非默认 algorithm/digits 应保留 otpauth URI 格式，实际 %q", normURI)
+	}
+	got, err := GenerateAt(normURI, time.Unix(59, 0))
+	if err != nil {
+		t.Fatalf("按归一化后的 SHA256 URI 生成动态码失败: %v", err)
+	}
+	if got.Code != "46119246" || got.Period != 30 {
+		t.Fatalf("RFC 6238 SHA256 8 位向量不匹配: got=%+v", got)
 	}
 }

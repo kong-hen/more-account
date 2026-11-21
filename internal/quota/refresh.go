@@ -36,7 +36,8 @@ func NewService(store *storage.Store, oauthClient *oauth.Client, quotaClient *Cl
 	}
 }
 
-// RefreshAccount 刷新单个账号的令牌（如有需要）与模型配额，并持久化结果。
+// RefreshAccount 刷新单个账号的令牌（如有需要）与模型配额，并采用原子局部更新持久化，
+// 避免并发覆盖用户在刷新耗时期间编辑的备注、密码、2FA 密钥或分组。
 func (s *Service) RefreshAccount(ctx context.Context, accountID string) (model.Account, error) {
 	acc, ok := s.store.GetAccount(accountID)
 	if !ok {
@@ -46,55 +47,102 @@ func (s *Service) RefreshAccount(ctx context.Context, accountID string) (model.A
 	freshToken, refreshed, err := s.oauthClient.EnsureFreshToken(ctx, acc.Token)
 	if err != nil {
 		now := time.Now().Unix()
-		if errors.Is(err, oauth.ErrInvalidGrant) {
-			acc.Disabled = true
-			acc.DisabledReason = "invalid_grant: " + err.Error()
-			acc.DisabledAt = now
-		}
-		acc.QuotaError = &model.QuotaErrorInfo{
+		isInvalid := errors.Is(err, oauth.ErrInvalidGrant)
+		errInfo := &model.QuotaErrorInfo{
 			Message:   err.Error(),
 			Reason:    classifyTokenErrorReason(err),
 			Timestamp: now,
 		}
-		_, _ = s.store.SaveAccount(acc)
+		saved, updateErr := s.store.UpdateAccount(accountID, func(target *model.Account) error {
+			if isInvalid {
+				target.Disabled = true
+				target.DisabledReason = "invalid_grant: " + err.Error()
+				target.DisabledAt = now
+			}
+			target.QuotaError = errInfo
+			return nil
+		})
+		if updateErr == nil {
+			return saved, err
+		}
+		acc.QuotaError = errInfo
 		return acc, err
 	}
 
+	tokenForFetch := acc.Token
 	if refreshed {
-		acc.Token = freshToken
-		// 令牌刷新恢复后，自动清除此前因 invalid_grant 造成的禁用标记。
-		if acc.Disabled && strings.HasPrefix(acc.DisabledReason, "invalid_grant") {
-			acc.Disabled = false
-			acc.DisabledReason = ""
-			acc.DisabledAt = 0
-		}
+		tokenForFetch = freshToken
 	}
 
-	res, err := s.quotaClient.FetchQuota(ctx, acc.Token, acc.Email)
+	res, err := s.quotaClient.FetchQuota(ctx, tokenForFetch, acc.Email)
 	if err != nil {
-		acc.QuotaError = &model.QuotaErrorInfo{
+		errInfo := &model.QuotaErrorInfo{
 			Message:   err.Error(),
 			Timestamp: time.Now().Unix(),
 		}
-		saved, _ := s.store.SaveAccount(acc)
-		return saved, err
-	}
-
-	if res.ProjectID != "" {
-		acc.Token.ProjectID = res.ProjectID
-	}
-	quotaCopy := res.Quota
-	acc.Quota = &quotaCopy
-	acc.QuotaError = res.Error
-	if res.Error == nil && acc.Disabled && strings.HasPrefix(acc.DisabledReason, "invalid_grant") {
-		acc.Disabled = false
-		acc.DisabledReason = ""
-		acc.DisabledAt = 0
-	}
-
-	saved, err := s.store.SaveAccount(acc)
-	if err != nil {
+		saved, updateErr := s.store.UpdateAccount(accountID, func(target *model.Account) error {
+			if refreshed {
+				target.Token = freshToken
+				if target.Disabled && strings.HasPrefix(target.DisabledReason, "invalid_grant") {
+					target.Disabled = false
+					target.DisabledReason = ""
+					target.DisabledAt = 0
+				}
+			}
+			target.QuotaError = errInfo
+			return nil
+		})
+		if updateErr == nil {
+			return saved, err
+		}
+		acc.QuotaError = errInfo
 		return acc, err
+	}
+
+	saved, saveErr := s.store.UpdateAccount(accountID, func(target *model.Account) error {
+		if refreshed {
+			target.Token = freshToken
+			// 令牌刷新恢复后，自动清除此前因 invalid_grant 造成的禁用标记。
+			if target.Disabled && strings.HasPrefix(target.DisabledReason, "invalid_grant") {
+				target.Disabled = false
+				target.DisabledReason = ""
+				target.DisabledAt = 0
+			}
+		}
+		if res.ProjectID != "" {
+			target.Token.ProjectID = res.ProjectID
+		}
+
+		quotaCopy := res.Quota
+		// 若 loadCodeAssist 或 retrieveUserQuotaSummary 本次瞬时失败，保留账号既有订阅、积分与周额度桶，防止清空有效数据。
+		if target.Quota != nil {
+			if !res.TierLoaded {
+				if quotaCopy.SubscriptionTier == "" {
+					quotaCopy.SubscriptionTier = target.Quota.SubscriptionTier
+				}
+				if quotaCopy.TierID == "" {
+					quotaCopy.TierID = target.Quota.TierID
+				}
+				if len(quotaCopy.Credits) == 0 && len(target.Quota.Credits) > 0 {
+					quotaCopy.Credits = append([]model.CreditInfo(nil), target.Quota.Credits...)
+				}
+			}
+			if !res.SummaryLoaded && len(quotaCopy.SummaryBuckets) == 0 && len(target.Quota.SummaryBuckets) > 0 {
+				quotaCopy.SummaryBuckets = append([]model.QuotaBucket(nil), target.Quota.SummaryBuckets...)
+			}
+		}
+
+		target.Quota = &quotaCopy
+		target.QuotaError = res.Error
+		if res.Error == nil && target.Disabled && strings.HasPrefix(target.DisabledReason, "invalid_grant") {
+			target.Disabled = false
+			target.DisabledReason = ""
+			target.DisabledAt = 0
+		}
+		return nil
+	})
+	if saveErr != nil {
+		return acc, saveErr
 	}
 	return saved, nil
 }

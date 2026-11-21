@@ -15,7 +15,6 @@ import (
 const (
 	CloudCodeDailyBaseURL          = "https://daily-cloudcode-pa.googleapis.com"
 	CloudCodeProdBaseURL           = "https://cloudcode-pa.googleapis.com"
-	CloudCodeAutopushSandboxURL    = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
 	LoadCodeAssistPath             = "v1internal:loadCodeAssist"
 	OnboardUserPath                = "v1internal:onboardUser"
 	FetchAvailableModelsPath       = "v1internal:fetchAvailableModels"

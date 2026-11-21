@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // 全局应用设置弹窗：运行目标、切号重启策略、低配额筛选阈值、手动浅暗色切换与本机路径配置。
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { FolderOpen, CheckCircle2, AlertCircle, Sun, Moon } from 'lucide-vue-next'
 import BaseModal from '@/components/common/BaseModal.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
+import { useTokenUsageStore } from '@/stores/tokenUsageStore'
 import { api, extractErrorMessage } from '@/services/api'
 import type { AppSettings, RuntimeTarget } from '@/types/models'
 
@@ -17,6 +18,7 @@ const emit = defineEmits<{
 }>()
 
 const appStore = useAppStore()
+const usageStore = useTokenUsageStore()
 const form = ref<AppSettings>({ ...appStore.settings })
 const saving = ref(false)
 
@@ -29,7 +31,7 @@ watch(
   },
 )
 
-const autoRefreshOptions = [
+const baseAutoRefreshOptions = [
   { value: '-1', label: '关闭自动刷新' },
   { value: '1', label: '每 1 分钟' },
   { value: '3', label: '每 3 分钟' },
@@ -39,7 +41,7 @@ const autoRefreshOptions = [
   { value: '30', label: '每 30 分钟' },
 ]
 
-const inactiveAutoRefreshOptions = [
+const baseInactiveAutoRefreshOptions = [
   { value: '-1', label: '关闭自动刷新' },
   { value: '15', label: '每 15 分钟' },
   { value: '30', label: '每 30 分钟' },
@@ -49,6 +51,18 @@ const inactiveAutoRefreshOptions = [
   { value: '720', label: '每 12 小时' },
   { value: '1440', label: '每 24 小时' },
 ]
+
+const autoRefreshOptions = computed(() => {
+  const cur = String(form.value.autoRefreshMinutes ?? 5)
+  if (baseAutoRefreshOptions.some((o) => o.value === cur)) return baseAutoRefreshOptions
+  return [...baseAutoRefreshOptions, { value: cur, label: `每 ${cur} 分钟（自定义）` }]
+})
+
+const inactiveAutoRefreshOptions = computed(() => {
+  const cur = String(form.value.inactiveAutoRefreshMinutes ?? 60)
+  if (baseInactiveAutoRefreshOptions.some((o) => o.value === cur)) return baseInactiveAutoRefreshOptions
+  return [...baseInactiveAutoRefreshOptions, { value: cur, label: `每 ${cur} 分钟（自定义）` }]
+})
 
 function setAutoRefreshMinutes(val: string) {
   const num = Number(val)
@@ -100,9 +114,29 @@ async function openDataDir() {
 async function handleSave() {
   saving.value = true
   try {
-    await appStore.updateSettings(form.value)
+    const prevUsageDir = (appStore.settings.tokenUsageDataDir ?? '').trim()
+    const parsedThreshold = Number(form.value.lowQuotaThreshold)
+    const cleanThreshold =
+      Number.isFinite(parsedThreshold) && parsedThreshold >= 1 && parsedThreshold <= 100
+        ? Math.round(parsedThreshold)
+        : 20
+
+    const payload: AppSettings = {
+      ...form.value,
+      lowQuotaThreshold: cleanThreshold,
+      desktopAppPath: (form.value.desktopAppPath ?? '').trim(),
+      ideAppPath: (form.value.ideAppPath ?? '').trim(),
+      tokenUsageDataDir: (form.value.tokenUsageDataDir ?? '').trim(),
+    }
+
+    await appStore.updateSettings(payload)
+    if (payload.tokenUsageDataDir !== prevUsageDir) {
+      usageStore.invalidate(appStore.activeSection === 'usage')
+    }
     appStore.notify('设置已保存', 'success')
     emit('close')
+  } catch {
+    // updateSettings 内部已回滚并提示错误，此处保持弹窗打开以便用户修正
   } finally {
     saving.value = false
   }
@@ -291,6 +325,20 @@ async function handleSave() {
             v-model="form.desktopAppPath"
             type="text"
             :placeholder="appStore.clientInfo.desktopPath || '/Applications/Antigravity.app'"
+            class="w-full px-3 py-1.5 text-xs rounded-lg border"
+            style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
+          />
+        </div>
+
+        <div>
+          <label for="ide-path" class="block text-xs font-medium mb-1" style="color: var(--text-secondary)">
+            自定义 Antigravity IDE 应用路径（留空自动探测）
+          </label>
+          <input
+            id="ide-path"
+            v-model="form.ideAppPath"
+            type="text"
+            :placeholder="appStore.clientInfo.idePath || '/Applications/Antigravity IDE.app'"
             class="w-full px-3 py-1.5 text-xs rounded-lg border"
             style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
           />

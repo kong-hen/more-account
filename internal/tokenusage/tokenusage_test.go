@@ -153,3 +153,146 @@ func TestScannerAndAggregatorEndToEnd(t *testing.T) {
 		t.Fatalf("对话步级详情异常: %+v", detail.Turns)
 	}
 }
+
+func TestGetConversationDetailBlocksPathTraversal(t *testing.T) {
+	rootDir := t.TempDir()
+	dataDir := filepath.Join(rootDir, "data")
+	convDir := filepath.Join(dataDir, "conversations")
+	if err := os.MkdirAll(convDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// 在 dataDir 根目录放置一个合法 SQLite 文件，验证路径穿越无法读取
+	secretDBPath := filepath.Join(dataDir, "secret.db")
+	secretDB, err := sql.Open("sqlite", secretDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = secretDB.Exec(`CREATE TABLE steps (idx INTEGER, step_type INTEGER, status INTEGER, metadata BLOB, step_payload BLOB)`)
+	_ = secretDB.Close()
+
+	svc := NewService(t.TempDir(), func() string { return dataDir })
+	badIDs := []string{
+		"",
+		".",
+		"..",
+		"../secret",
+		"..\\secret",
+		"sub/conv-1",
+		"sub\\conv-1",
+		"/etc/passwd",
+	}
+	for _, id := range badIDs {
+		if _, err := svc.GetConversationDetail(id); err == nil {
+			t.Fatalf("危险 conversationID %q 应当被拦截", id)
+		}
+	}
+}
+
+func TestAggregatorStrictWeakOrderingWorkspaceAndCacheIsolation(t *testing.T) {
+	now := time.Now().Local()
+	dayKey := now.Format("2006-01-02")
+	nowRFC := now.Format(time.RFC3339)
+
+	// 1. 验证相同数值的降序排序不触发 panic，且同 basename 不同路径的工作区不被合并
+	makeConv := func(id, title, wsPath string) scannedConversation {
+		return scannedConversation{
+			Summary: model.ConversationSummaryItem{
+				ConversationID:   id,
+				Title:            title,
+				DisplayTitle:     title,
+				WorkspaceName:    "app",
+				WorkspacePath:    wsPath,
+				LastModifiedTime: nowRFC,
+				StepCount:        2,
+				TurnCount:        1,
+				ExactTurnCount:   1,
+				Models:           []string{"claude-opus-5-5-high"},
+				Exact:            model.ExactTokenTotals{InputTokens: 100, TotalTokens: 100},
+			},
+			LastModifiedMs: now.UnixMilli(),
+			Buckets: []cachedModelBucket{
+				{
+					DayKey:           dayKey,
+					ModelID:          "claude-opus-5-5-high",
+					ModelDisplayName: "Claude Opus 5.5 (High)",
+					APIProvider:      "Anthropic",
+					ExactTurnCount:   1,
+					Exact:            model.ExactTokenTotals{InputTokens: 100, TotalTokens: 100},
+				},
+			},
+		}
+	}
+
+	snap := &scanSnapshot{
+		DataDir: "/tmp/data",
+		Conversations: []scannedConversation{
+			makeConv("conv-b", "B", "/Users/dev/alpha/app"),
+			makeConv("conv-a", "A", "/Users/dev/beta/app"),
+			makeConv("conv-c", "C", "/Users/dev/alpha/app"),
+		},
+		LastSyncedAt: now,
+	}
+
+	aggSvc := NewService(t.TempDir(), func() string { return "/tmp/data" })
+	for _, sortBy := range []string{"lastModifiedTime", "totalTokens", "turnCount"} {
+		bundle := aggSvc.buildBundle(snap, model.TokenUsageQuery{
+			Preset:   "7d",
+			Sort:     sortBy,
+			Order:    "desc",
+			Page:     1,
+			PageSize: 10,
+		})
+		if len(bundle.Conversations.Items) != 3 {
+			t.Fatalf("sort=%s 期望 3 条对话，实际 %d", sortBy, len(bundle.Conversations.Items))
+		}
+		if len(bundle.Overview.Workspaces) != 2 {
+			t.Fatalf("不同路径的同名工作区应分开统计（2 个），实际 %d: %+v", len(bundle.Overview.Workspaces), bundle.Overview.Workspaces)
+		}
+	}
+
+	// 2. 验证零用量步不产生幽灵桶/模型切片，且切换 dataDir 时持久化缓存按目录严格隔离
+	cacheDir := t.TempDir()
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir1, "conversations"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir2, "conversations"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// dir1 写入一个纯空步骤对话（无任何 exact/estimated 用量）
+	db1, err := sql.Open("sqlite", filepath.Join(dir1, "conversations", "zero-conv.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db1.Exec(`CREATE TABLE steps (idx INTEGER, step_type INTEGER, status INTEGER, metadata BLOB, step_payload BLOB)`)
+	_, _ = db1.Exec(`INSERT INTO steps VALUES (1, 15, 1, NULL, NULL)`)
+	_ = db1.Close()
+
+	activeDir := dir1
+	svc := NewService(cacheDir, func() string { return activeDir })
+	b1, err := svc.Sync(false, model.TokenUsageQuery{Preset: "7d", Granularity: "day", Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("扫描 dir1 失败: %v", err)
+	}
+	if len(b1.Overview.Models) != 0 {
+		t.Fatalf("零用量步骤不应生成幽灵模型切片: %+v", b1.Overview.Models)
+	}
+	for _, pt := range b1.Overview.Trend {
+		if pt.Exact.TotalTokens != 0 || pt.EstimatedTotalTokens != 0 {
+			t.Fatalf("零用量步骤不应在时间序列产生非零桶: %+v", pt)
+		}
+	}
+
+	// 切换到空目录 dir2，重新创建 Service 读取磁盘缓存，不应串联出 dir1 的对话
+	activeDir = dir2
+	svc2 := NewService(cacheDir, func() string { return activeDir })
+	b2, err := svc2.Sync(false, model.TokenUsageQuery{Preset: "7d", Granularity: "day", Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("扫描 dir2 失败: %v", err)
+	}
+	if b2.Overview.ConversationCount != 0 {
+		t.Fatalf("切换 dataDir 后不应复用旧目录缓存对话: count=%d", b2.Overview.ConversationCount)
+	}
+}

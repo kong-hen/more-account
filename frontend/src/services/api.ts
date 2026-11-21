@@ -24,7 +24,6 @@ import type {
 
 interface WailsAppBridge {
   GetBootstrapState(): Promise<BootstrapState>
-  GetSettings(): Promise<AppSettings>
   SaveSettings(settings: AppSettings): Promise<AppSettings>
   DetectInstalledClients(): Promise<ClientInstallInfo>
   OpenExternalURL(rawURL: string): Promise<void>
@@ -33,10 +32,8 @@ interface WailsAppBridge {
 
   ListAccounts(): Promise<Account[]>
   GetCurrentAccountID(): Promise<string>
-  AddAccountByRefreshToken(refreshToken: string, groupId: string): Promise<Account>
   ImportRefreshTokens(rawInput: string, groupId: string): Promise<BatchImportResult>
   ImportFromLocal(groupId: string): Promise<Account>
-  ImportFromJSON(jsonContent: string, groupId: string): Promise<BatchImportResult>
   ExportAccounts(accountIds: string[], includeSecrets: boolean): Promise<string>
   SaveExportToFile(accountIds: string[], includeSecrets: boolean): Promise<string>
   UpdateAccountDetails(accountId: string, update: AccountDetailsUpdate): Promise<Account>
@@ -119,7 +116,6 @@ export function extractErrorMessage(err: unknown): string {
 
 export const api = {
   getBootstrapState: () => getBridge().GetBootstrapState(),
-  getSettings: () => getBridge().GetSettings(),
   saveSettings: (settings: AppSettings) => getBridge().SaveSettings(settings),
   detectInstalledClients: () => getBridge().DetectInstalledClients(),
   openExternalURL: (rawURL: string) => getBridge().OpenExternalURL(rawURL),
@@ -128,13 +124,9 @@ export const api = {
 
   listAccounts: () => getBridge().ListAccounts(),
   getCurrentAccountID: () => getBridge().GetCurrentAccountID(),
-  addAccountByRefreshToken: (refreshToken: string, groupId: string) =>
-    getBridge().AddAccountByRefreshToken(refreshToken, groupId),
   importRefreshTokens: (rawInput: string, groupId: string) =>
     getBridge().ImportRefreshTokens(rawInput, groupId),
   importFromLocal: (groupId: string) => getBridge().ImportFromLocal(groupId),
-  importFromJSON: (jsonContent: string, groupId: string) =>
-    getBridge().ImportFromJSON(jsonContent, groupId),
   exportAccounts: (accountIds: string[], includeSecrets: boolean) =>
     getBridge().ExportAccounts(accountIds, includeSecrets),
   saveExportToFile: (accountIds: string[], includeSecrets: boolean) =>

@@ -12,7 +12,6 @@ type TokenData struct {
 	IsGcpTos        *bool  `json:"isGcpTos,omitempty"`
 	OAuthClientKey  string `json:"oauthClientKey,omitempty"`
 	IDToken         string `json:"idToken,omitempty"`
-	SessionID       string `json:"sessionId,omitempty"`
 }
 
 // ModelQuota 表示单个模型或配额桶的剩余额度与重置时间。

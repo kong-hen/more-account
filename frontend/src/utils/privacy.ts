@@ -13,12 +13,6 @@ export function maskEmail(email: string, enabled: boolean): string {
   return `${visibleLocal}@${domain}`
 }
 
-export function maskSecret(val: string, enabled: boolean): string {
-  if (!val) return ''
-  if (!enabled) return val
-  return '••••••••'
-}
-
 // 令牌默认脱敏显示：保留前后少量识别字符，隐藏核心密钥段。
 export function maskToken(token: string): string {
   const trimmed = (token ?? '').trim()

@@ -23,7 +23,7 @@ import (
 
 const (
 	cacheFileName      = "token_usage_cache.json"
-	cacheSchemaVersion = 1
+	cacheSchemaVersion = 2
 	unassignedWSName   = "未分配工作区"
 )
 
@@ -51,13 +51,12 @@ type cachedConvEntry struct {
 	StepCount      int                 `json:"steps"`
 	CreatedAtMs    int64               `json:"createdAtMs"`
 	LastModifiedMs int64               `json:"lastModifiedMs"`
-	IsSwarmWorker  bool                `json:"isSwarmWorker"`
 	Buckets        []cachedModelBucket `json:"buckets"`
 }
 
 type persistedScanCache struct {
-	SchemaVersion int                        `json:"schemaVersion"`
-	Entries       map[string]cachedConvEntry `json:"entries"`
+	SchemaVersion int                                   `json:"schemaVersion"`
+	ByDataDir     map[string]map[string]cachedConvEntry `json:"byDataDir"`
 }
 
 type summaryRow struct {
@@ -67,7 +66,6 @@ type summaryRow struct {
 	StepCount            int
 	LastModifiedMs       int64
 	WorkspaceURIs        string
-	Status               string
 	AgentName            string
 	ParentConversationID string
 	NestingDepth         int
@@ -168,17 +166,23 @@ func (s *Service) runScan(dataDir string, rebuild bool) *scanSnapshot {
 		return snap
 	}
 
-	// 加载历史指纹缓存
+	// 加载按扫描目录隔离的历史指纹缓存
 	cachePath := filepath.Join(s.cacheDir, cacheFileName)
-	cache := persistedScanCache{
+	dirCacheKey := filepath.Clean(dataDir)
+	fullCache := persistedScanCache{
 		SchemaVersion: cacheSchemaVersion,
-		Entries:       make(map[string]cachedConvEntry),
+		ByDataDir:     make(map[string]map[string]cachedConvEntry),
 	}
-	if !rebuild {
-		var loaded persistedScanCache
-		if exists, err := storage.ReadJSONIfExists(cachePath, &loaded); err == nil && exists && loaded.SchemaVersion == cacheSchemaVersion && loaded.Entries != nil {
-			cache = loaded
+	var dirEntries map[string]cachedConvEntry
+	var loaded persistedScanCache
+	if exists, err := storage.ReadJSONIfExists(cachePath, &loaded); err == nil && exists && loaded.SchemaVersion == cacheSchemaVersion && loaded.ByDataDir != nil {
+		fullCache = loaded
+		if !rebuild && fullCache.ByDataDir[dirCacheKey] != nil {
+			dirEntries = fullCache.ByDataDir[dirCacheKey]
 		}
+	}
+	if dirEntries == nil {
+		dirEntries = make(map[string]cachedConvEntry)
 	}
 
 	// 1. 只读读取 conversation_summaries.db
@@ -237,7 +241,7 @@ func (s *Service) runScan(dataDir string, rebuild bool) *scanSnapshot {
 			defer wg.Done()
 			for task := range jobs {
 				if !rebuild {
-					if prev, ok := cache.Entries[task.convID]; ok && prev.Fingerprint == task.fp {
+					if prev, ok := dirEntries[task.convID]; ok && prev.Fingerprint == task.fp {
 						cachedCount.Add(1)
 						mu.Lock()
 						nextCache[task.convID] = prev
@@ -259,11 +263,10 @@ func (s *Service) runScan(dataDir string, rebuild bool) *scanSnapshot {
 	}
 	wg.Wait()
 
-	// 异步/原子落盘最新缓存
-	_ = storage.WriteJSONAtomic(cachePath, persistedScanCache{
-		SchemaVersion: cacheSchemaVersion,
-		Entries:       nextCache,
-	}, 0600)
+	// 按当前扫描目录更新缓存并原子落盘，切换自定义目录时互不覆盖
+	fullCache.SchemaVersion = cacheSchemaVersion
+	fullCache.ByDataDir[dirCacheKey] = nextCache
+	_ = storage.WriteJSONAtomic(cachePath, fullCache, 0600)
 
 	// 4. 合并摘要与遥测数据
 	allIDs := make(map[string]struct{}, len(summaries)+len(nextCache))
@@ -292,7 +295,7 @@ func (s *Service) runScan(dataDir string, rebuild bool) *scanSnapshot {
 		}
 
 		kind := "main"
-		if tel.IsSwarmWorker || strings.Contains(strings.ToLower(sumRow.AgentName), "swarm") {
+		if strings.Contains(strings.ToLower(sumRow.AgentName), "swarm") {
 			kind = "swarm"
 		} else if sumRow.ParentConversationID != "" || sumRow.NestingDepth > 0 {
 			kind = "subagent"
@@ -324,7 +327,7 @@ func (s *Service) runScan(dataDir string, rebuild bool) *scanSnapshot {
 		var bestTok uint64
 		for mid, tot := range modelTotals {
 			modelsList = append(modelsList, mid)
-			if tot >= bestTok {
+			if tot > bestTok || (tot == bestTok && (primaryModelID == "unknown" || mid < primaryModelID)) {
 				bestTok = tot
 				primaryModelID = mid
 			}
@@ -402,9 +405,20 @@ func statFileFingerprint(dbPath string) fileFingerprint {
 }
 
 func openSQLiteReadOnly(path string) (*sql.DB, error) {
-	// 严格只读模式打开，绝不触碰或创建 WAL 写锁。
-	dsn := fmt.Sprintf("file:%s?mode=ro&_busy_timeout=1500", path)
-	return sql.Open("sqlite", dsn)
+	// 严格只读模式打开，使用安全转义的 file: URI 并通过 modernc.org/sqlite 识别的 _pragma 语法启用 busy_timeout。
+	slashPath := filepath.ToSlash(path)
+	if len(slashPath) >= 2 && slashPath[1] == ':' {
+		slashPath = "/" + slashPath
+	}
+	u := url.URL{
+		Scheme: "file",
+		Path:   slashPath,
+	}
+	q := url.Values{}
+	q.Set("mode", "ro")
+	q.Add("_pragma", "busy_timeout(1500)")
+	u.RawQuery = q.Encode()
+	return sql.Open("sqlite", u.String())
 }
 
 func readConversationSummaries(dbPath string) map[string]summaryRow {
@@ -419,7 +433,7 @@ func readConversationSummaries(dbPath string) map[string]summaryRow {
 	defer db.Close()
 
 	fullSQL := `SELECT conversation_id, title, preview, step_count, last_modified_time,
-		workspace_uris, status, agent_name, parent_conversation_id, nesting_depth
+		workspace_uris, agent_name, parent_conversation_id, nesting_depth
 		FROM conversation_summaries`
 	rows, err := db.Query(fullSQL)
 	if err != nil {
@@ -455,9 +469,9 @@ func readConversationSummaries(dbPath string) map[string]summaryRow {
 	defer rows.Close()
 
 	for rows.Next() {
-		var cid, title, preview, lastMod, ws, status, agent, parent sql.NullString
+		var cid, title, preview, lastMod, ws, agent, parent sql.NullString
 		var steps, depth sql.NullInt64
-		if err := rows.Scan(&cid, &title, &preview, &steps, &lastMod, &ws, &status, &agent, &parent, &depth); err != nil {
+		if err := rows.Scan(&cid, &title, &preview, &steps, &lastMod, &ws, &agent, &parent, &depth); err != nil {
 			continue
 		}
 		id := strings.TrimSpace(cid.String)
@@ -471,7 +485,6 @@ func readConversationSummaries(dbPath string) map[string]summaryRow {
 			StepCount:            int(steps.Int64),
 			LastModifiedMs:       parseFlexibleTimestampMs(lastMod.String),
 			WorkspaceURIs:        ws.String,
-			Status:               status.String,
 			AgentName:            strings.TrimSpace(agent.String),
 			ParentConversationID: strings.TrimSpace(parent.String),
 			NestingDepth:         int(depth.Int64),
@@ -525,10 +538,10 @@ func scanSingleConversationDB(dbPath string, fp fileFingerprint) (cachedConvEntr
 	}
 	bucketMap := make(map[bucketKey]*cachedModelBucket)
 
-	rows, err := db.Query(`SELECT idx, status, metadata, step_payload FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
+	rows, err := db.Query(`SELECT idx, metadata, step_payload FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
 	if err != nil {
 		// 若表结构不同，尝试只读 metadata
-		rows, err = db.Query(`SELECT idx, 0, metadata, NULL FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
+		rows, err = db.Query(`SELECT idx, metadata, NULL FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
 		if err != nil {
 			return entry, err
 		}
@@ -537,9 +550,8 @@ func scanSingleConversationDB(dbPath string, fp fileFingerprint) (cachedConvEntr
 
 	for rows.Next() {
 		var idx int
-		var status int
 		var metaBlob, payloadBlob []byte
-		if err := rows.Scan(&idx, &status, &metaBlob, &payloadBlob); err != nil {
+		if err := rows.Scan(&idx, &metaBlob, &payloadBlob); err != nil {
 			continue
 		}
 		stepMeta := ParseStepMetadata(metaBlob)
@@ -554,6 +566,13 @@ func scanSingleConversationDB(dbPath string, fp fileFingerprint) (cachedConvEntr
 		usage := stepMeta.Usage
 		if usage == nil && hasGM {
 			usage = gm.Usage
+		}
+
+		// 仅在存在精确遥测或有效载荷估算时才建桶统计，避免残留全零幽灵桶虚增对话数。
+		hasExact := usage != nil && usage.TotalTokens > 0
+		hasEst := !hasExact && len(payloadBlob) > 0
+		if !hasExact && !hasEst {
+			continue
 		}
 
 		rawEnum := ""
@@ -595,7 +614,7 @@ func scanSingleConversationDB(dbPath string, fp fileFingerprint) (cachedConvEntr
 			bucketMap[key] = bucket
 		}
 
-		if usage != nil && usage.TotalTokens > 0 {
+		if hasExact {
 			bucket.ExactTurnCount++
 			bucket.Exact.Add(model.ExactTokenTotals{
 				InputTokens:      usage.InputTokens,
@@ -605,7 +624,7 @@ func scanSingleConversationDB(dbPath string, fp fileFingerprint) (cachedConvEntr
 				CacheWriteTokens: usage.CacheWriteTokens,
 				TotalTokens:      usage.TotalTokens,
 			})
-		} else if len(payloadBlob) > 0 {
+		} else if hasEst {
 			estOut := estimateTokensFromPayload(payloadBlob)
 			bucket.EstimatedTurnCount++
 			bucket.EstOutput += estOut
@@ -619,10 +638,29 @@ func scanSingleConversationDB(dbPath string, fp fileFingerprint) (cachedConvEntr
 	return entry, nil
 }
 
+// isSafeConversationID 校验对话 ID 仅为单段安全文件名，阻止任何路径遍历（.. / \）。
+func isSafeConversationID(id string) bool {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" || trimmed == "." || trimmed == ".." {
+		return false
+	}
+	if strings.ContainsAny(trimmed, `/\`) || strings.Contains(trimmed, "..") || strings.ContainsRune(trimmed, 0) {
+		return false
+	}
+	return filepath.Base(trimmed) == trimmed
+}
+
 // GetConversationDetail 按需只读解析单条对话的每一步消耗记录。
 func (s *Service) GetConversationDetail(conversationID string) (*model.ConversationDetail, error) {
+	if !isSafeConversationID(conversationID) {
+		return nil, fmt.Errorf("非法的对话 ID")
+	}
 	_, effectiveDir, _ := s.resolveDataDir()
-	dbPath := filepath.Join(effectiveDir, "conversations", conversationID+".db")
+	convDir := filepath.Clean(filepath.Join(effectiveDir, "conversations"))
+	dbPath := filepath.Clean(filepath.Join(convDir, conversationID+".db"))
+	if rel, err := filepath.Rel(convDir, dbPath); err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return nil, fmt.Errorf("非法的对话记录路径")
+	}
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, fmt.Errorf("未找到对话记录文件: %s", conversationID)
 	}
@@ -713,6 +751,12 @@ func (s *Service) GetConversationDetail(conversationID string) (*model.Conversat
 		}
 		resolved := ResolveModelInfo(rawEnum, respModel, rawProvider)
 
+		hasExact := usage != nil && usage.TotalTokens > 0
+		hasEst := !hasExact && len(payloadBlob) > 0
+		if !hasExact && !hasEst {
+			continue
+		}
+
 		turn := model.TurnUsageRecord{
 			StepIndex:        idx,
 			Timestamp:        formatUTCMs(stepMeta.TimestampMs),
@@ -733,7 +777,7 @@ func (s *Service) GetConversationDetail(conversationID string) (*model.Conversat
 			sliceMap[resolved.ModelID] = slice
 		}
 
-		if usage != nil && usage.TotalTokens > 0 {
+		if hasExact {
 			turn.IsExact = true
 			turn.MessageID = usage.MessageID
 			turn.Exact = model.ExactTokenTotals{
@@ -746,7 +790,7 @@ func (s *Service) GetConversationDetail(conversationID string) (*model.Conversat
 			}
 			slice.TurnCount++
 			slice.Exact.Add(turn.Exact)
-		} else if len(payloadBlob) > 0 {
+		} else {
 			estOut := estimateTokensFromPayload(payloadBlob)
 			turn.Estimated = model.EstimatedTokenTotals{
 				OutputTokens:       estOut,
@@ -755,8 +799,6 @@ func (s *Service) GetConversationDetail(conversationID string) (*model.Conversat
 			}
 			slice.TurnCount++
 			slice.EstimatedTotalTokens += estOut
-		} else {
-			continue
 		}
 
 		turns = append(turns, turn)
@@ -767,8 +809,12 @@ func (s *Service) GetConversationDetail(conversationID string) (*model.Conversat
 		breakdown = append(breakdown, *sl)
 	}
 	sort.Slice(breakdown, func(i, j int) bool {
-		return breakdown[i].Exact.TotalTokens+breakdown[i].EstimatedTotalTokens >
-			breakdown[j].Exact.TotalTokens+breakdown[j].EstimatedTotalTokens
+		ti := breakdown[i].Exact.TotalTokens + breakdown[i].EstimatedTotalTokens
+		tj := breakdown[j].Exact.TotalTokens + breakdown[j].EstimatedTotalTokens
+		if ti != tj {
+			return ti > tj
+		}
+		return breakdown[i].ModelID < breakdown[j].ModelID
 	})
 
 	return &model.ConversationDetail{
@@ -824,14 +870,21 @@ func parseFlexibleTimestampMs(raw string) int64 {
 			return num * 1000
 		}
 	}
-	layouts := []string{
+	tzLayouts := []string{
 		time.RFC3339Nano,
 		time.RFC3339,
+	}
+	for _, layout := range tzLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UnixMilli()
+		}
+	}
+	localLayouts := []string{
 		"2006-01-02 15:04:05",
 		"2006-01-02T15:04:05",
 	}
-	for _, layout := range layouts {
-		if t, err := time.Parse(layout, s); err == nil {
+	for _, layout := range localLayouts {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
 			return t.UnixMilli()
 		}
 	}

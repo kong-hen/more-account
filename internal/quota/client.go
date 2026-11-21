@@ -16,9 +16,11 @@ import (
 
 // FetchResult 表示一次配额拉取的完整结果（可能包含模型数据及部分/403 错误诊断）。
 type FetchResult struct {
-	Quota     model.QuotaData
-	Error     *model.QuotaErrorInfo
-	ProjectID string
+	Quota         model.QuotaData
+	Error         *model.QuotaErrorInfo
+	ProjectID     string
+	TierLoaded    bool
+	SummaryLoaded bool
 }
 
 // Client 负责向 Google CloudCode 查询订阅、项目与模型剩余配额。
@@ -114,7 +116,7 @@ func buildCloudCodeMetadata(duetProject string) map[string]any {
 }
 
 type loadCodeAssistResp struct {
-	Project      any `json:"cloudaicompanionProject"`
+	Project      any      `json:"cloudaicompanionProject"`
 	CurrentTier  *rawTier `json:"currentTier"`
 	PaidTier     *rawTier `json:"paidTier"`
 	AllowedTiers []struct {
@@ -130,6 +132,14 @@ type rawTier struct {
 		CreditAmount                string `json:"creditAmount"`
 		MinimumCreditAmountForUsage string `json:"minimumCreditAmountForUsage"`
 	} `json:"availableCredits"`
+}
+
+type onboardOpResp struct {
+	Name     string `json:"name"`
+	Done     bool   `json:"done"`
+	Response *struct {
+		Project any `json:"cloudaicompanionProject"`
+	} `json:"response"`
 }
 
 func extractProjectID(raw any) string {
@@ -162,7 +172,7 @@ func extractCredits(t *rawTier) []model.CreditInfo {
 	return out
 }
 
-func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, preferredProjectID string) (string, string, []model.CreditInfo) {
+func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, preferredProjectID string) (string, string, []model.CreditInfo, bool) {
 	payload := map[string]any{
 		"metadata": buildCloudCodeMetadata(preferredProjectID),
 		"mode":     "FULL_ELIGIBILITY_CHECK",
@@ -174,7 +184,7 @@ func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, p
 	rawBody, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/"+LoadCodeAssistPath, bytes.NewReader(rawBody))
 	if err != nil {
-		return "", "", nil
+		return "", "", nil, false
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -183,21 +193,21 @@ func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, p
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return "", "", nil
+		return "", "", nil, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", nil
+		return "", "", nil, false
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return "", "", nil
+		return "", "", nil, false
 	}
 
 	var parsed loadCodeAssistResp
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", "", nil
+		return "", "", nil, false
 	}
 
 	var tierID string
@@ -208,9 +218,12 @@ func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, p
 	}
 
 	credits := extractCredits(parsed.PaidTier)
+	if len(credits) == 0 {
+		credits = extractCredits(parsed.CurrentTier)
+	}
 	projectID := extractProjectID(parsed.Project)
 	if projectID != "" {
-		return projectID, tierID, credits
+		return projectID, tierID, credits, true
 	}
 
 	// 若账号尚未分配云项目，尝试执行 onboardUser 获取默认项目 ID。
@@ -229,11 +242,11 @@ func (c *Client) loadProjectAndTier(ctx context.Context, baseURL, accessToken, p
 	}
 	if onboardTier != "" {
 		if proj, err := c.tryOnboardUser(ctx, baseURL, accessToken, onboardTier, preferredProjectID); err == nil && proj != "" {
-			return proj, tierID, credits
+			return proj, tierID, credits, true
 		}
 	}
 
-	return "", tierID, credits
+	return "", tierID, credits, true
 }
 
 func (c *Client) tryOnboardUser(ctx context.Context, baseURL, accessToken, tierID, projectHint string) (string, error) {
@@ -258,19 +271,16 @@ func (c *Client) tryOnboardUser(ctx context.Context, baseURL, accessToken, tierI
 	if err != nil {
 		return "", err
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	_ = resp.Body.Close()
+	if readErr != nil {
+		return "", readErr
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("onboardUser 返回 HTTP %d", resp.StatusCode)
 	}
 
-	var op struct {
-		Name     string `json:"name"`
-		Done     bool   `json:"done"`
-		Response *struct {
-			Project any `json:"cloudaicompanionProject"`
-		} `json:"response"`
-	}
+	var op onboardOpResp
 	if err := json.Unmarshal(body, &op); err != nil {
 		return "", err
 	}
@@ -302,14 +312,20 @@ func (c *Client) tryOnboardUser(ctx context.Context, baseURL, accessToken, tierI
 		if err != nil {
 			return "", err
 		}
-		pollBody, _ := io.ReadAll(io.LimitReader(pollResp.Body, 1<<20))
+		pollBody, pollReadErr := io.ReadAll(io.LimitReader(pollResp.Body, 1<<20))
 		_ = pollResp.Body.Close()
+		if pollReadErr != nil {
+			return "", pollReadErr
+		}
 		if pollResp.StatusCode < 200 || pollResp.StatusCode >= 300 {
 			return "", fmt.Errorf("onboardUser 轮询返回 HTTP %d", pollResp.StatusCode)
 		}
-		if err := json.Unmarshal(pollBody, &op); err != nil {
+		// 每次轮询使用全新的目标结构体，防止旧字段残留。
+		var nextOp onboardOpResp
+		if err := json.Unmarshal(pollBody, &nextOp); err != nil {
 			return "", err
 		}
+		op = nextOp
 	}
 	return "", nil
 }
@@ -321,11 +337,11 @@ func isExplicitQuotaDenial(info model.QuotaErrorInfo) bool {
 }
 
 // fetchQuotaSummary 向 CloudCode 拉取 5 小时与周额度共享配额桶摘要（含瞬时失败重试）。
-func (c *Client) fetchQuotaSummary(ctx context.Context, baseURL, accessToken string, rawPayload []byte) (map[string]any, *model.QuotaErrorInfo) {
+func (c *Client) fetchQuotaSummary(ctx context.Context, baseURL, accessToken string, rawPayload []byte) (map[string]any, *model.QuotaErrorInfo, bool) {
 	for attempt := 1; attempt <= 2; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/"+RetrieveUserQuotaSummaryPath, bytes.NewReader(rawPayload))
 		if err != nil {
-			return nil, nil
+			return nil, nil, false
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Content-Type", "application/json")
@@ -336,24 +352,24 @@ func (c *Client) fetchQuotaSummary(ctx context.Context, baseURL, accessToken str
 			if attempt < 2 {
 				select {
 				case <-ctx.Done():
-					return nil, nil
+					return nil, nil, false
 				case <-time.After(400 * time.Millisecond):
 				}
 				continue
 			}
-			return nil, nil
+			return nil, nil, false
 		}
 
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 		_ = resp.Body.Close()
 		if readErr != nil {
-			return nil, nil
+			return nil, nil, false
 		}
 
 		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) && attempt < 2 {
 			select {
 			case <-ctx.Done():
-				return nil, nil
+				return nil, nil, false
 			case <-time.After(400 * time.Millisecond):
 			}
 			continue
@@ -361,16 +377,16 @@ func (c *Client) fetchQuotaSummary(ctx context.Context, baseURL, accessToken str
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			errInfo := ParseGoogleAPIError(resp.StatusCode, string(body))
-			return nil, &errInfo
+			return nil, &errInfo, false
 		}
 
 		var parsed map[string]any
 		if err := json.Unmarshal(body, &parsed); err != nil {
-			return nil, nil
+			return nil, nil, false
 		}
-		return parsed, nil
+		return parsed, nil, true
 	}
-	return nil, nil
+	return nil, nil, false
 }
 
 // FetchQuota 拉取单个账号的订阅、AI 积分、5h/周共享配额桶及所有模型配额。
@@ -378,7 +394,7 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 	ccCtx := CloudCodeContextFromToken(token)
 	baseURL := c.baseURL(ccCtx)
 
-	resolvedProject, tierID, credits := c.loadProjectAndTier(ctx, baseURL, token.AccessToken, ccCtx.PreferredProjectID)
+	resolvedProject, tierID, credits, tierLoaded := c.loadProjectAndTier(ctx, baseURL, token.AccessToken, ccCtx.PreferredProjectID)
 	effectiveProject := resolvedProject
 	if effectiveProject == "" {
 		effectiveProject = ccCtx.PreferredProjectID
@@ -389,6 +405,12 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 		reqPayload["project"] = effectiveProject
 	}
 	rawPayload, _ := json.Marshal(reqPayload)
+
+	var isGcpCopy *bool
+	if token.IsGcpTos != nil {
+		v := *token.IsGcpTos
+		isGcpCopy = &v
+	}
 
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -414,8 +436,20 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 			return nil, lastErr
 		}
 
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		_ = resp.Body.Close()
+		if readErr != nil {
+			lastErr = fmt.Errorf("读取 CloudCode 配额响应失败: %w", readErr)
+			if attempt < 3 {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(time.Duration(attempt*500) * time.Millisecond):
+				}
+				continue
+			}
+			return nil, lastErr
+		}
 
 		var modelsResp rawModelsResponse
 		var modelsErr *model.QuotaErrorInfo
@@ -430,12 +464,14 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 					SubscriptionTier: NormalizeSubscriptionTier(tierID),
 					TierID:           strings.TrimSpace(tierID),
 					Credits:          credits,
+					IsGcpTos:         isGcpCopy,
 					ProjectID:        effectiveProject,
 				}
 				return &FetchResult{
-					Quota:     q,
-					Error:     &errInfo,
-					ProjectID: effectiveProject,
+					Quota:      q,
+					Error:      &errInfo,
+					ProjectID:  effectiveProject,
+					TierLoaded: tierLoaded,
 				}, nil
 			}
 			// 非明确封禁/验证的 403 继续尝试拉取配额摘要桶
@@ -461,8 +497,9 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 		}
 
 		// 同步拉取 retrieveUserQuotaSummary，获取 5 小时与周额度共享桶
-		summaryMap, summaryErr := c.fetchQuotaSummary(ctx, baseURL, token.AccessToken, rawPayload)
+		summaryMap, summaryErr, summaryLoaded := c.fetchQuotaSummary(ctx, baseURL, token.AccessToken, rawPayload)
 		quotaData := buildQuotaData(modelsResp, summaryMap, tierID, credits, effectiveProject)
+		quotaData.IsGcpTos = isGcpCopy
 
 		var finalErr *model.QuotaErrorInfo
 		if summaryErr != nil && isExplicitQuotaDenial(*summaryErr) {
@@ -476,9 +513,11 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 		}
 
 		return &FetchResult{
-			Quota:     quotaData,
-			Error:     finalErr,
-			ProjectID: effectiveProject,
+			Quota:         quotaData,
+			Error:         finalErr,
+			ProjectID:     effectiveProject,
+			TierLoaded:    tierLoaded,
+			SummaryLoaded: summaryLoaded || len(modelsResp.QuotaSummary) > 0,
 		}, nil
 	}
 

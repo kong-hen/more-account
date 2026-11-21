@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Token 用量统计主视图：严格只读扫描本地 ~/.gemini/antigravity，展示 KPI 卡、SVG 趋势图、模型/工作区分布及分页对话表。
-import { computed, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   RefreshCw,
   RotateCcw,
@@ -38,9 +38,19 @@ const totalAllTokens = computed(() => {
   return overview.value.exact.totalTokens + overview.value.estimated.totalTokens
 })
 
+const searchInput = ref(usageStore.query.search)
+let searchDebounceTimer: number | null = null
+
 onMounted(() => {
   if (!usageStore.bundle) {
     void usageStore.fetchQuery()
+  }
+})
+
+onBeforeUnmount(() => {
+  if (searchDebounceTimer !== null) {
+    window.clearTimeout(searchDebounceTimer)
+    searchDebounceTimer = null
   }
 })
 
@@ -60,7 +70,14 @@ function setKind(kind: string) {
 }
 
 function setSearch(val: string) {
-  void usageStore.fetchQuery({ search: val, page: 1 })
+  searchInput.value = val
+  if (searchDebounceTimer !== null) {
+    window.clearTimeout(searchDebounceTimer)
+  }
+  searchDebounceTimer = window.setTimeout(() => {
+    searchDebounceTimer = null
+    void usageStore.fetchQuery({ search: val, page: 1 })
+  }, 250)
 }
 
 function goPage(next: number) {
@@ -70,7 +87,7 @@ function goPage(next: number) {
 }
 
 function pctShare(part: number, whole: number): number {
-  if (!whole || whole <= 0) return 0
+  if (!part || part <= 0 || !whole || whole <= 0) return 0
   return Math.max(1, Math.min(100, Math.round((part / whole) * 100)))
 }
 
@@ -280,9 +297,9 @@ function kindLabel(kind: string): string {
           >
             <h3 class="text-xs font-semibold" style="color: var(--text-primary)">工作区消耗排行</h3>
             <div v-if="overview?.workspaces?.length" class="space-y-2.5">
-              <div v-for="ws in overview.workspaces.slice(0, 6)" :key="ws.workspaceName" class="space-y-1">
+              <div v-for="ws in overview.workspaces.slice(0, 6)" :key="ws.workspacePath || ws.workspaceName" class="space-y-1">
                 <div class="flex items-center justify-between text-xs gap-2">
-                  <span class="truncate font-medium" style="color: var(--text-primary)">{{ ws.workspaceName }}</span>
+                  <span class="truncate font-medium" :title="ws.workspacePath || ws.workspaceName" style="color: var(--text-primary)">{{ ws.workspaceName }}</span>
                   <span class="font-mono-num text-[11.5px] shrink-0" style="color: var(--text-secondary)">
                     {{ formatTokenCount(ws.exact.totalTokens + ws.estimatedTotalTokens) }}
                     <span class="ml-1" style="color: var(--text-muted)">({{ ws.conversationCount }})</span>
@@ -324,7 +341,7 @@ function kindLabel(kind: string): string {
                   style="color: var(--text-muted)"
                 />
                 <input
-                  :value="usageStore.query.search"
+                  :value="searchInput"
                   type="search"
                   placeholder="搜索对话标题或工作区..."
                   class="w-full h-7 pl-8 pr-2.5 text-xs rounded-lg border"

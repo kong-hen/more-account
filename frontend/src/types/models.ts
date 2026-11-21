@@ -11,7 +11,6 @@ export interface TokenData {
   isGcpTos?: boolean | null
   oauthClientKey?: string
   idToken?: string
-  sessionId?: string
 }
 
 export interface ModelQuota {
