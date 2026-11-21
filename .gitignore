@@ -1,6 +1,8 @@
 # 编译产物与打包输出
 build/bin/
 dist/
+more-account
+MoreAccount
 *.app/
 *.exe
 
