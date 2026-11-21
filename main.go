@@ -8,10 +8,14 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
+
+//go:embed build/appicon.png
+var appIcon []byte
 
 func main() {
 	app := NewApp()
@@ -32,6 +36,11 @@ func main() {
 		Bind: []interface{}{
 			app,
 		},
+		Windows: &windows.Options{
+			WebviewIsTransparent: false,
+			WindowIsTranslucent:  false,
+			DisableWindowIcon:    false,
+		},
 		Mac: &mac.Options{
 			TitleBar:             mac.TitleBarHiddenInset(),
 			WebviewIsTransparent: false,
@@ -39,6 +48,7 @@ func main() {
 			About: &mac.AboutInfo{
 				Title:   "More Account",
 				Message: "轻量级 Antigravity 反重力账号管理工具",
+				Icon:    appIcon,
 			},
 		},
 	})

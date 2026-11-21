@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="ma-bg" x1="20" y1="16" x2="236" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3B82F6" />
+      <stop offset="50%" stop-color="#1D4ED8" />
+      <stop offset="100%" stop-color="#0F1C44" />
+    </linearGradient>
+    <radialGradient id="ma-glow" cx="28%" cy="18%" r="70%">
+      <stop offset="0%" stop-color="#60A5FA" stop-opacity="0.45" />
+      <stop offset="100%" stop-color="#60A5FA" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="ma-card-back" x1="88" y1="48" x2="212" y2="152" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#DBEAFE" stop-opacity="0.62" />
+      <stop offset="100%" stop-color="#60A5FA" stop-opacity="0.38" />
+    </linearGradient>
+    <linearGradient id="ma-card-front" x1="44" y1="84" x2="188" y2="204" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#E2EEFF" />
+    </linearGradient>
+    <linearGradient id="ma-dot" x1="164" y1="74" x2="196" y2="106" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34D399" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+  </defs>
+
+  <!-- 底板圆角矩形 -->
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#ma-bg)" />
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#ma-glow)" />
+  <rect x="9" y="9" width="238" height="238" rx="53" stroke="#93C5FD" stroke-opacity="0.35" stroke-width="2" />
+
+  <!-- 后层错位账号副卡 -->
+  <rect x="86" y="58" width="124" height="100" rx="22" fill="url(#ma-card-back)" stroke="#E0F2FE" stroke-opacity="0.45" stroke-width="1.5" />
+
+  <!-- 前层主账号卡片 -->
+  <rect x="46" y="92" width="136" height="112" rx="24" fill="url(#ma-card-front)" />
+
+  <!-- 双向切号箭头 -->
+  <path d="M80 132H148M148 132L133 118M148 132L133 146" stroke="#1D4ED8" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M148 166H80M80 166L95 152M80 166L95 180" stroke="#0E91E9" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- 右上激活在线圆点 -->
+  <circle cx="178" cy="96" r="19" fill="#FFFFFF" />
+  <circle cx="178" cy="96" r="15" fill="url(#ma-dot)" />
+</svg>

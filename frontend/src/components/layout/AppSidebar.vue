@@ -14,7 +14,6 @@ import {
   Sun,
   Moon,
   Settings,
-  Layers,
   FolderOpen,
   Inbox,
   Radar,
@@ -73,12 +72,13 @@ const isExternalUnmanaged = computed(() =>
   >
     <!-- 顶部 macOS 标题栏安全拖拽区 + 品牌标识 -->
     <div class="wails-drag shrink-0 pt-9 pb-3 px-4 flex items-center gap-2.5">
-      <div
-        class="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-white"
-        style="background-color: var(--accent)"
-      >
-        <Layers class="w-4 h-4" />
-      </div>
+      <img
+        src="/logo.svg"
+        alt=""
+        width="28"
+        height="28"
+        class="w-7 h-7 rounded-[7px] shrink-0 pointer-events-none"
+      />
       <div class="min-w-0">
         <div class="text-[13.5px] font-semibold leading-tight tracking-tight truncate" style="color: var(--text-primary)">
           More Account

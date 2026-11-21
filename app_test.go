@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
+	"image/png"
+	"os"
 	"testing"
 
 	"more-account/internal/model"
@@ -147,5 +151,99 @@ func TestPrepareOAuthLoginAndDynamicGroupUpdate(t *testing.T) {
 	app.SetOAuthTargetGroup("grp-test-1")
 	if got := app.getOAuthTargetGroup(); got != "grp-test-1" {
 		t.Fatalf("期望更新 OAuth 目标分组为 grp-test-1，实际 %q", got)
+	}
+}
+
+func TestCrossPlatformAppIconsCompliance(t *testing.T) {
+	// 1. 校验 macOS build/appicon.png 严格符合 Apple HIG 1024x1024 画布与 824x824 主体安全边距规范
+	macRaw, err := os.ReadFile("build/appicon.png")
+	if err != nil {
+		t.Fatalf("读取 build/appicon.png 失败: %v", err)
+	}
+	macImg, err := png.Decode(bytes.NewReader(macRaw))
+	if err != nil {
+		t.Fatalf("解码 build/appicon.png 失败: %v", err)
+	}
+	if macImg.Bounds().Dx() != 1024 || macImg.Bounds().Dy() != 1024 {
+		t.Fatalf("macOS 图标画布应为 1024x1024，实际 %v", macImg.Bounds())
+	}
+
+	minX, minY, maxX, maxY := 1024, 1024, 0, 0
+	for y := 0; y < 1024; y++ {
+		for x := 0; x < 1024; x++ {
+			_, _, _, a := macImg.At(x, y).RGBA()
+			if a>>8 > 200 {
+				if x < minX {
+					minX = x
+				}
+				if y < minY {
+					minY = y
+				}
+				if x+1 > maxX {
+					maxX = x + 1
+				}
+				if y+1 > maxY {
+					maxY = y + 1
+				}
+			}
+		}
+	}
+	abs := func(n int) int {
+		if n < 0 {
+			return -n
+		}
+		return n
+	}
+	if abs(minX-100) > 2 || abs(minY-100) > 2 || abs(maxX-924) > 2 || abs(maxY-924) > 2 {
+		t.Fatalf("macOS 图标主体边界应贴合 (100,100)-(924,924) (824x824)，实际 (%d,%d)-(%d,%d)", minX, minY, maxX, maxY)
+	}
+
+	// 2. 校验 Windows build/windows/icon.ico 包含完整多尺寸帧且首帧 256x256 为饱满构图
+	icoRaw, err := os.ReadFile("build/windows/icon.ico")
+	if err != nil {
+		t.Fatalf("读取 build/windows/icon.ico 失败: %v", err)
+	}
+	if len(icoRaw) < 6 {
+		t.Fatal("icon.ico 文件过短")
+	}
+	reserved := binary.LittleEndian.Uint16(icoRaw[0:2])
+	icoType := binary.LittleEndian.Uint16(icoRaw[2:4])
+	frameCount := int(binary.LittleEndian.Uint16(icoRaw[4:6]))
+	if reserved != 0 || icoType != 1 || frameCount < 6 {
+		t.Fatalf("icon.ico 头部异常: reserved=%d type=%d count=%d", reserved, icoType, frameCount)
+	}
+
+	// 解码首帧 256x256 PNG，确认 Windows 主体占比 >= 90%（避免携带 macOS 大留白导致 Windows 任务栏图标偏小）
+	sizeBytes := binary.LittleEndian.Uint32(icoRaw[6+8 : 6+12])
+	offsetBytes := binary.LittleEndian.Uint32(icoRaw[6+12 : 6+16])
+	firstFrame := icoRaw[offsetBytes : offsetBytes+sizeBytes]
+	winImg, err := png.Decode(bytes.NewReader(firstFrame))
+	if err != nil {
+		t.Fatalf("解码 icon.ico 首帧 256x256 PNG 失败: %v", err)
+	}
+	if winImg.Bounds().Dx() != 256 || winImg.Bounds().Dy() != 256 {
+		t.Fatalf("icon.ico 首帧应为 256x256，实际 %v", winImg.Bounds())
+	}
+	wMinX, wMaxX := 256, 0
+	for x := 0; x < 256; x++ {
+		_, _, _, a := winImg.At(x, 128).RGBA()
+		if a>>8 > 200 {
+			if x < wMinX {
+				wMinX = x
+			}
+			if x+1 > wMaxX {
+				wMaxX = x + 1
+			}
+		}
+	}
+	if wMaxX-wMinX < 232 {
+		t.Fatalf("Windows 256x256 图标主体过小（宽 %dpx，期望 >=232px 饱满构图）", wMaxX-wMinX)
+	}
+
+	// 3. 校验 Windows 清单与版本资源配置已就绪
+	for _, p := range []string{"build/windows/info.json", "build/windows/wails.exe.manifest"} {
+		if st, err := os.Stat(p); err != nil || st.Size() == 0 {
+			t.Fatalf("缺少有效的 Windows 打包配置文件 %s: %v", p, err)
+		}
 	}
 }
