@@ -1,9 +1,22 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
     <title>More Account — 反重力账号管理</title>
+    <script>
+      // 首屏防闪烁：默认固定浅色，不跟随系统暗色，仅在用户手动切换为 dark 时启用暗色。
+      (function () {
+        try {
+          var saved = localStorage.getItem('more-account-theme');
+          var theme = saved === 'dark' ? 'dark' : 'light';
+          document.documentElement.setAttribute('data-theme', theme);
+          var meta = document.querySelector('meta[name="color-scheme"]');
+          if (meta) meta.setAttribute('content', theme);
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

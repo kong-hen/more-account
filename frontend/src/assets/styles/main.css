@@ -1,1 +1,210 @@
 @import "tailwindcss";
+
+/* ─── 全局主题语义令牌：默认浅色，仅在手动切换 data-theme="dark" 时生效暗色 ─── */
+:root {
+  color-scheme: light;
+
+  --bg-app: #f7f8fa;
+  --bg-sidebar: #f2f4f7;
+  --bg-surface: #ffffff;
+  --bg-subtle: #f1f5f9;
+  --bg-hover: #eaeff5;
+  --bg-active: #e5edff;
+
+  --border-subtle: #e5e7eb;
+  --border-strong: #d1d5db;
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: #eff6ff;
+  --accent-border: #bfdbfe;
+
+  --success: #10b981;
+  --success-soft: #ecfdf5;
+  --success-text: #047857;
+
+  --warning: #f59e0b;
+  --warning-soft: #fffbeb;
+  --warning-text: #b45309;
+
+  --danger: #ef4444;
+  --danger-soft: #fef2f2;
+  --danger-text: #b91c1c;
+
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-elevated: 0 12px 32px rgba(15, 23, 42, 0.12);
+
+  --scrollbar-thumb: #94a3b8;
+  --scrollbar-track: transparent;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-app: #0f1115;
+  --bg-sidebar: #14171d;
+  --bg-surface: #181c24;
+  --bg-subtle: #1f2530;
+  --bg-hover: #252c38;
+  --bg-active: rgba(59, 130, 246, 0.18);
+
+  --border-subtle: #262c38;
+  --border-strong: #363f50;
+
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+
+  --accent: #3b82f6;
+  --accent-hover: #60a5fa;
+  --accent-soft: rgba(59, 130, 246, 0.15);
+  --accent-border: rgba(59, 130, 246, 0.38);
+
+  --success: #10b981;
+  --success-soft: rgba(16, 185, 129, 0.15);
+  --success-text: #34d399;
+
+  --warning: #f59e0b;
+  --warning-soft: rgba(245, 158, 11, 0.15);
+  --warning-text: #fbbf24;
+
+  --danger: #ef4444;
+  --danger-soft: rgba(239, 68, 68, 0.16);
+  --danger-text: #f87171;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-elevated: 0 16px 40px rgba(0, 0, 0, 0.45);
+
+  --scrollbar-thumb: #475569;
+  --scrollbar-track: transparent;
+}
+
+/* 同步 <meta name="color-scheme"> 与 :root color-scheme，确保原生控件一致 */
+:root:has(> head > meta[name="color-scheme"][content="dark"]) {
+  color-scheme: dark;
+}
+:root:has(> head > meta[name="color-scheme"][content="light"]) {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.font-mono-num {
+  font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Wails macOS 隐式标题栏拖拽区域 */
+.wails-drag {
+  --wails-draggable: drag;
+  -webkit-app-region: drag;
+}
+
+.wails-no-drag {
+  --wails-draggable: no-drag;
+  -webkit-app-region: no-drag;
+}
+
+/* ─── 标准滚动条样式与 WebKit 降级兜底 ─── */
+.custom-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+@supports not (scrollbar-color: auto) {
+  .custom-scroll {
+    scrollbar-width: auto;
+  }
+
+  .custom-scroll::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .custom-scroll::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 9999px;
+  }
+
+  .custom-scroll::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
+/* ─── 原生模态 <dialog> 规范样式 ─── */
+dialog.app-dialog {
+  padding: 0;
+  margin: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background-color: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-elevated);
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 40px);
+  overflow: hidden;
+}
+
+dialog.app-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+dialog.app-dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog.app-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(2px);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+:root[data-theme="dark"] dialog.app-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.65);
+}
+
+/* ─── 按钮与输入焦点可见性 ─── */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
