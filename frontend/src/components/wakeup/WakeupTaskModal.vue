@@ -6,7 +6,8 @@ import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
 import { maskEmail } from '@/utils/privacy'
-import type { WakeupRepeatMode, WakeupTask } from '@/types/models'
+import { mergeModelList, type MergedModelQuota } from '@/utils/quota'
+import type { ModelQuota, WakeupRepeatMode, WakeupTask } from '@/types/models'
 
 const props = defineProps<{
   open: boolean
@@ -57,16 +58,47 @@ const weekdayOptions = [
   { val: 0, label: '周日' },
 ]
 
-// 汇总账号池中已探测到的模型列表 + 常用保底模型
-const modelCandidates = computed(() => {
-  const set = new Set<string>(['gemini-3-flash', 'gemini-3-pro-high', 'claude-sonnet-4-5'])
+// 汇总账号池中已探测到的模型列表 + 常用保底模型，并合并同一模型的不同思考深度
+const modelCandidates = computed<MergedModelQuota[]>(() => {
+  const byName = new Map<string, ModelQuota>()
+  const defaults: ModelQuota[] = [
+    { name: 'gemini-3-flash', displayName: 'Gemini 3 Flash', percentage: 100 },
+    { name: 'gemini-3-pro-high', displayName: 'Gemini 3 Pro (High)', percentage: 100 },
+    { name: 'claude-sonnet-4-5', displayName: 'Claude Sonnet 4.5', percentage: 100 },
+  ]
+  for (const d of defaults) {
+    byName.set(d.name, d)
+  }
   for (const acc of appStore.accounts) {
     for (const m of acc.quota?.models ?? []) {
-      if (m.name) set.add(m.name)
+      if (m.name) {
+        const existing = byName.get(m.name)
+        if (!existing || (!existing.displayName && m.displayName)) {
+          byName.set(m.name, m)
+        }
+      }
     }
   }
-  return Array.from(set).sort()
+  for (const sel of selectedModels.value) {
+    if (sel && !byName.has(sel)) {
+      byName.set(sel, { name: sel, percentage: 100 })
+    }
+  }
+  return mergeModelList(Array.from(byName.values()))
 })
+
+function isCandidateSelected(candidate: MergedModelQuota): boolean {
+  return candidate.variants.some((v) => selectedModels.value.includes(v.name))
+}
+
+function toggleModelCandidate(candidate: MergedModelQuota) {
+  const variantNames = new Set(candidate.variants.map((v) => v.name))
+  if (isCandidateSelected(candidate)) {
+    selectedModels.value = selectedModels.value.filter((id) => !variantNames.has(id))
+  } else {
+    selectedModels.value = [...selectedModels.value, candidate.canonicalModelId]
+  }
+}
 
 watch(
   () => [props.open, props.editingTask] as const,
@@ -339,17 +371,18 @@ async function handleSave() {
         <div class="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto custom-scroll">
           <button
             v-for="m in modelCandidates"
-            :key="m"
+            :key="m.key"
             type="button"
-            class="px-2.5 py-1 rounded-lg border text-[11px] font-mono-num cursor-pointer transition-colors"
+            :title="m.canonicalModelId"
+            class="px-2.5 py-1 rounded-lg border text-[11px] font-medium cursor-pointer transition-colors"
             :style="
-              selectedModels.includes(m)
+              isCandidateSelected(m)
                 ? { borderColor: 'var(--accent)', backgroundColor: 'var(--accent-soft)', color: 'var(--accent)' }
                 : { borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)', color: 'var(--text-secondary)' }
             "
-            @click="selectedModels = toggleInArray(selectedModels, m)"
+            @click="toggleModelCandidate(m)"
           >
-            {{ m }}
+            {{ m.displayName }}
           </button>
         </div>
       </div>

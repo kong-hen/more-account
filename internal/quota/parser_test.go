@@ -88,6 +88,13 @@ func TestClientFetchQuotaEndToEnd(t *testing.T) {
 							"resetTime":         "2026-11-21T15:00:00Z",
 						},
 					},
+					"MODEL_PLACEHOLDER_M525": map[string]any{
+						"displayName": "Gemini 4 Hydrogen (Low)",
+						"quotaInfo": map[string]any{
+							"remainingFraction": 0.9,
+							"resetTime":         "2026-11-21T16:30:00Z",
+						},
+					},
 					"irrelevant-internal-model": map[string]any{
 						"displayName": "Other",
 						"quotaInfo": map[string]any{
@@ -122,7 +129,7 @@ func TestClientFetchQuotaEndToEnd(t *testing.T) {
 	if len(res.Quota.Credits) != 1 || res.Quota.Credits[0].CreditAmount != "500" {
 		t.Fatalf("期望提取 1 条 AI 积分，实际 %+v", res.Quota.Credits)
 	}
-	if len(res.Quota.Models) != 2 {
-		t.Fatalf("期望保留 2 个核心模型，实际 %d: %+v", len(res.Quota.Models), res.Quota.Models)
+	if len(res.Quota.Models) != 3 {
+		t.Fatalf("期望保留 3 个核心模型（含占位 ID 展示名匹配），实际 %d: %+v", len(res.Quota.Models), res.Quota.Models)
 	}
 }

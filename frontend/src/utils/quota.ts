@@ -1,4 +1,4 @@
-// 配额模型分组归类、健康度判定、倒计时与 Token 紧凑格式化工具。
+// 配额模型分组归类、同模型思考深度合并、健康度判定、倒计时与 Token 紧凑格式化工具。
 import type { Account, ModelQuota } from '@/types/models'
 
 export interface ModelGroupQuotaSummary {
@@ -9,22 +9,256 @@ export interface ModelGroupQuotaSummary {
   modelCount: number
 }
 
-// 将 CloudCode 返回的原始模型列表按主系列归纳，用于卡片和表格简洁展示。
-export function summarizeModelGroups(account: Account): ModelGroupQuotaSummary[] {
-  const models = account.quota?.models ?? []
-  if (models.length === 0) return []
+export interface MergedModelVariant {
+  name: string
+  displayName: string
+  depthLabel: string
+  depthRank: number
+  percentage: number
+  resetTime: string
+}
 
-  const buckets = new Map<string, { label: string; items: ModelQuota[] }>()
+export interface MergedModelQuota {
+  key: string
+  baseId: string
+  displayName: string
+  percentage: number
+  resetTime: string
+  hasMixedPercentages: boolean
+  canonicalModelId: string
+  variants: MergedModelVariant[]
+}
+
+const ID_DEPTH_SUFFIX_RE = /(?:[-_])(thinking|minimal|low|medium|med|high|xhigh|extra[-_]?high|max)$/i
+const DISPLAY_PAREN_DEPTH_RE =
+  /\s*[（(]\s*((?:thinking|minimal|low|medium|med|high|xhigh|extra\s*high|max)(?:\s*[-/,·&\s]+\s*(?:thinking|minimal|low|medium|med|high|xhigh|extra\s*high|max))*)\s*[)）]\s*$/i
+const DISPLAY_TRAILING_DEPTH_RE =
+  /(?:\s*[-–—]\s*|\s+)(thinking|minimal|low|medium|high|xhigh|extra\s*high)\s*$/i
+
+function normalizeDepthToken(raw: string): { label: string; rank: number } | null {
+  const token = raw.trim().toLowerCase().replace(/[\s_-]+/g, '')
+  switch (token) {
+    case 'minimal':
+      return { label: 'Minimal', rank: 1 }
+    case 'low':
+      return { label: 'Low', rank: 2 }
+    case 'medium':
+    case 'med':
+      return { label: 'Medium', rank: 3 }
+    case 'high':
+      return { label: 'High', rank: 4 }
+    case 'xhigh':
+    case 'extrahigh':
+      return { label: 'XHigh', rank: 5 }
+    case 'max':
+      return { label: 'Max', rank: 6 }
+    case 'thinking':
+      return { label: 'Thinking', rank: 7 }
+    default:
+      return null
+  }
+}
+
+function stripDepthFromModelId(rawId: string): { baseId: string; tokens: string[] } {
+  let base = rawId.trim()
+  const collected: string[] = []
+  while (true) {
+    const match = base.match(ID_DEPTH_SUFFIX_RE)
+    if (!match || match.index === undefined) break
+    const candidate = base.slice(0, match.index).trim()
+    if (candidate.length < 3) break
+    collected.push(match[1])
+    base = candidate
+  }
+  return { baseId: base, tokens: collected.reverse() }
+}
+
+function stripDepthFromDisplayName(rawDisplay: string): { baseDisplay: string; tokens: string[] } {
+  let base = rawDisplay.trim()
+  const collected: string[] = []
+  while (base) {
+    const parenMatch = base.match(DISPLAY_PAREN_DEPTH_RE)
+    if (parenMatch && parenMatch.index !== undefined) {
+      const candidate = base.slice(0, parenMatch.index).trim()
+      if (!candidate) break
+      const parts = parenMatch[1]
+        .replace(/extra\s+high/gi, 'extrahigh')
+        .split(/[-/,·&\s]+/)
+        .filter(Boolean)
+      collected.unshift(...parts)
+      base = candidate
+      continue
+    }
+    const trailingMatch = base.match(DISPLAY_TRAILING_DEPTH_RE)
+    if (trailingMatch && trailingMatch.index !== undefined) {
+      const candidate = base.slice(0, trailingMatch.index).trim()
+      if (!candidate) break
+      collected.unshift(trailingMatch[1])
+      base = candidate
+      continue
+    }
+    break
+  }
+  return { baseDisplay: base, tokens: collected }
+}
+
+function buildDepthInfo(tokens: string[]): { label: string; rank: number } {
+  const parsed = tokens
+    .map(normalizeDepthToken)
+    .filter((item): item is { label: string; rank: number } => item !== null)
+  if (parsed.length === 0) {
+    return { label: '标准', rank: 0 }
+  }
+
+  // 去重并按语义排序（先具体深度再 Thinking，或在组合时清晰拼接）
+  const uniqueMap = new Map<string, { label: string; rank: number }>()
+  for (const item of parsed) {
+    if (!uniqueMap.has(item.label)) {
+      uniqueMap.set(item.label, item)
+    }
+  }
+  const unique = Array.from(uniqueMap.values()).sort((a, b) => a.rank - b.rank)
+  const nonThinking = unique.filter((item) => item.label !== 'Thinking')
+  const hasThinking = unique.some((item) => item.label === 'Thinking')
+
+  if (nonThinking.length > 0 && hasThinking) {
+    return {
+      label: `Thinking · ${nonThinking.map((i) => i.label).join('/')}`,
+      rank: nonThinking[0].rank + 0.5,
+    }
+  }
+  return {
+    label: unique.map((i) => i.label).join(' · '),
+    rank: unique[0].rank,
+  }
+}
+
+function canonicalMergeKey(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    // 统一版本号分隔符（如 3.1 与 3-1、4.5 与 4-5），确保有无 displayName 时都能命中同一模型
+    .replace(/(\d)\.(\d)/g, '$1-$2')
+    .replace(/[^a-z0-9:]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+// 将同一模型的不同思考深度（如 Low / Medium / High / XHigh / Thinking）合并为单一模型条目，
+// 同时完整保留每个原始变体的 ID 与剩余配额，避免丢失差异或影响唤醒 API 真实模型 ID。
+export function mergeModelList(models: ModelQuota[]): MergedModelQuota[] {
+  if (!models || models.length === 0) return []
+
+  interface Accumulator {
+    key: string
+    baseIdCandidates: string[]
+    baseDisplayCandidates: string[]
+    variants: MergedModelVariant[]
+  }
+
+  const groups = new Map<string, Accumulator>()
 
   for (const m of models) {
-    const lower = m.name.toLowerCase()
+    const rawName = (m.name ?? '').trim()
+    if (!rawName) continue
+    const rawDisplay = (m.displayName ?? '').trim()
+
+    const idInfo = stripDepthFromModelId(rawName)
+    const displayInfo = stripDepthFromDisplayName(rawDisplay)
+    const depth = buildDepthInfo(displayInfo.tokens.length > 0 ? displayInfo.tokens : idInfo.tokens)
+
+    const keySource = displayInfo.baseDisplay || idInfo.baseId || rawName
+    const key = canonicalMergeKey(keySource) || rawName.toLowerCase()
+
+    const variant: MergedModelVariant = {
+      name: rawName,
+      displayName: rawDisplay || rawName,
+      depthLabel: depth.label,
+      depthRank: depth.rank,
+      percentage: m.percentage,
+      resetTime: (m.resetTime ?? '').trim(),
+    }
+
+    const existing = groups.get(key)
+    if (existing) {
+      existing.variants.push(variant)
+      if (idInfo.baseId) existing.baseIdCandidates.push(idInfo.baseId)
+      if (displayInfo.baseDisplay) existing.baseDisplayCandidates.push(displayInfo.baseDisplay)
+    } else {
+      groups.set(key, {
+        key,
+        baseIdCandidates: idInfo.baseId ? [idInfo.baseId] : [],
+        baseDisplayCandidates: displayInfo.baseDisplay ? [displayInfo.baseDisplay] : [],
+        variants: [variant],
+      })
+    }
+  }
+
+  const result: MergedModelQuota[] = []
+
+  for (const acc of groups.values()) {
+    acc.variants.sort((a, b) => {
+      if (a.depthRank !== b.depthRank) return a.depthRank - b.depthRank
+      return a.name.localeCompare(b.name)
+    })
+
+    let minPct = 100
+    let earliestReset = ''
+    const firstPct = acc.variants[0].percentage
+    let hasMixedPercentages = false
+
+    for (const v of acc.variants) {
+      if (v.percentage < minPct) minPct = v.percentage
+      if (v.percentage !== firstPct) hasMixedPercentages = true
+      if (v.resetTime && (!earliestReset || v.resetTime < earliestReset)) {
+        earliestReset = v.resetTime
+      }
+    }
+
+    const preferredBaseId =
+      acc.baseIdCandidates.find((id) => !id.toUpperCase().startsWith('MODEL_PLACEHOLDER_')) ||
+      acc.baseIdCandidates[0] ||
+      acc.variants[0].name
+
+    const cleanDisplay = acc.baseDisplayCandidates[0] || preferredBaseId
+    const finalDisplayName =
+      acc.variants.length > 1 ? cleanDisplay : acc.variants[0].displayName || cleanDisplay
+
+    result.push({
+      key: acc.key,
+      baseId: acc.variants.length > 1 ? preferredBaseId : acc.variants[0].name,
+      displayName: finalDisplayName,
+      percentage: minPct,
+      resetTime: earliestReset,
+      hasMixedPercentages,
+      canonicalModelId: acc.variants[0].name,
+      variants: acc.variants,
+    })
+  }
+
+  result.sort((a, b) => a.displayName.localeCompare(b.displayName))
+  return result
+}
+
+export function mergeAccountModels(account: Account | null | undefined): MergedModelQuota[] {
+  return mergeModelList(account?.quota?.models ?? [])
+}
+
+// 将 CloudCode 返回的模型列表按主系列归纳，用于卡片和表格简洁展示。
+export function summarizeModelGroups(account: Account): ModelGroupQuotaSummary[] {
+  const models = mergeAccountModels(account)
+  if (models.length === 0) return []
+
+  const buckets = new Map<string, { label: string; items: MergedModelQuota[] }>()
+
+  for (const m of models) {
+    const lower = `${m.baseId} ${m.displayName}`.toLowerCase()
     let key = 'other'
     let label = '其他模型'
 
     if (lower.includes('claude')) {
       key = 'claude'
       label = 'Claude'
-    } else if (lower.includes('flash')) {
+    } else if (lower.includes('flash') || lower.includes('hydrogen')) {
       key = 'gemini-flash'
       label = 'Gemini Flash'
     } else if (lower.includes('gemini') || lower.includes('argon') || lower.includes('carbon')) {

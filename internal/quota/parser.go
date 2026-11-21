@@ -151,20 +151,21 @@ type rawModelsResponse struct {
 	QuotaSummary map[string]any          `json:"quota_summary"`
 }
 
-// isTrackedModel 过滤保留 Antigravity 核心模型系列。
-func isTrackedModel(name string) bool {
-	lower := strings.ToLower(name)
-	return strings.Contains(lower, "gemini") ||
-		strings.Contains(lower, "claude") ||
-		strings.Contains(lower, "argon") ||
-		strings.Contains(lower, "carbon") ||
-		strings.Contains(lower, "gpt")
+// isTrackedModel 过滤保留 Antigravity 核心模型系列（同时匹配原始 ID 与 displayName，兼容 MODEL_PLACEHOLDER_* 占位模型）。
+func isTrackedModel(name, displayName string) bool {
+	combined := strings.ToLower(name + " " + displayName)
+	return strings.Contains(combined, "gemini") ||
+		strings.Contains(combined, "claude") ||
+		strings.Contains(combined, "argon") ||
+		strings.Contains(combined, "carbon") ||
+		strings.Contains(combined, "hydrogen") ||
+		strings.Contains(combined, "gpt")
 }
 
 func buildQuotaData(resp rawModelsResponse, tierID string, credits []model.CreditInfo, projectID string) model.QuotaData {
 	models := make([]model.ModelQuota, 0, len(resp.Models))
 	for name, info := range resp.Models {
-		if info.QuotaInfo == nil || !isTrackedModel(name) {
+		if info.QuotaInfo == nil || !isTrackedModel(name, info.DisplayName) {
 			continue
 		}
 		pct := 0

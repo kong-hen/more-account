@@ -28,7 +28,14 @@ import { useAppStore } from '@/stores/appStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
 import { api, extractErrorMessage } from '@/services/api'
 import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
-import { formatDateTime, formatResetCountdown, getTierLabel, isAccountAbnormal } from '@/utils/quota'
+import {
+  formatDateTime,
+  formatResetCountdown,
+  getTierLabel,
+  isAccountAbnormal,
+  mergeAccountModels,
+  type MergedModelQuota,
+} from '@/utils/quota'
 import type { Account, TotpCodeResult } from '@/types/models'
 
 const props = defineProps<{
@@ -80,6 +87,12 @@ const displayedRefreshToken = computed(() => {
   if (!rt) return ''
   return refreshTokenRevealed.value ? rt : maskToken(rt)
 })
+const mergedModels = computed(() => mergeAccountModels(props.account))
+
+function formatMergedModelTooltip(m: MergedModelQuota): string {
+  if (m.variants.length <= 1) return m.baseId
+  return m.variants.map((v) => `${v.depthLabel}: ${v.name} (${v.percentage}%)`).join('\n')
+}
 
 function getEffectiveLoginAccount(acc: Account): string {
   return acc.loginAccount?.trim() || acc.email
@@ -703,35 +716,49 @@ async function openValidationUrl(url: string) {
         </div>
       </section>
 
-      <!-- 全量模型配额明细 -->
+      <!-- 模型配额明细（自动合并同一模型的不同思考深度） -->
       <section class="space-y-2.5">
-        <div class="flex items-center justify-between">
+        <div class="flex items-center justify-between gap-2">
           <h3 class="text-xs font-semibold" style="color: var(--text-primary)">
-            全量模型配额 ({{ account.quota?.models?.length ?? 0 }})
+            模型配额 ({{ mergedModels.length }})
           </h3>
-          <span v-if="account.quota?.lastUpdated" class="text-[11px] tabular-nums" style="color: var(--text-muted)">
+          <span v-if="account.quota?.lastUpdated" class="text-[11px] tabular-nums shrink-0" style="color: var(--text-muted)">
             更新于 {{ formatDateTime(account.quota.lastUpdated) }}
           </span>
         </div>
 
-        <div v-if="account.quota?.models?.length" class="space-y-2.5">
+        <div v-if="mergedModels.length" class="space-y-2.5">
           <div
-            v-for="m in account.quota.models"
-            :key="m.name"
+            v-for="m in mergedModels"
+            :key="m.key"
             class="p-2.5 rounded-xl border space-y-1.5"
             style="border-color: var(--border-subtle); background-color: var(--bg-app)"
           >
             <div class="flex items-center justify-between gap-2 text-xs">
-              <span class="font-medium truncate" style="color: var(--text-primary)" :title="m.name">
-                {{ m.displayName || m.name }}
+              <span class="font-medium truncate" style="color: var(--text-primary)" :title="formatMergedModelTooltip(m)">
+                {{ m.displayName }}
               </span>
               <span class="font-mono-num font-semibold shrink-0" style="color: var(--text-primary)">
                 {{ m.percentage }}%
               </span>
             </div>
+
+            <!-- 合并多个思考深度时展示对应深度标签（若不同深度剩余额度不同则附带各自百分比） -->
+            <div v-if="m.variants.length > 1" class="flex items-center flex-wrap gap-1">
+              <span
+                v-for="v in m.variants"
+                :key="v.name"
+                class="px-1.5 py-0.5 rounded text-[10px] font-medium font-mono-num"
+                style="background-color: var(--bg-subtle); color: var(--text-secondary)"
+                :title="`${v.name} · ${v.percentage}%`"
+              >
+                {{ v.depthLabel }}<template v-if="m.hasMixedPercentages"> {{ v.percentage }}%</template>
+              </span>
+            </div>
+
             <QuotaBar :percentage="m.percentage" />
-            <div class="flex items-center justify-between text-[11px]" style="color: var(--text-muted)">
-              <span class="font-mono-num truncate max-w-[180px]">{{ m.name }}</span>
+            <div class="flex items-center justify-between gap-2 text-[11px]" style="color: var(--text-muted)">
+              <span class="font-mono-num truncate min-w-0" :title="formatMergedModelTooltip(m)">{{ m.baseId }}</span>
               <span class="tabular-nums shrink-0">
                 {{ m.resetTime ? `重置 ${formatResetCountdown(m.resetTime)}` : '未返回重置时间' }}
               </span>
