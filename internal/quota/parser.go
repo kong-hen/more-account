@@ -151,8 +151,39 @@ type rawModelsResponse struct {
 	QuotaSummary map[string]any          `json:"quota_summary"`
 }
 
+// isExcludedNonAntigravityModel 排除非反重力客户端的模型（如 Gemini 3 Flash、Flash Image、Flash Lite 等）。
+func isExcludedNonAntigravityModel(name, displayName string) bool {
+	norm := func(s string) string {
+		s = strings.ToLower(strings.TrimSpace(s))
+		s = strings.ReplaceAll(s, ".", "-")
+		s = strings.ReplaceAll(s, " ", "-")
+		return s
+	}
+	n := norm(name)
+	d := norm(displayName)
+	for _, target := range []string{
+		"gemini-3-1-flash-image",
+		"gemini-3-1-flash-lite",
+		"gemini-3-5-flash-lite",
+	} {
+		if strings.Contains(n, target) || strings.Contains(d, target) {
+			return true
+		}
+	}
+	// 精确排除 gemini-3-flash（保留 gemini-3.8-flash 等其他版本）
+	for _, candidate := range []string{n, d} {
+		if candidate == "gemini-3-flash" || strings.HasPrefix(candidate, "gemini-3-flash-") || strings.HasPrefix(candidate, "gemini-3-flash(") {
+			return true
+		}
+	}
+	return false
+}
+
 // isTrackedModel 过滤保留 Antigravity 核心模型系列（同时匹配原始 ID 与 displayName，兼容 MODEL_PLACEHOLDER_* 占位模型）。
 func isTrackedModel(name, displayName string) bool {
+	if isExcludedNonAntigravityModel(name, displayName) {
+		return false
+	}
 	combined := strings.ToLower(name + " " + displayName)
 	return strings.Contains(combined, "gemini") ||
 		strings.Contains(combined, "claude") ||

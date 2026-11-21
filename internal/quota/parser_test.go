@@ -95,6 +95,30 @@ func TestClientFetchQuotaEndToEnd(t *testing.T) {
 							"resetTime":         "2026-11-21T16:30:00Z",
 						},
 					},
+					"gemini-3-flash": map[string]any{
+						"displayName": "Gemini 3 Flash",
+						"quotaInfo": map[string]any{
+							"remainingFraction": 1.0,
+						},
+					},
+					"gemini-3.1-flash-image": map[string]any{
+						"displayName": "Gemini 3.1 Flash Image",
+						"quotaInfo": map[string]any{
+							"remainingFraction": 1.0,
+						},
+					},
+					"gemini-3.1-flash-lite": map[string]any{
+						"displayName": "Gemini 3.1 Flash Lite",
+						"quotaInfo": map[string]any{
+							"remainingFraction": 1.0,
+						},
+					},
+					"gemini-3.5-flash-lite": map[string]any{
+						"displayName": "Gemini 3.5 Flash Lite",
+						"quotaInfo": map[string]any{
+							"remainingFraction": 1.0,
+						},
+					},
 					"irrelevant-internal-model": map[string]any{
 						"displayName": "Other",
 						"quotaInfo": map[string]any{
