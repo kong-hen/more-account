@@ -123,9 +123,9 @@ onBeforeUnmount(() => {
 
 function handleOpenDetail(account: Account) {
   if (appStore.activeDetailAccountId === account.id) {
-    appStore.activeDetailAccountId = null
+    appStore.requestSelectDetailAccount(null)
   } else {
-    appStore.activeDetailAccountId = account.id
+    appStore.requestSelectDetailAccount(account.id)
   }
 }
 
@@ -235,7 +235,7 @@ const refreshButtonTooltip = computed(() => {
             <span>筛选</span>
             <span
               v-if="appStore.activeFilterCount > 0"
-              class="px-1.5 py-0.2 rounded-full text-[10.5px] font-semibold text-white tabular-nums"
+              class="px-1.5 py-0.5 rounded-full text-[10.5px] font-semibold text-white tabular-nums"
               style="background-color: var(--accent)"
             >
               {{ appStore.activeFilterCount }}

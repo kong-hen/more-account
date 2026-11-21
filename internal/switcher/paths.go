@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"more-account/internal/storage"
 )
 
 // ClientInstallInfo 描述本机探测到的反重力客户端安装状态。
@@ -16,19 +18,75 @@ type ClientInstallInfo struct {
 	CliDirOK    bool   `json:"cliDirOk"`
 }
 
+func windowsAppDataDir(home string) string {
+	if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+		return appData
+	}
+	if home != "" {
+		return filepath.Join(home, "AppData", "Roaming")
+	}
+	return ""
+}
+
+func windowsLocalAppDataDir(home string) string {
+	if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+		return localAppData
+	}
+	if home != "" {
+		return filepath.Join(home, "AppData", "Local")
+	}
+	return ""
+}
+
+// isValidClientAppPath 校验客户端路径确实为可执行应用包（macOS .app）或常规可执行文件，拒绝普通目录（如 "/" 或 "~"）防止进程匹配越界。
+func isValidClientAppPath(raw string) bool {
+	return isValidClientAppPathForOS(raw, runtime.GOOS)
+}
+
+func isValidClientAppPathForOS(raw, goos string) bool {
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" {
+		return false
+	}
+	st, err := os.Stat(cleaned)
+	if err != nil {
+		return false
+	}
+	if st.IsDir() {
+		if goos == "darwin" && strings.HasSuffix(strings.ToLower(cleaned), ".app") {
+			macosDir, mErr := os.Stat(filepath.Join(cleaned, "Contents", "MacOS"))
+			return mErr == nil && macosDir.IsDir()
+		}
+		return false
+	}
+	if goos == "darwin" || goos == "linux" {
+		return st.Mode()&0111 != 0
+	}
+	return true
+}
+
 // DefaultDesktopStateDBPath 返回旧版 Antigravity 桌面端 state.vscdb 路径。
 func DefaultDesktopStateDBPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		home = ""
 	}
 	switch runtime.GOOS {
 	case "darwin":
+		if home == "" {
+			return ""
+		}
 		return filepath.Join(home, "Library", "Application Support", "Antigravity", "User", "globalStorage", "state.vscdb")
 	case "windows":
-		appData := os.Getenv("APPDATA")
+		appData := windowsAppDataDir(home)
+		if appData == "" {
+			return ""
+		}
 		return filepath.Join(appData, "Antigravity", "User", "globalStorage", "state.vscdb")
 	default:
+		if home == "" {
+			return ""
+		}
 		return filepath.Join(home, ".config", "Antigravity", "User", "globalStorage", "state.vscdb")
 	}
 }
@@ -37,15 +95,24 @@ func DefaultDesktopStateDBPath() string {
 func DefaultIDEStateDBPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		home = ""
 	}
 	switch runtime.GOOS {
 	case "darwin":
+		if home == "" {
+			return ""
+		}
 		return filepath.Join(home, "Library", "Application Support", "Antigravity IDE", "User", "globalStorage", "state.vscdb")
 	case "windows":
-		appData := os.Getenv("APPDATA")
+		appData := windowsAppDataDir(home)
+		if appData == "" {
+			return ""
+		}
 		return filepath.Join(appData, "Antigravity IDE", "User", "globalStorage", "state.vscdb")
 	default:
+		if home == "" {
+			return ""
+		}
 		return filepath.Join(home, ".config", "Antigravity IDE", "User", "globalStorage", "state.vscdb")
 	}
 }
@@ -70,75 +137,73 @@ func AllExistingStateDBPaths() []string {
 	return existing
 }
 
-// ResolveDesktopAppPath 查找 Antigravity 桌面版应用路径（优先用户自定义配置）。
+// ResolveDesktopAppPath 查找 Antigravity 桌面版应用路径（优先用户自定义配置，支持 ~/ 展开与合法性校验）。
 func ResolveDesktopAppPath(customPath string) string {
-	if p := strings.TrimSpace(customPath); p != "" {
-		if _, err := os.Stat(p); err == nil {
-			return p
+	if p := storage.ExpandHomePath(customPath); p != "" {
+		if isValidClientAppPath(p) {
+			return filepath.Clean(p)
 		}
 	}
 	home, _ := os.UserHomeDir()
 	var candidates []string
 	switch runtime.GOOS {
 	case "darwin":
-		candidates = []string{
-			"/Applications/Antigravity.app",
-			filepath.Join(home, "Applications", "Antigravity.app"),
+		candidates = append(candidates, "/Applications/Antigravity.app")
+		if home != "" {
+			candidates = append(candidates, filepath.Join(home, "Applications", "Antigravity.app"))
 		}
 	case "windows":
-		localAppData := os.Getenv("LOCALAPPDATA")
-		programFiles := os.Getenv("ProgramFiles")
-		candidates = []string{
-			filepath.Join(localAppData, "Programs", "Antigravity", "Antigravity.exe"),
-			filepath.Join(programFiles, "Antigravity", "Antigravity.exe"),
+		if localAppData := windowsLocalAppDataDir(home); localAppData != "" {
+			candidates = append(candidates, filepath.Join(localAppData, "Programs", "Antigravity", "Antigravity.exe"))
+		}
+		if programFiles := strings.TrimSpace(os.Getenv("ProgramFiles")); programFiles != "" {
+			candidates = append(candidates, filepath.Join(programFiles, "Antigravity", "Antigravity.exe"))
 		}
 	default:
-		candidates = []string{
-			"/usr/bin/antigravity",
-			"/usr/local/bin/antigravity",
-			filepath.Join(home, ".local", "bin", "antigravity"),
+		candidates = append(candidates, "/usr/bin/antigravity", "/usr/local/bin/antigravity")
+		if home != "" {
+			candidates = append(candidates, filepath.Join(home, ".local", "bin", "antigravity"))
 		}
 	}
 	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return c
+		if isValidClientAppPath(c) {
+			return filepath.Clean(c)
 		}
 	}
 	return ""
 }
 
-// ResolveIDEAppPath 查找 Antigravity IDE 应用路径（优先用户自定义配置）。
+// ResolveIDEAppPath 查找 Antigravity IDE 应用路径（优先用户自定义配置，支持 ~/ 展开与合法性校验）。
 func ResolveIDEAppPath(customPath string) string {
-	if p := strings.TrimSpace(customPath); p != "" {
-		if _, err := os.Stat(p); err == nil {
-			return p
+	if p := storage.ExpandHomePath(customPath); p != "" {
+		if isValidClientAppPath(p) {
+			return filepath.Clean(p)
 		}
 	}
 	home, _ := os.UserHomeDir()
 	var candidates []string
 	switch runtime.GOOS {
 	case "darwin":
-		candidates = []string{
-			"/Applications/Antigravity IDE.app",
-			filepath.Join(home, "Applications", "Antigravity IDE.app"),
+		candidates = append(candidates, "/Applications/Antigravity IDE.app")
+		if home != "" {
+			candidates = append(candidates, filepath.Join(home, "Applications", "Antigravity IDE.app"))
 		}
 	case "windows":
-		localAppData := os.Getenv("LOCALAPPDATA")
-		programFiles := os.Getenv("ProgramFiles")
-		candidates = []string{
-			filepath.Join(localAppData, "Programs", "Antigravity IDE", "Antigravity IDE.exe"),
-			filepath.Join(programFiles, "Antigravity IDE", "Antigravity IDE.exe"),
+		if localAppData := windowsLocalAppDataDir(home); localAppData != "" {
+			candidates = append(candidates, filepath.Join(localAppData, "Programs", "Antigravity IDE", "Antigravity IDE.exe"))
+		}
+		if programFiles := strings.TrimSpace(os.Getenv("ProgramFiles")); programFiles != "" {
+			candidates = append(candidates, filepath.Join(programFiles, "Antigravity IDE", "Antigravity IDE.exe"))
 		}
 	default:
-		candidates = []string{
-			"/usr/bin/antigravity-ide",
-			"/usr/local/bin/antigravity-ide",
-			filepath.Join(home, ".local", "bin", "antigravity-ide"),
+		candidates = append(candidates, "/usr/bin/antigravity-ide", "/usr/local/bin/antigravity-ide")
+		if home != "" {
+			candidates = append(candidates, filepath.Join(home, ".local", "bin", "antigravity-ide"))
 		}
 	}
 	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return c
+		if isValidClientAppPath(c) {
+			return filepath.Clean(c)
 		}
 	}
 	return ""

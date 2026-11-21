@@ -2,6 +2,9 @@ package oauth
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,12 +44,10 @@ type TokenResponse struct {
 
 // UserInfo 对应 Google UserInfo 响应体。
 type UserInfo struct {
-	ID         string `json:"id"`
 	Email      string `json:"email"`
 	Name       string `json:"name"`
 	GivenName  string `json:"given_name"`
 	FamilyName string `json:"family_name"`
-	Picture    string `json:"picture"`
 }
 
 // DisplayName 返回优先展示的用户名。
@@ -101,8 +102,27 @@ func (c *Client) userInfoURL() string {
 	return DefaultUserInfoURL
 }
 
+// GeneratePKCE 生成符合 RFC 7636 的 S256 PKCE code_verifier 与 code_challenge。
+func GeneratePKCE() (verifier, challenge string) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		fallback := fmt.Sprintf("pkce_fallback_%d_antigravity_more_account", time.Now().UnixNano())
+		sum := sha256.Sum256([]byte(fallback))
+		return fallback, base64.RawURLEncoding.EncodeToString(sum[:])
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(raw[:])
+	sum := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge
+}
+
 // BuildAuthURL 生成 Google OAuth2 授权页地址。
 func BuildAuthURL(redirectURI, state string) string {
+	return BuildAuthURLWithPKCE(redirectURI, state, "")
+}
+
+// BuildAuthURLWithPKCE 生成带可选 S256 PKCE 参数的 Google OAuth2 授权页地址。
+func BuildAuthURLWithPKCE(redirectURI, state, codeChallenge string) string {
 	scopes := strings.Join([]string{
 		"openid",
 		"https://www.googleapis.com/auth/cloud-platform",
@@ -124,18 +144,25 @@ func BuildAuthURL(redirectURI, state string) string {
 	if strings.TrimSpace(state) != "" {
 		params.Set("state", strings.TrimSpace(state))
 	}
+	if strings.TrimSpace(codeChallenge) != "" {
+		params.Set("code_challenge", strings.TrimSpace(codeChallenge))
+		params.Set("code_challenge_method", "S256")
+	}
 
 	return DefaultAuthURL + "?" + params.Encode()
 }
 
-// ExchangeCode 使用授权码向 Google 换取 Access Token 和 Refresh Token。
-func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI string) (*TokenResponse, error) {
+// ExchangeCode 使用授权码（及可选 PKCE code_verifier）向 Google 换取 Access Token 和 Refresh Token。
+func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI string, codeVerifier ...string) (*TokenResponse, error) {
 	form := url.Values{}
 	form.Set("client_id", DefaultClientID)
 	form.Set("client_secret", DefaultClientSecret)
 	form.Set("code", strings.TrimSpace(code))
 	form.Set("redirect_uri", redirectURI)
 	form.Set("grant_type", "authorization_code")
+	if len(codeVerifier) > 0 && strings.TrimSpace(codeVerifier[0]) != "" {
+		form.Set("code_verifier", strings.TrimSpace(codeVerifier[0]))
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.tokenURL(), strings.NewReader(form.Encode()))
 	if err != nil {
@@ -278,7 +305,7 @@ func (c *Client) EnsureFreshToken(ctx context.Context, current model.TokenData) 
 	return updated, true, nil
 }
 
-// MergeRefreshedToken 将刷新结果合并至现有 TokenData，保留原有项目 ID 与元数据。
+// MergeRefreshedToken 将刷新结果合并至现有 TokenData，保留原有项目 ID、客户端标识与深拷贝元数据。
 func MergeRefreshedToken(current model.TokenData, resp *TokenResponse) model.TokenData {
 	now := time.Now().Unix()
 	refresh := strings.TrimSpace(resp.RefreshToken)
@@ -289,6 +316,15 @@ func MergeRefreshedToken(current model.TokenData, resp *TokenResponse) model.Tok
 	if idToken == "" {
 		idToken = current.IDToken
 	}
+	clientKey := strings.TrimSpace(current.OAuthClientKey)
+	if clientKey == "" {
+		clientKey = DefaultOAuthClientKey
+	}
+	var gcpCopy *bool
+	if current.IsGcpTos != nil {
+		v := *current.IsGcpTos
+		gcpCopy = &v
+	}
 	return model.TokenData{
 		AccessToken:     resp.AccessToken,
 		RefreshToken:    refresh,
@@ -297,8 +333,8 @@ func MergeRefreshedToken(current model.TokenData, resp *TokenResponse) model.Tok
 		TokenType:       "Bearer",
 		Email:           current.Email,
 		ProjectID:       current.ProjectID,
-		IsGcpTos:        current.IsGcpTos,
-		OAuthClientKey:  DefaultOAuthClientKey,
+		IsGcpTos:        gcpCopy,
+		OAuthClientKey:  clientKey,
 		IDToken:         idToken,
 	}
 }

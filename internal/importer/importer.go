@@ -122,6 +122,8 @@ func (s *Service) AddByRefreshToken(ctx context.Context, refreshToken string, gr
 	if s.quotaService != nil {
 		if refreshedAcc, qErr := s.quotaService.RefreshAccount(ctx, acc.ID); qErr == nil {
 			acc = refreshedAcc
+		} else if latest, ok := s.store.GetAccount(acc.ID); ok {
+			acc = latest
 		}
 	}
 	return acc, nil
@@ -154,8 +156,11 @@ func (s *Service) ImportFromLocal(ctx context.Context, groupID string) (model.Ac
 	if err != nil {
 		return model.Account{}, err
 	}
-	// 本机导入的账号即当前正在使用的账号，同步将其设为当前激活账号
+	// 本机导入的账号即当前正在使用的账号，同步将其设为当前激活账号并重读最新时间戳
 	_ = s.store.SetCurrentAccountID(acc.ID)
+	if latest, ok := s.store.GetAccount(acc.ID); ok {
+		acc = latest
+	}
 	return acc, nil
 }
 

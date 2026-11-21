@@ -19,19 +19,21 @@ var ErrOAuthCanceled = errors.New("已取消 OAuth 授权")
 
 // LoginSession 表示一次进行中的浏览器 OAuth 授权会话。
 type LoginSession struct {
-	AuthURL     string `json:"authUrl"`
-	RedirectURI string `json:"redirectUri"`
-	State       string `json:"state"`
+	AuthURL      string `json:"authUrl"`
+	RedirectURI  string `json:"redirectUri"`
+	State        string `json:"state"`
+	CodeVerifier string `json:"-"`
 }
 
 type activeSession struct {
-	state       string
-	redirectURI string
-	server      *http.Server
-	codeCh      chan string
-	errCh       chan error
-	cancelCh    chan struct{}
-	once        sync.Once
+	state        string
+	codeVerifier string
+	redirectURI  string
+	server       *http.Server
+	codeCh       chan string
+	errCh        chan error
+	cancelCh     chan struct{}
+	once         sync.Once
 }
 
 func (a *activeSession) deliverCode(code string) {
@@ -88,18 +90,28 @@ func (m *LoginManager) StartSession() (LoginSession, error) {
 	addr := listener.Addr().(*net.TCPAddr)
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/oauth-callback", addr.Port)
 	state := randomState()
+	verifier, challenge := GeneratePKCE()
 
 	sess := &activeSession{
-		state:       state,
-		redirectURI: redirectURI,
-		codeCh:      make(chan string, 1),
-		errCh:       make(chan error, 1),
-		cancelCh:    make(chan struct{}),
+		state:        state,
+		codeVerifier: verifier,
+		redirectURI:  redirectURI,
+		codeCh:       make(chan string, 1),
+		errCh:        make(chan error, 1),
+		cancelCh:     make(chan struct{}),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth-callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
+		// 第一步强制校验 state 非空且与当前会话一致：任何缺少或不匹配 state 的本地扫描/预取/跨站请求仅返回 400，
+		// 绝不消费 sync.Once 或销毁当前等待 Google 合法重定向的授权会话（防止本地跨站 DoS 与 Login CSRF）。
+		if gotState := strings.TrimSpace(q.Get("state")); gotState == "" || gotState != sess.state {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(callbackHTML(false, "安全校验失败（state 缺失或不匹配），请返回原有授权页面完成操作。")))
+			return
+		}
 		if errParam := strings.TrimSpace(q.Get("error")); errParam != "" {
 			sess.deliverErr(fmt.Errorf("Google 授权被拒绝: %s", errParam))
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -107,16 +119,9 @@ func (m *LoginManager) StartSession() (LoginSession, error) {
 			_, _ = w.Write([]byte(callbackHTML(false, "授权失败，请返回 More Account 查看详情。")))
 			return
 		}
-		// 严格强制校验 state 非空且与本次会话一致，防止本地 OAuth Login CSRF 攻击。
-		if gotState := strings.TrimSpace(q.Get("state")); gotState == "" || gotState != sess.state {
-			sess.deliverErr(fmt.Errorf("OAuth state 校验失败或缺失"))
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(callbackHTML(false, "安全校验失败（state 缺失或不匹配），请重新发起授权。")))
-			return
-		}
 		code := strings.TrimSpace(q.Get("code"))
 		if code == "" {
+			sess.deliverErr(fmt.Errorf("Google 授权回调缺少 code 参数"))
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(callbackHTML(false, "回调参数缺少 code，请重试。")))
@@ -142,15 +147,11 @@ func (m *LoginManager) StartSession() (LoginSession, error) {
 	}()
 
 	return LoginSession{
-		AuthURL:     BuildAuthURL(redirectURI, state),
-		RedirectURI: redirectURI,
-		State:       state,
+		AuthURL:      BuildAuthURLWithPKCE(redirectURI, state, challenge),
+		RedirectURI:  redirectURI,
+		State:        state,
+		CodeVerifier: verifier,
 	}, nil
-}
-
-// WaitForCode 阻塞等待当前会话的浏览器回调、手动提交回调链接或取消信号。
-func (m *LoginManager) WaitForCode(ctx context.Context) (string, error) {
-	return m.WaitForState(ctx, "")
 }
 
 // WaitForState 按指定 state 绑定等待对应会话，退出时仅清理自身会话，绝不误杀并发重启的新会话。
@@ -212,12 +213,12 @@ func (m *LoginManager) SubmitCallbackURL(rawURL string) error {
 		return fmt.Errorf("无法解析回调链接: %w", err)
 	}
 	q := parsed.Query()
+	if gotState := strings.TrimSpace(q.Get("state")); gotState == "" || gotState != sess.state {
+		return fmt.Errorf("回调链接缺少 state 或与本次授权不匹配，请确认粘贴了正确的回调地址")
+	}
 	if errParam := strings.TrimSpace(q.Get("error")); errParam != "" {
 		sess.deliverErr(fmt.Errorf("Google 授权返回错误: %s", errParam))
 		return nil
-	}
-	if gotState := strings.TrimSpace(q.Get("state")); gotState == "" || gotState != sess.state {
-		return fmt.Errorf("回调链接缺少 state 或与本次授权不匹配，请重新发起授权")
 	}
 	code := strings.TrimSpace(q.Get("code"))
 	if code == "" {

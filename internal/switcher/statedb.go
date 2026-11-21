@@ -1,6 +1,7 @@
 package switcher
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -35,9 +36,14 @@ func buildSQLiteURI(dbPath string, readOnly bool) string {
 	return u.String()
 }
 
-func readExistingTopic(tx *sql.Tx, key string) ([]byte, error) {
+type sqlQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func readExistingTopic(ctx context.Context, q sqlQuerier, key string) ([]byte, error) {
 	var existingVal string
-	err := tx.QueryRow(`SELECT value FROM ItemTable WHERE key = ?`, key).Scan(&existingVal)
+	err := q.QueryRowContext(ctx, `SELECT value FROM ItemTable WHERE key = ?`, key).Scan(&existingVal)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -54,8 +60,8 @@ func readExistingTopic(tx *sql.Tx, key string) ([]byte, error) {
 	return decoded, nil
 }
 
-func upsertTopicSentinel(tx *sql.Tx, tableKey, sentinelKey string, payload []byte) error {
-	currentTopic, err := readExistingTopic(tx, tableKey)
+func upsertTopicSentinel(ctx context.Context, q sqlQuerier, tableKey, sentinelKey string, payload []byte) error {
+	currentTopic, err := readExistingTopic(ctx, q, tableKey)
 	if err != nil {
 		return fmt.Errorf("读取既有 %s 失败: %w", tableKey, err)
 	}
@@ -67,15 +73,16 @@ func upsertTopicSentinel(tx *sql.Tx, tableKey, sentinelKey string, payload []byt
 		topic = append(topic, CreateUnifiedTopicEntry(sentinelKey, payload)...)
 	}
 	if len(topic) == 0 {
-		_, err = tx.Exec(`DELETE FROM ItemTable WHERE key = ?`, tableKey)
+		_, err = q.ExecContext(ctx, `DELETE FROM ItemTable WHERE key = ?`, tableKey)
 		return err
 	}
-	_, err = tx.Exec(`INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)`,
+	_, err = q.ExecContext(ctx, `INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)`,
 		tableKey, base64.StdEncoding.EncodeToString(topic))
 	return err
 }
 
-// InjectAccountToStateDB 将账号凭据以事务 + Protobuf/Base64 格式原子注入 Antigravity IDE / 旧版 state.vscdb。
+// InjectAccountToStateDB 将账号凭据以 BEGIN IMMEDIATE 写事务 + Protobuf/Base64 格式原子注入 Antigravity IDE / 旧版 state.vscdb，
+// 避免 DEFERRED 事务先读后写锁升级触发 SQLITE_BUSY，并在落盘后收紧文件权限至 0600。
 func InjectAccountToStateDB(dbPath string, account model.Account) error {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		return fmt.Errorf("创建 state.vscdb 目录失败: %w", err)
@@ -85,15 +92,27 @@ func InjectAccountToStateDB(dbPath string, account model.Account) error {
 	if err != nil {
 		return fmt.Errorf("打开 state.vscdb 失败: %w", err)
 	}
+	db.SetMaxOpenConns(1)
 	defer db.Close()
 
-	tx, err := db.Begin()
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("开启 state.vscdb 事务失败: %w", err)
+		return fmt.Errorf("获取 state.vscdb 连接失败: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+		_ = conn.Close()
+	}()
 
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT)`); err != nil {
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("开启 state.vscdb 写事务失败: %w", err)
+	}
+
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT)`); err != nil {
 		return fmt.Errorf("初始化 ItemTable 失败: %w", err)
 	}
 
@@ -105,35 +124,39 @@ func InjectAccountToStateDB(dbPath string, account model.Account) error {
 		account.Token.IDToken,
 		account.Email,
 	)
-	if err := upsertTopicSentinel(tx, "antigravityUnifiedStateSync.oauthToken", "oauthTokenInfoSentinelKey", oauthInfo); err != nil {
+	if err := upsertTopicSentinel(ctx, conn, "antigravityUnifiedStateSync.oauthToken", "oauthTokenInfoSentinelKey", oauthInfo); err != nil {
 		return fmt.Errorf("写入 oauthToken 失败: %w", err)
 	}
 
 	if email := strings.TrimSpace(account.Email); email != "" {
-		if err := upsertTopicSentinel(tx, "antigravityUnifiedStateSync.userStatus", "userStatusSentinelKey", CreateMinimalUserStatusPayload(email)); err != nil {
+		if err := upsertTopicSentinel(ctx, conn, "antigravityUnifiedStateSync.userStatus", "userStatusSentinelKey", CreateMinimalUserStatusPayload(email)); err != nil {
 			return fmt.Errorf("写入 userStatus 失败: %w", err)
 		}
 	}
 
 	if proj := strings.TrimSpace(account.Token.ProjectID); proj != "" {
-		if err := upsertTopicSentinel(tx, "antigravityUnifiedStateSync.enterprisePreferences", "enterpriseGcpProjectId", CreateStringValuePayload(proj)); err != nil {
+		if err := upsertTopicSentinel(ctx, conn, "antigravityUnifiedStateSync.enterprisePreferences", "enterpriseGcpProjectId", CreateStringValuePayload(proj)); err != nil {
 			return fmt.Errorf("写入 enterprisePreferences 失败: %w", err)
 		}
 	} else {
 		// 仅移除 enterpriseGcpProjectId sentinel，保留同 key 下其他偏好项。
-		if err := upsertTopicSentinel(tx, "antigravityUnifiedStateSync.enterprisePreferences", "enterpriseGcpProjectId", nil); err != nil {
+		if err := upsertTopicSentinel(ctx, conn, "antigravityUnifiedStateSync.enterprisePreferences", "enterpriseGcpProjectId", nil); err != nil {
 			return fmt.Errorf("清理 enterpriseGcpProjectId 失败: %w", err)
 		}
 	}
 
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)`,
+	if _, err := conn.ExecContext(ctx, `INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)`,
 		"antigravityOnboarding", "true"); err != nil {
 		return fmt.Errorf("写入 Onboarding 标记失败: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("提交 state.vscdb 事务失败: %w", err)
 	}
+	committed = true
+
+	// 收紧包含明文令牌的 SQLite 数据库权限至仅当前用户可读写
+	_ = os.Chmod(dbPath, 0600)
 	return nil
 }
 

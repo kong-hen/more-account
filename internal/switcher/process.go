@@ -42,38 +42,46 @@ func stopClientProcesses(target, customDesktop, customIDE string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		appName := "Antigravity"
-		matchPattern := "/Applications/Antigravity.app"
+		matchTarget := "/Applications/Antigravity.app"
 		if target == "ide" {
 			appName = "Antigravity IDE"
-			matchPattern = "/Applications/Antigravity IDE.app"
+			matchTarget = "/Applications/Antigravity IDE.app"
 		}
 		if resolvedPath != "" {
-			matchPattern = resolvedPath
+			matchTarget = resolvedPath
 			base := filepath.Base(resolvedPath)
 			if strings.HasSuffix(strings.ToLower(base), ".app") {
 				appName = strings.TrimSuffix(base, filepath.Ext(base))
+			} else if base != "" {
+				appName = base
 			}
 		}
 
-		// 仅在目标客户端确实正在运行时才执行 AppleScript 退出，避免未安装或未启动时触发系统弹窗或误拉起应用。
-		if !hasMatchingProcess(matchPattern) {
+		// 仅在目标客户端确实正在运行时才执行退出动作，避免未安装或未启动时触发系统弹窗。
+		if len(findMacClientPIDs(matchTarget)) == 0 {
 			return nil
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = exec.CommandContext(ctx, "osascript", "-e", fmt.Sprintf(`tell application %q to quit`, appName)).Run()
-		cancel()
+		if strings.HasSuffix(strings.ToLower(matchTarget), ".app") {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = exec.CommandContext(ctx, "osascript", "-e", fmt.Sprintf(`tell application %q to quit`, appName)).Run()
+			cancel()
+		} else {
+			signalOwnedPIDs(findMacClientPIDs(matchTarget), syscall.SIGTERM)
+		}
 
 		deadline := time.Now().Add(8 * time.Second)
 		for time.Now().Before(deadline) {
-			if !hasMatchingProcess(matchPattern) {
+			if len(findMacClientPIDs(matchTarget)) == 0 {
 				return nil
 			}
 			time.Sleep(250 * time.Millisecond)
 		}
-		// 若仍未退出，发送 SIGTERM
-		_ = exec.Command("pkill", "-TERM", "-f", matchPattern).Run()
-		time.Sleep(800 * time.Millisecond)
+		// 若仍未退出，仅向当前用户精确匹配出的客户端进程发送 SIGTERM（绝不调用未转义的 pkill -f）。
+		if remaining := findMacClientPIDs(matchTarget); len(remaining) > 0 {
+			signalOwnedPIDs(remaining, syscall.SIGTERM)
+			time.Sleep(800 * time.Millisecond)
+		}
 		return nil
 
 	case "windows":
@@ -109,6 +117,89 @@ func stopClientProcesses(target, customDesktop, customIDE string) error {
 		}
 		stopLinuxProcessesByExe(resolvedReal, expectedBase)
 		return nil
+	}
+}
+
+// findMacClientPIDs 枚举当前用户（ps -xo）进程并按可执行路径前缀精确匹配目标客户端，排除当前进程自身。
+func findMacClientPIDs(appOrExePath string) []int {
+	cleanTarget := filepath.Clean(strings.TrimSpace(appOrExePath))
+	if cleanTarget == "" || cleanTarget == "/" || cleanTarget == "." {
+		return nil
+	}
+	evalTarget := ""
+	if r, err := filepath.EvalSymlinks(cleanTarget); err == nil {
+		evalTarget = filepath.Clean(r)
+	}
+
+	out, err := exec.Command("ps", "-xo", "pid=,command=").Output()
+	if err != nil {
+		return nil
+	}
+
+	selfPID := os.Getpid()
+	var pids []int
+	for _, line := range strings.Split(string(out), "\n") {
+		pid, cmdLine, ok := parsePSLine(line)
+		if !ok || pid == selfPID {
+			continue
+		}
+		if matchMacProcessCommand(cmdLine, cleanTarget, evalTarget) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// matchMacProcessCommand 判断 ps 输出的完整命令行是否以目标 .app 包内可执行文件或指定二进制作为启动程序，
+// 采用字面量前缀匹配，彻底免疫正则元字符注入与编辑器/脚本参数误匹配。
+func matchMacProcessCommand(cmdLine, cleanTarget, evalTarget string) bool {
+	trimmed := strings.TrimSpace(cmdLine)
+	if trimmed == "" {
+		return false
+	}
+	candidates := []string{cleanTarget}
+	if evalTarget != "" && evalTarget != cleanTarget {
+		candidates = append(candidates, evalTarget)
+	}
+	for _, target := range candidates {
+		if target == "" || target == "/" || target == "." {
+			continue
+		}
+		if strings.HasSuffix(strings.ToLower(target), ".app") {
+			prefix := target + "/Contents/"
+			if strings.HasPrefix(trimmed, prefix) {
+				return true
+			}
+		} else {
+			if trimmed == target || strings.HasPrefix(trimmed, target+" ") || strings.HasPrefix(trimmed, target+"\t") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func parsePSLine(line string) (int, string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return 0, "", false
+	}
+	spIdx := strings.IndexAny(trimmed, " \t")
+	if spIdx <= 0 {
+		return 0, "", false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(trimmed[:spIdx]))
+	if err != nil || pid <= 1 {
+		return 0, "", false
+	}
+	return pid, strings.TrimSpace(trimmed[spIdx+1:]), true
+}
+
+func signalOwnedPIDs(pids []int, sig syscall.Signal) {
+	for _, pid := range pids {
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Signal(sig)
+		}
 	}
 }
 
@@ -152,17 +243,8 @@ func stopLinuxProcessesByExe(expectedRealPath, expectedBase string) {
 	}
 }
 
-func hasMatchingProcess(pattern string) bool {
-	cmd := exec.Command("pgrep", "-f", pattern)
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) != ""
-}
-
-// snapshotAndStopMacHubs 在 macOS 上协同停止共享凭据的 agy --hub --app_data_dir antigravity 进程，
-// 避免其内存缓存覆盖刚刚写入的新账号凭据。
+// snapshotAndStopMacHubs 在 macOS 上协同停止当前用户下共享凭据的 agy --hub --app_data_dir antigravity 进程，
+// 避免其内存缓存覆盖刚刚写入的新账号凭据。仅使用 ps -xo（限定当前 UID）并在确认信号投递成功后才纳入重启列表。
 func snapshotAndStopMacHubs() []runningHub {
 	if runtime.GOOS != "darwin" {
 		return nil
@@ -177,7 +259,7 @@ func snapshotAndStopMacHubs() []runningHub {
 		return nil
 	}
 
-	out, err := exec.Command("ps", "-axo", "pid=,command=").Output()
+	out, err := exec.Command("ps", "-xo", "pid=,command=").Output()
 	if err != nil {
 		return nil
 	}
@@ -185,21 +267,15 @@ func snapshotAndStopMacHubs() []runningHub {
 	selfPID := os.Getpid()
 	var hubs []runningHub
 	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || !strings.Contains(line, "--hub") || !strings.Contains(line, "antigravity") {
+		if !strings.Contains(line, "--hub") || !strings.Contains(line, "antigravity") {
 			continue
 		}
-		spIdx := strings.IndexAny(line, " \t")
-		if spIdx <= 0 {
+		pid, rest, ok := parsePSLine(line)
+		if !ok || pid == selfPID {
 			continue
 		}
-		pid, err := strconv.Atoi(strings.TrimSpace(line[:spIdx]))
-		if err != nil || pid <= 0 || pid == selfPID {
-			continue
-		}
-		rest := strings.TrimSpace(line[spIdx+1:])
 
-		// 优先按已知完整路径前缀切分命令行，避免用户主目录含空格时 strings.Fields 拆坏可执行路径。
+		// 严格限定必须是当前用户 ~/.gemini/bin/agy（或其真实符号链接目标）启动的进程。
 		var argsPart string
 		switch {
 		case strings.HasPrefix(rest, agyPath+" "):
@@ -207,34 +283,31 @@ func snapshotAndStopMacHubs() []runningHub {
 		case strings.HasPrefix(rest, rawAgyPath+" "):
 			argsPart = strings.TrimSpace(rest[len(rawAgyPath):])
 		default:
-			fields := strings.Fields(rest)
-			if len(fields) < 2 {
-				continue
-			}
-			cmdExe, _ := filepath.EvalSymlinks(fields[0])
-			if cmdExe != agyPath && filepath.Base(fields[0]) != "agy" {
-				continue
-			}
-			argsPart = strings.Join(fields[1:], " ")
+			continue
 		}
 
-		args := strings.Fields(argsPart)
+		args := splitCommandArgs(argsPart)
 		if !isAntigravityHubArgs(args) {
 			continue
 		}
-		if proc, err := os.FindProcess(pid); err == nil {
-			_ = proc.Signal(syscall.SIGTERM)
-			hubs = append(hubs, runningHub{
-				pid:  pid,
-				exe:  agyPath,
-				args: args,
-			})
+		proc, findErr := os.FindProcess(pid)
+		if findErr != nil {
+			continue
 		}
+		if sigErr := proc.Signal(syscall.SIGTERM); sigErr != nil {
+			// 无权限或已退出进程绝不记入待重启列表
+			continue
+		}
+		hubs = append(hubs, runningHub{
+			pid:  pid,
+			exe:  agyPath,
+			args: args,
+		})
 	}
 
 	if len(hubs) > 0 {
-		// 等待被停止的 hub 进程真正退出（最长 2 秒），减少竞态覆盖凭据的概率。
-		deadline := time.Now().Add(2 * time.Second)
+		// 等待被停止的 hub 进程真正退出（最长 2.5 秒），减少竞态覆盖凭据的概率。
+		deadline := time.Now().Add(2500 * time.Millisecond)
 		for time.Now().Before(deadline) {
 			anyAlive := false
 			for _, h := range hubs {
@@ -250,6 +323,57 @@ func snapshotAndStopMacHubs() []runningHub {
 		}
 	}
 	return hubs
+}
+
+// splitCommandArgs 解析命令行参数，支持单双引号与反斜杠转义空格，同时还原未加引号的常见路径参数。
+func splitCommandArgs(raw string) []string {
+	var args []string
+	var cur strings.Builder
+	inQuote := rune(0)
+	escaped := false
+	tokenStarted := false
+
+	for _, r := range raw {
+		if escaped {
+			cur.WriteRune(r)
+			escaped = false
+			tokenStarted = true
+			continue
+		}
+		if r == '\\' && inQuote != '\'' {
+			escaped = true
+			tokenStarted = true
+			continue
+		}
+		if inQuote != 0 {
+			if r == inQuote {
+				inQuote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+			tokenStarted = true
+			continue
+		}
+		if r == '\'' || r == '"' {
+			inQuote = r
+			tokenStarted = true
+			continue
+		}
+		if r == ' ' || r == '\t' {
+			if tokenStarted {
+				args = append(args, cur.String())
+				cur.Reset()
+				tokenStarted = false
+			}
+			continue
+		}
+		cur.WriteRune(r)
+		tokenStarted = true
+	}
+	if tokenStarted {
+		args = append(args, cur.String())
+	}
+	return args
 }
 
 func isPIDAlive(pid int) bool {
@@ -281,6 +405,13 @@ func restartMacHubs(hubs []runningHub) {
 		return
 	}
 	for _, h := range hubs {
+		// 若原 hub 进程尚未退出，稍等片刻；若仍存活则跳过拉起，杜绝双实例冲突。
+		if isPIDAlive(h.pid) {
+			time.Sleep(400 * time.Millisecond)
+			if isPIDAlive(h.pid) {
+				continue
+			}
+		}
 		cmd := exec.Command(h.exe, h.args...)
 		cmd.Stdin = nil
 		cmd.Stdout = nil
@@ -295,12 +426,12 @@ func launchClientApp(target, customDesktop, customIDE string) error {
 	if target == "ide" {
 		appPath = ResolveIDEAppPath(customIDE)
 		if appPath == "" {
-			return fmt.Errorf("未找到 Antigravity IDE 安装路径，请在设置中手动指定")
+			return fmt.Errorf("未找到有效的 Antigravity IDE 安装路径，请在设置中手动指定")
 		}
 	} else {
 		appPath = ResolveDesktopAppPath(customDesktop)
 		if appPath == "" {
-			return fmt.Errorf("未找到 Antigravity 桌面版安装路径，请在设置中手动指定")
+			return fmt.Errorf("未找到有效的 Antigravity 桌面版安装路径，请在设置中手动指定")
 		}
 	}
 

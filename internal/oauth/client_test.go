@@ -95,7 +95,7 @@ func TestLoginManagerManualCallbackSubmission(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	code, err := mgr.WaitForCode(ctx)
+	code, err := mgr.WaitForState(ctx, session.State)
 	if err != nil {
 		t.Fatalf("等待回调授权码失败: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestLoginManagerManualCallbackSubmission(t *testing.T) {
 	}
 }
 
-func TestLoginManagerRejectsMissingAndMismatchedState(t *testing.T) {
+func TestLoginManagerRejectsMissingAndMismatchedStateWithoutKillingSession(t *testing.T) {
 	mgr := NewLoginManager()
 	session, err := mgr.StartSession()
 	if err != nil {
@@ -112,7 +112,7 @@ func TestLoginManagerRejectsMissingAndMismatchedState(t *testing.T) {
 	}
 	defer mgr.Cancel()
 
-	// 手动粘贴缺少 state 的回调链接应被拒绝
+	// 手动粘贴缺少或不匹配 state 的回调链接应被拒绝
 	if err := mgr.SubmitCallbackURL(session.RedirectURI + "?code=forged-code"); err == nil {
 		t.Fatal("缺少 state 的手动回调链接应当被拒绝")
 	}
@@ -120,20 +120,82 @@ func TestLoginManagerRejectsMissingAndMismatchedState(t *testing.T) {
 		t.Fatal("state 不匹配的手动回调链接应当被拒绝")
 	}
 
-	// HTTP 回调缺少 state 时应返回 400 并让等待者收到错误（防止 Login CSRF）
-	resp, err := http.Get(session.RedirectURI + "?code=forged-http-code")
-	if err != nil {
-		t.Fatalf("请求本地 OAuth 回调失败: %v", err)
+	// HTTP 回调缺少 state、state 错误、或伪造无 state 的 error 参数均应返回 400，但不得销毁正在等待的合法会话
+	for _, forgedQuery := range []string{
+		"?code=forged-http-code",
+		"?code=forged-http-code&state=wrong-state",
+		"?error=access_denied",
+		"?error=access_denied&state=wrong-state",
+	} {
+		resp, err := http.Get(session.RedirectURI + forgedQuery)
+		if err != nil {
+			t.Fatalf("请求本地 OAuth 回调 (%s) 失败: %v", forgedQuery, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("伪造回调 (%s) 应返回 400，实际 %d", forgedQuery, resp.StatusCode)
+		}
 	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("缺少 state 的回调应返回 400，实际 %d", resp.StatusCode)
+
+	// 随后的合法回调依然可以正常完成授权
+	okResp, err := http.Get(session.RedirectURI + "?code=legit-code-777&state=" + url.QueryEscape(session.State))
+	if err != nil {
+		t.Fatalf("发送合法 OAuth 回调失败: %v", err)
+	}
+	_ = okResp.Body.Close()
+	if okResp.StatusCode != http.StatusOK {
+		t.Fatalf("合法回调应返回 200，实际 %d", okResp.StatusCode)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := mgr.WaitForState(ctx, session.State); err == nil {
-		t.Fatal("收到伪造回调后 WaitForState 不应成功返回 code")
+	gotCode, err := mgr.WaitForState(ctx, session.State)
+	if err != nil || gotCode != "legit-code-777" {
+		t.Fatalf("伪造请求不应中断会话，期望收到 legit-code-777，实际 code=%q err=%v", gotCode, err)
+	}
+}
+
+func TestPKCEGenerationAndExchangeCode(t *testing.T) {
+	mgr := NewLoginManager()
+	session, err := mgr.StartSession()
+	if err != nil {
+		t.Fatalf("启动 OAuth 会话失败: %v", err)
+	}
+	defer mgr.Cancel()
+
+	if strings.TrimSpace(session.CodeVerifier) == "" {
+		t.Fatal("StartSession 必须生成非空 PKCE CodeVerifier")
+	}
+	parsedAuth, err := url.Parse(session.AuthURL)
+	if err != nil {
+		t.Fatalf("解析 AuthURL 失败: %v", err)
+	}
+	if parsedAuth.Query().Get("code_challenge_method") != "S256" || parsedAuth.Query().Get("code_challenge") == "" {
+		t.Fatalf("AuthURL 缺少 PKCE S256 参数: %s", session.AuthURL)
+	}
+
+	var gotVerifier string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotVerifier = r.FormValue("code_verifier")
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken:  "at-pkce",
+			RefreshToken: "rt-pkce",
+			ExpiresIn:    3600,
+		})
+	}))
+	defer srv.Close()
+
+	client := &Client{
+		HTTPClient: srv.Client(),
+		TokenURL:   srv.URL,
+	}
+	tok, err := client.ExchangeCode(context.Background(), "code-1", session.RedirectURI, session.CodeVerifier)
+	if err != nil {
+		t.Fatalf("ExchangeCode 失败: %v", err)
+	}
+	if gotVerifier != session.CodeVerifier || tok.AccessToken != "at-pkce" {
+		t.Fatalf("ExchangeCode 未透传 code_verifier: got=%q want=%q", gotVerifier, session.CodeVerifier)
 	}
 }
 

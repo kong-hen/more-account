@@ -7,13 +7,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"more-account/internal/model"
 	"more-account/internal/storage"
 )
 
-const desktopFallbackFileName = "jetski-standalone-oauth-token"
+const (
+	desktopFallbackFileName   = "jetski-standalone-oauth-token"
+	osCredCacheMaxIdle        = 3 * time.Minute
+	osCredErrorBackoffWindow  = 10 * time.Minute
+)
 
 type antigravityCredentialToken struct {
 	AccessToken  string `json:"access_token"`
@@ -37,6 +42,60 @@ type SystemCredential struct {
 	AuthMethod   string
 	IDToken      string
 	Email        string
+}
+
+func cloneSystemCredential(c *SystemCredential) *SystemCredential {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	return &cp
+}
+
+var (
+	osCredCacheMu sync.Mutex
+	osCredCache   struct {
+		valid       bool
+		fingerprint string
+		checkedAt   time.Time
+		cred        *SystemCredential
+		lastErr     error
+	}
+)
+
+// InvalidateSystemCredentialCache 使系统凭据库内存缓存立即失效（在内部切号、窗口切回前台或用户手动点击探测时调用）。
+func InvalidateSystemCredentialCache() {
+	osCredCacheMu.Lock()
+	osCredCache.valid = false
+	osCredCache.lastErr = nil
+	osCredCacheMu.Unlock()
+}
+
+func computeLocalCredentialFilesFingerprint() string {
+	home, _ := os.UserHomeDir()
+	var paths []string
+	if home != "" {
+		paths = append(paths,
+			filepath.Join(home, ".gemini", desktopFallbackFileName),
+			filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"),
+		)
+	}
+	paths = append(paths, DefaultDesktopStateDBPath(), DefaultIDEStateDBPath())
+
+	var sb strings.Builder
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		st, err := os.Stat(p)
+		if err != nil {
+			sb.WriteString(p)
+			sb.WriteString(":missing;")
+			continue
+		}
+		fmt.Fprintf(&sb, "%s:%d:%d;", p, st.ModTime().UnixNano(), st.Size())
+	}
+	return sb.String()
 }
 
 // BuildCredentialPayloadJSON 构造与 Antigravity 2.0 兼容的凭据 JSON。
@@ -151,13 +210,15 @@ func WriteSystemCredentials(account model.Account, forceSyncCLI bool) error {
 	geminiDir := filepath.Join(home, ".gemini")
 	fallbackPath := filepath.Join(geminiDir, desktopFallbackFileName)
 
-	// 1. 写入操作系统凭据库（macOS Keychain / Linux secret-tool / Windows 回退兼容）
+	// 1. 写入操作系统凭据库（macOS Keychain / Windows Credential Manager / Linux secret-tool）
 	if err := writeOSSystemCredential(payloadJSON); err != nil {
+		InvalidateSystemCredentialCache()
 		return err
 	}
 
 	// 2. 同步写入桌面回退文件，避免系统凭据超时后回弹旧账号
 	if err := storage.WriteBytesAtomic(fallbackPath, []byte(payloadJSON), 0600); err != nil {
+		InvalidateSystemCredentialCache()
 		return fmt.Errorf("系统凭据已更新，但写入桌面回退文件失败: %w", err)
 	}
 
@@ -172,29 +233,53 @@ func WriteSystemCredentials(account model.Account, forceSyncCLI bool) error {
 	if shouldWriteCLI {
 		cliPath := filepath.Join(cliDir, "antigravity-oauth-token")
 		if err := storage.WriteBytesAtomic(cliPath, []byte(payloadJSON), 0600); err != nil {
+			InvalidateSystemCredentialCache()
 			return fmt.Errorf("同步写入 Antigravity CLI 凭据失败: %w", err)
 		}
 	}
+	InvalidateSystemCredentialCache()
 	return nil
 }
 
-// ReadDesktopCredential 依次从系统凭据库和桌面回退文件读取当前登录的反重力凭据。
-func ReadDesktopCredential() (*SystemCredential, error) {
-	if cred, err := readParsedOSSystemCredential(); err == nil && cred != nil {
-		return cred, nil
-	}
-	return readDesktopFallbackCredential()
-}
-
 func readParsedOSSystemCredential() (*SystemCredential, error) {
+	now := time.Now()
+	fp := computeLocalCredentialFilesFingerprint()
+
+	osCredCacheMu.Lock()
+	if osCredCache.valid && osCredCache.fingerprint == fp {
+		if osCredCache.lastErr != nil {
+			// 若上次读取 Keychain 报错（例如系统休眠锁定钥匙串），在本地凭据文件未变时不每 10 秒重复调用 security 弹窗
+			if now.Sub(osCredCache.checkedAt) < osCredErrorBackoffWindow {
+				err := osCredCache.lastErr
+				osCredCacheMu.Unlock()
+				return nil, err
+			}
+		} else if now.Sub(osCredCache.checkedAt) < osCredCacheMaxIdle {
+			cached := cloneSystemCredential(osCredCache.cred)
+			osCredCacheMu.Unlock()
+			return cached, nil
+		}
+	}
+	osCredCacheMu.Unlock()
+
 	raw, err := readOSSystemCredential()
+	var parsed *SystemCredential
+	if err == nil && strings.TrimSpace(raw) != "" {
+		parsed, err = ParseSystemCredential(raw)
+	}
+
+	osCredCacheMu.Lock()
+	osCredCache.valid = true
+	osCredCache.fingerprint = fp
+	osCredCache.checkedAt = now
+	osCredCache.cred = cloneSystemCredential(parsed)
+	osCredCache.lastErr = err
+	osCredCacheMu.Unlock()
+
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(raw) == "" {
-		return nil, nil
-	}
-	return ParseSystemCredential(raw)
+	return parsed, nil
 }
 
 func readDesktopFallbackCredential() (*SystemCredential, error) {

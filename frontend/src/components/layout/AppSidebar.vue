@@ -52,7 +52,7 @@ function selectGroup(groupId: string) {
 function openCurrentAccountDetail() {
   if (!appStore.currentAccount) return
   appStore.activeSection = 'accounts'
-  appStore.activeDetailAccountId = appStore.currentAccount.id
+  appStore.requestSelectDetailAccount(appStore.currentAccount.id)
 }
 
 function runtimeTargetLabel(target: string): string {

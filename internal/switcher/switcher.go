@@ -2,6 +2,7 @@ package switcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -94,16 +95,14 @@ func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*Switch
 		return nil, err
 	}
 
-	// 1. 切号前检查并自动刷新临期令牌（使用原子局部更新，不覆盖用户并发编辑的备注与密码）
+	// 1. 切号前检查并自动刷新临期令牌（使用原子局部更新，同步 invalid_grant 禁用与恢复状态）
 	freshTok, refreshed, err := s.oauthClient.EnsureFreshToken(ctx, acc.Token)
 	if err != nil {
+		_, _ = s.store.RecordTokenRefreshFailure(acc.ID, err, errors.Is(err, oauth.ErrInvalidGrant))
 		return recordFailure("token_refresh", fmt.Errorf("切号前刷新令牌失败: %w", err))
 	}
 	if refreshed {
-		if saved, saveErr := s.store.UpdateAccount(acc.ID, func(targetAcc *model.Account) error {
-			targetAcc.Token = freshTok
-			return nil
-		}); saveErr == nil {
+		if saved, saveErr := s.store.RecordTokenRefreshSuccess(acc.ID, freshTok); saveErr == nil {
 			acc = saved
 		} else {
 			acc.Token = freshTok
@@ -112,14 +111,11 @@ func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*Switch
 
 	settings := s.store.GetSettings()
 
-	// 2. 停止客户端（若需重启）并协同暂停 macOS 共享 agy --hub（无论是否重启，都需避免 hub 内存缓存覆写新凭据）
-	var stoppedHubs []runningHub
-	if target != "cli" {
-		if req.Launch {
-			_ = stopClientProcesses(target, settings.DesktopAppPath, settings.IdeAppPath)
-		}
-		stoppedHubs = snapshotAndStopMacHubs()
+	// 2. 停止客户端（若需重启且非 CLI）并协同暂停 macOS 共享 agy --hub（所有模式均共享 Keychain/回退凭据，避免 hub 内存缓存覆写新凭据）
+	if target != "cli" && req.Launch {
+		_ = stopClientProcesses(target, settings.DesktopAppPath, settings.IdeAppPath)
 	}
+	stoppedHubs := snapshotAndStopMacHubs()
 
 	// 3. 写入目标客户端凭据
 	var writeErr error

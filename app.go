@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -36,6 +36,7 @@ type BootstrapState struct {
 
 // App 是 Wails 桌面应用的后端绑定总入口，仅负责参数协调与事件桥接。
 type App struct {
+	ctxMu           sync.RWMutex
 	ctx             context.Context
 	store           *storage.Store
 	oauthClient     *oauth.Client
@@ -112,7 +113,11 @@ func NewApp() *App {
 }
 
 func (a *App) startup(ctx context.Context) {
+	a.ctxMu.Lock()
 	a.ctx = ctx
+	a.ctxMu.Unlock()
+
+	a.syncWindowBackground(a.store.GetSettings().Theme)
 	a.wakeupService.Start(ctx)
 	a.activeDetector.Start(ctx)
 	a.autoRefresher.Start(ctx)
@@ -125,11 +130,30 @@ func (a *App) shutdown(ctx context.Context) {
 	a.wakeupService.Stop()
 }
 
-func (a *App) emitEvent(name string, data ...any) {
-	if a.ctx == nil {
+func (a *App) getCtx() context.Context {
+	a.ctxMu.RLock()
+	defer a.ctxMu.RUnlock()
+	return a.ctx
+}
+
+func (a *App) syncWindowBackground(theme string) {
+	ctx := a.getCtx()
+	if ctx == nil {
 		return
 	}
-	wailsRuntime.EventsEmit(a.ctx, name, data...)
+	if strings.EqualFold(strings.TrimSpace(theme), "dark") {
+		wailsRuntime.WindowSetBackgroundColour(ctx, 15, 17, 21, 255)
+	} else {
+		wailsRuntime.WindowSetBackgroundColour(ctx, 247, 248, 250, 255)
+	}
+}
+
+func (a *App) emitEvent(name string, data ...any) {
+	ctx := a.getCtx()
+	if ctx == nil {
+		return
+	}
+	wailsRuntime.EventsEmit(ctx, name, data...)
 }
 
 // ─── 启动与全局设置 ────────────────────────────────────────────
@@ -147,10 +171,11 @@ func (a *App) GetBootstrapState() *BootstrapState {
 	}
 }
 
-// SaveSettings 保存全局设置，并通知后台自动刷新与账号探测器立即应用新配置。
+// SaveSettings 保存全局设置，同步原生窗口背景色并通知后台自动刷新与账号探测器立即应用新配置。
 func (a *App) SaveSettings(settings model.AppSettings) (model.AppSettings, error) {
 	saved, err := a.store.SaveSettings(settings)
 	if err == nil {
+		a.syncWindowBackground(saved.Theme)
 		if a.activeDetector != nil {
 			a.activeDetector.TriggerCheck()
 		}
@@ -221,8 +246,8 @@ func (a *App) OpenExternalURL(rawURL string) error {
 	if err != nil {
 		return err
 	}
-	if a.ctx != nil {
-		wailsRuntime.BrowserOpenURL(a.ctx, safeURL)
+	if ctx := a.getCtx(); ctx != nil {
+		wailsRuntime.BrowserOpenURL(ctx, safeURL)
 		return nil
 	}
 	return openExternalBrowserWithOS(safeURL)
@@ -235,13 +260,14 @@ func (a *App) OpenDataFolder() error {
 
 // PickDirectory 弹出系统原生目录选择器（用于自定义 Token 用量扫描目录等）。
 func (a *App) PickDirectory(title string) (string, error) {
-	if a.ctx == nil {
+	ctx := a.getCtx()
+	if ctx == nil {
 		return "", fmt.Errorf("应用上下文未就绪")
 	}
 	if strings.TrimSpace(title) == "" {
 		title = "选择目录"
 	}
-	return wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+	return wailsRuntime.OpenDirectoryDialog(ctx, wailsRuntime.OpenDialogOptions{
 		Title: title,
 	})
 }
@@ -328,9 +354,10 @@ func (a *App) ExportAccounts(accountIDs []string, includeSecrets bool) (string, 
 	return a.importerService.ExportJSON(accountIDs, includeSecrets)
 }
 
-// SaveExportToFile 弹出保存对话框并将账号 JSON 写入本地文件。
+// SaveExportToFile 弹出保存对话框并将账号 JSON 以 0600 敏感权限原子写入本地文件（覆盖已有 0644 文件时同步收紧权限）。
 func (a *App) SaveExportToFile(accountIDs []string, includeSecrets bool) (string, error) {
-	if a.ctx == nil {
+	ctx := a.getCtx()
+	if ctx == nil {
 		return "", fmt.Errorf("应用上下文未就绪")
 	}
 	content, err := a.importerService.ExportJSON(accountIDs, includeSecrets)
@@ -338,7 +365,7 @@ func (a *App) SaveExportToFile(accountIDs []string, includeSecrets bool) (string
 		return "", err
 	}
 	defaultName := fmt.Sprintf("more-account-export-%s.json", time.Now().Format("20060102-150405"))
-	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+	path, err := wailsRuntime.SaveFileDialog(ctx, wailsRuntime.SaveDialogOptions{
 		Title:           "导出反重力账号 JSON",
 		DefaultFilename: defaultName,
 		Filters: []wailsRuntime.FileFilter{
@@ -351,7 +378,7 @@ func (a *App) SaveExportToFile(accountIDs []string, includeSecrets bool) (string
 	if strings.TrimSpace(path) == "" {
 		return "", nil
 	}
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	if err := storage.WriteBytesAtomic(path, []byte(content), 0600); err != nil {
 		return "", fmt.Errorf("写入导出文件失败: %w", err)
 	}
 	return path, nil
@@ -374,11 +401,17 @@ func (a *App) UpdateAccountGroup(accountIDs []string, groupID string) error {
 	return a.store.UpdateAccountGroup(accountIDs, groupID)
 }
 
-// DeleteAccounts 删除单个或多个账号。
+// DeleteAccounts 删除单个或多个账号（同时级联清理唤醒任务中的失效引用）。
 func (a *App) DeleteAccounts(accountIDs []string) error {
 	err := a.store.DeleteAccounts(accountIDs)
-	if err == nil && a.activeDetector != nil {
-		a.activeDetector.TriggerCheck()
+	if err == nil {
+		if a.activeDetector != nil {
+			a.activeDetector.TriggerCheck()
+		}
+		if a.wakeupService != nil {
+			a.wakeupService.SyncResetBaseline()
+		}
+		a.emitEvent("wakeup:updated", nil)
 	}
 	return err
 }
@@ -404,7 +437,7 @@ func (a *App) StartOAuthLogin(groupID string) (oauth.LoginSession, error) {
 
 	_ = a.OpenExternalURL(sess.AuthURL)
 
-	go func(sessionState, redirectURI, targetGroupID string) {
+	go func(sessionState, redirectURI, codeVerifier, targetGroupID string) {
 		ctx, cancel := context.WithTimeout(a.baseCtx(), 5*time.Minute)
 		defer cancel()
 
@@ -418,7 +451,7 @@ func (a *App) StartOAuthLogin(groupID string) (oauth.LoginSession, error) {
 			return
 		}
 
-		tokenResp, exErr := a.oauthClient.ExchangeCode(ctx, code, redirectURI)
+		tokenResp, exErr := a.oauthClient.ExchangeCode(ctx, code, redirectURI, codeVerifier)
 		if exErr != nil {
 			a.emitEvent("oauth:failed", map[string]any{"error": exErr.Error()})
 			return
@@ -439,8 +472,11 @@ func (a *App) StartOAuthLogin(groupID string) (oauth.LoginSession, error) {
 		if a.activeDetector != nil {
 			a.activeDetector.TriggerCheck()
 		}
+		if a.autoRefresher != nil {
+			a.autoRefresher.TriggerCheck()
+		}
 		a.emitEvent("oauth:completed", map[string]any{"account": acc})
-	}(sess.State, sess.RedirectURI, groupID)
+	}(sess.State, sess.RedirectURI, sess.CodeVerifier, groupID)
 
 	return sess, nil
 }
@@ -540,9 +576,13 @@ func (a *App) GetWakeupState() model.WakeupState {
 	return a.store.GetWakeupState()
 }
 
-// SaveWakeupState 保存唤醒调度总开关与任务列表。
+// SaveWakeupState 保存唤醒调度总开关与任务列表，并同步配额重置监测基线。
 func (a *App) SaveWakeupState(state model.WakeupState) error {
-	return a.store.SaveWakeupState(state)
+	err := a.store.SaveWakeupState(state)
+	if err == nil && a.wakeupService != nil {
+		a.wakeupService.SyncResetBaseline()
+	}
+	return err
 }
 
 // RunWakeupTest 手动立即执行单账号单模型唤醒测试。
@@ -571,8 +611,8 @@ func (a *App) ClearWakeupHistory() error {
 }
 
 func (a *App) baseCtx() context.Context {
-	if a.ctx != nil {
-		return a.ctx
+	if ctx := a.getCtx(); ctx != nil {
+		return ctx
 	}
 	return context.Background()
 }

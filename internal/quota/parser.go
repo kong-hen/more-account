@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -52,15 +53,38 @@ func validCloudCodeProjectID(projectID string) string {
 }
 
 // ResolveCloudCodeBaseURL 按官方优先级选择 CloudCode API 域名：
-// 环境变量覆盖 > GCP ToS 且含有效项目走 prod > 默认 daily。
+// 环境变量覆盖（仅允许 https:// 或本机回环 http://） > GCP ToS 且含有效项目走 prod > 默认 daily。
 func ResolveCloudCodeBaseURL(ctx CloudCodeContext) string {
-	if override := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CLOUD_CODE_URL_OVERRIDE")); override != "" {
-		return strings.TrimRight(override, "/")
+	if override := sanitizeCloudCodeBaseURLOverride(os.Getenv("ANTIGRAVITY_CLOUD_CODE_URL_OVERRIDE")); override != "" {
+		return override
 	}
 	if ctx.IsGcpTos && validCloudCodeProjectID(ctx.PreferredProjectID) != "" {
 		return CloudCodeProdBaseURL
 	}
 	return CloudCodeDailyBaseURL
+}
+
+func sanitizeCloudCodeBaseURLOverride(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	host := strings.ToLower(parsed.Hostname())
+	switch scheme {
+	case "https":
+		return strings.TrimRight(trimmed, "/")
+	case "http":
+		// 仅允许本机回环地址使用明文 HTTP（供本地集成测试模拟服务使用），阻断远程明文传输 Bearer Token
+		if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+			return strings.TrimRight(trimmed, "/")
+		}
+	}
+	return ""
 }
 
 // NormalizeSubscriptionTier 将原始 Tier ID（如 g1-pro-tier / g1-ultra-tier / free-tier）规范为 FREE / PRO / ULTRA。

@@ -128,6 +128,35 @@ func (s *Store) loadAll() error {
 		s.wakeupHistory = wakeupHistory
 	}
 
+	// 启动自检：清理指向已不存在分组或已不存在账号的内存悬空引用
+	validGroups := make(map[string]struct{}, len(s.groups))
+	for _, g := range s.groups {
+		validGroups[g.ID] = struct{}{}
+	}
+	validAccounts := make(map[string]struct{}, len(s.accounts))
+	for i := range s.accounts {
+		validAccounts[s.accounts[i].ID] = struct{}{}
+		if s.accounts[i].GroupID != "" {
+			if _, ok := validGroups[s.accounts[i].GroupID]; !ok {
+				s.accounts[i].GroupID = ""
+			}
+		}
+	}
+	if s.currentAccountID != "" {
+		if _, ok := validAccounts[s.currentAccountID]; !ok {
+			s.currentAccountID = ""
+		}
+	}
+	for i := range s.wakeupState.Tasks {
+		filtered := make([]string, 0, len(s.wakeupState.Tasks[i].Schedule.SelectedAccounts))
+		for _, id := range s.wakeupState.Tasks[i].Schedule.SelectedAccounts {
+			if _, ok := validAccounts[id]; ok {
+				filtered = append(filtered, id)
+			}
+		}
+		s.wakeupState.Tasks[i].Schedule.SelectedAccounts = filtered
+	}
+
 	return nil
 }
 
@@ -529,10 +558,42 @@ func (s *Store) UpdateAccount(accountID string, mutate func(acc *model.Account) 
 	return model.Account{}, fmt.Errorf("账号不存在: %s", accountID)
 }
 
-// SaveAccount 原地替换已有账号（按 ID 匹配，写盘失败不污染内存）。
-func (s *Store) SaveAccount(acc model.Account) (model.Account, error) {
-	return s.UpdateAccount(acc.ID, func(target *model.Account) error {
-		*target = cloneAccount(acc)
+// RecordTokenRefreshSuccess 原子保存刷新后的新令牌，并自动解除此前因 invalid_grant 产生的禁用与令牌报错状态。
+func (s *Store) RecordTokenRefreshSuccess(accountID string, freshTok model.TokenData) (model.Account, error) {
+	return s.UpdateAccount(accountID, func(target *model.Account) error {
+		target.Token = freshTok
+		target.Token.IsGcpTos = cloneBoolPtr(freshTok.IsGcpTos)
+		if target.Disabled && strings.HasPrefix(target.DisabledReason, "invalid_grant") {
+			target.Disabled = false
+			target.DisabledReason = ""
+			target.DisabledAt = 0
+		}
+		if target.QuotaError != nil && (target.QuotaError.Reason == "INVALID_GRANT" || target.QuotaError.Reason == "TOKEN_REFRESH_FAILED") {
+			target.QuotaError = nil
+		}
+		return nil
+	})
+}
+
+// RecordTokenRefreshFailure 原子记录令牌刷新失败诊断；若确认是 invalid_grant 则将账号标记为禁用异常态。
+func (s *Store) RecordTokenRefreshFailure(accountID string, err error, isInvalidGrant bool) (model.Account, error) {
+	now := time.Now().Unix()
+	reason := "TOKEN_REFRESH_FAILED"
+	if isInvalidGrant {
+		reason = "INVALID_GRANT"
+	}
+	errInfo := &model.QuotaErrorInfo{
+		Message:   err.Error(),
+		Reason:    reason,
+		Timestamp: now,
+	}
+	return s.UpdateAccount(accountID, func(target *model.Account) error {
+		if isInvalidGrant {
+			target.Disabled = true
+			target.DisabledReason = "invalid_grant: " + err.Error()
+			target.DisabledAt = now
+		}
+		target.QuotaError = errInfo
 		return nil
 	})
 }
@@ -592,7 +653,7 @@ func (s *Store) UpdateAccountGroup(accountIDs []string, groupID string) error {
 	return nil
 }
 
-// DeleteAccounts 批量删除账号；如果删除了当前激活账号则同步清空 currentAccountID。
+// DeleteAccounts 批量删除账号；如果删除了当前激活账号则同步清空 currentAccountID，并级联移除唤醒任务中的失效账号引用。
 func (s *Store) DeleteAccounts(accountIDs []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -623,8 +684,31 @@ func (s *Store) DeleteAccounts(accountIDs []string) error {
 	if _, dropped := delSet[nextCurrentID]; dropped {
 		nextCurrentID = ""
 	}
+
+	nextWakeup := cloneWakeupState(s.wakeupState)
+	wakeupChanged := false
+	for i := range nextWakeup.Tasks {
+		orig := nextWakeup.Tasks[i].Schedule.SelectedAccounts
+		kept := make([]string, 0, len(orig))
+		for _, id := range orig {
+			if _, drop := delSet[id]; drop {
+				wakeupChanged = true
+				continue
+			}
+			kept = append(kept, id)
+		}
+		nextWakeup.Tasks[i].Schedule.SelectedAccounts = kept
+	}
+
 	if err := s.writeAccountsFile(nextCurrentID, remaining); err != nil {
 		return err
+	}
+	if wakeupChanged {
+		if err := s.writeWakeupStateFile(nextWakeup); err != nil {
+			_ = s.writeAccountsFile(s.currentAccountID, s.accounts)
+			return err
+		}
+		s.wakeupState = nextWakeup
 	}
 	s.accounts = remaining
 	s.currentAccountID = nextCurrentID
@@ -840,19 +924,37 @@ func (s *Store) GetWakeupState() model.WakeupState {
 	return cloneWakeupState(s.wakeupState)
 }
 
-// SaveWakeupState 保存唤醒任务配置。
+// SaveWakeupState 保存唤醒任务配置，并自动保留后端更新的最近运行时间戳，避免前端旧快照覆盖后台并发触发记录。
 func (s *Store) SaveWakeupState(state model.WakeupState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	prevLastRun := make(map[string]int64, len(s.wakeupState.Tasks))
+	prevCreated := make(map[string]int64, len(s.wakeupState.Tasks))
+	for _, t := range s.wakeupState.Tasks {
+		if t.ID != "" {
+			prevLastRun[t.ID] = t.LastRunAt
+			prevCreated[t.ID] = t.CreatedAt
+		}
+	}
+
 	next := cloneWakeupState(state)
 	now := time.Now().UnixMilli()
 	for i := range next.Tasks {
-		if strings.TrimSpace(next.Tasks[i].ID) == "" {
-			next.Tasks[i].ID = uuid.NewString()
+		id := strings.TrimSpace(next.Tasks[i].ID)
+		if id == "" {
+			id = uuid.NewString()
+			next.Tasks[i].ID = id
 		}
 		if next.Tasks[i].CreatedAt == 0 {
-			next.Tasks[i].CreatedAt = now
+			if c := prevCreated[id]; c > 0 {
+				next.Tasks[i].CreatedAt = c
+			} else {
+				next.Tasks[i].CreatedAt = now
+			}
+		}
+		if prev := prevLastRun[id]; prev > next.Tasks[i].LastRunAt {
+			next.Tasks[i].LastRunAt = prev
 		}
 	}
 	if err := s.writeWakeupStateFile(next); err != nil {

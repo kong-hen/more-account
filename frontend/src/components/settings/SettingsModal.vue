@@ -149,6 +149,8 @@ async function handleSave() {
     title="应用设置"
     subtitle="配置反重力切号目标、外观主题与低配额阈值"
     width-class="w-[560px]"
+    :prevent-close="saving"
+    :close-on-outside="!saving"
     @close="emit('close')"
   >
     <div class="space-y-5">

@@ -1,10 +1,10 @@
 <script setup lang="ts">
-// JSON 导出弹窗：支持预览、一键复制到剪贴板、保存为本地 .json 文件，且可选是否附带密码与 2FA 密钥。
-import { ref, watch } from 'vue'
-import { Copy, Check, Download, ShieldAlert } from 'lucide-vue-next'
+// JSON 导出弹窗：支持隐私脱敏预览、一键复制完整 JSON 到剪贴板、保存为本地 0600 .json 文件，且可选是否附带密码与 2FA 密钥。
+import { computed, ref, watch } from 'vue'
+import { Copy, Check, Download, Eye, EyeOff, ShieldAlert } from 'lucide-vue-next'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { api, extractErrorMessage } from '@/services/api'
-import { copyToClipboard } from '@/utils/privacy'
+import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
 import { useAppStore } from '@/stores/appStore'
 
 const props = defineProps<{
@@ -19,9 +19,45 @@ const emit = defineEmits<{
 const appStore = useAppStore()
 const includeSecrets = ref(false)
 const jsonText = ref('')
+const revealInPrivacy = ref(false)
 const loading = ref(false)
 const copied = ref(false)
 const savingFile = ref(false)
+
+const previewText = computed(() => {
+  if (!jsonText.value) return ''
+  if (!appStore.settings.privacyMode || revealInPrivacy.value) {
+    return jsonText.value
+  }
+  try {
+    const parsed = JSON.parse(jsonText.value) as Array<Record<string, unknown>>
+    if (!Array.isArray(parsed)) return jsonText.value
+    const masked = parsed.map((item) => {
+      const copy: Record<string, unknown> = { ...item }
+      if (typeof copy.email === 'string' && copy.email) {
+        copy.email = maskEmail(copy.email, true)
+      }
+      if (typeof copy.refresh_token === 'string' && copy.refresh_token) {
+        copy.refresh_token = maskToken(copy.refresh_token)
+      }
+      if (typeof copy.login_account === 'string' && copy.login_account) {
+        copy.login_account = copy.login_account.includes('@')
+          ? maskEmail(copy.login_account, true)
+          : '••••••'
+      }
+      if (typeof copy.account_password === 'string' && copy.account_password) {
+        copy.account_password = '••••••••'
+      }
+      if (typeof copy.two_factor_secret === 'string' && copy.two_factor_secret) {
+        copy.two_factor_secret = '••••••••'
+      }
+      return copy
+    })
+    return JSON.stringify(masked, null, 2)
+  } catch {
+    return jsonText.value
+  }
+})
 
 async function loadPreview() {
   loading.value = true
@@ -38,8 +74,9 @@ watch(
   () => props.open,
   (isOpen) => {
     if (isOpen) {
-      // 每次打开导出弹窗均重置为默认不包含密码与 2FA 密钥，防止上次勾选导致意外明文暴露
+      // 每次打开导出弹窗均重置为默认不包含密码与 2FA 密钥，并在隐私模式下默认隐藏预览明文
       includeSecrets.value = false
+      revealInPrivacy.value = false
       copied.value = false
       void loadPreview()
     } else {
@@ -89,6 +126,8 @@ async function handleSaveFile() {
     title="导出账号 JSON"
     :subtitle="accountIds.length > 0 ? `将导出已选中的 ${accountIds.length} 个账号` : '将导出全部账号'"
     width-class="w-[560px]"
+    :prevent-close="savingFile"
+    :close-on-outside="!savingFile"
     @close="emit('close')"
   >
     <div class="space-y-3.5">
@@ -112,18 +151,33 @@ async function handleSaveFile() {
         </div>
       </label>
 
-      <div class="relative">
+      <div class="space-y-1.5">
+        <div v-if="appStore.settings.privacyMode" class="flex items-center justify-between text-[11px]" style="color: var(--text-muted)">
+          <span>当前处于隐私脱敏模式，预览已对敏感字段脱敏（复制与导出文件仍为完整 JSON）</span>
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 px-2 py-0.5 rounded border cursor-pointer hover:bg-[var(--bg-hover)]"
+            style="border-color: var(--border-subtle); color: var(--text-secondary); background-color: var(--bg-surface)"
+            @click="revealInPrivacy = !revealInPrivacy"
+          >
+            <EyeOff v-if="revealInPrivacy" class="w-3 h-3" />
+            <Eye v-else class="w-3 h-3" />
+            <span>{{ revealInPrivacy ? '恢复脱敏预览' : '显示明文预览' }}</span>
+          </button>
+        </div>
+
         <pre
           class="p-3.5 rounded-xl border text-[11.5px] font-mono-num overflow-auto custom-scroll max-h-[300px] leading-relaxed"
           style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-secondary)"
-        >{{ loading ? '生成中...' : jsonText }}</pre>
+        >{{ loading ? '生成中...' : previewText }}</pre>
       </div>
     </div>
 
     <template #footer>
       <button
         type="button"
-        class="px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)]"
+        :disabled="savingFile"
+        class="px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
         style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
         @click="emit('close')"
       >
@@ -131,7 +185,8 @@ async function handleSaveFile() {
       </button>
       <button
         type="button"
-        class="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)]"
+        :disabled="loading || !jsonText"
+        class="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
         style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
         @click="handleCopy"
       >
@@ -141,7 +196,7 @@ async function handleSaveFile() {
       </button>
       <button
         type="button"
-        :disabled="savingFile"
+        :disabled="savingFile || loading"
         class="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-lg text-white cursor-pointer disabled:opacity-60"
         style="background-color: var(--accent)"
         @click="handleSaveFile"

@@ -74,6 +74,8 @@ async function handleSubmit() {
     :title="editingGroup ? '编辑分组' : '新建分组'"
     subtitle="用清晰的自建分组替代零散标签，方便分类管理账号池"
     width-class="w-[420px]"
+    :prevent-close="saving"
+    :close-on-outside="!saving"
     @close="emit('close')"
   >
     <form class="space-y-4" @submit.prevent="handleSubmit">

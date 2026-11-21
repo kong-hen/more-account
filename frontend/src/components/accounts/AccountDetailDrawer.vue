@@ -36,6 +36,7 @@ import {
   getTierLabel,
   isAccountAbnormal,
   mergeAccountModels,
+  pickPreferredWakeupModel,
   summarizeQuotaCategories,
 } from '@/utils/quota'
 import type { Account, TotpCodeResult } from '@/types/models'
@@ -94,7 +95,8 @@ const displayedRefreshToken = computed(() => {
   if (!rt) return ''
   return refreshTokenRevealed.value ? rt : maskToken(rt)
 })
-const quotaCategories = computed(() => summarizeQuotaCategories(props.account))
+const quotaCategories = computed(() => summarizeQuotaCategories(props.account, appStore.nowMs))
+const mergedModels = computed(() => mergeAccountModels(props.account))
 
 function quotaValueStyle(percentage: number) {
   const tone = getQuotaTone(percentage)
@@ -103,8 +105,8 @@ function quotaValueStyle(percentage: number) {
   return { color: 'var(--text-primary)' }
 }
 
-function getEffectiveLoginAccount(acc: Account): string {
-  return acc.loginAccount?.trim() || acc.email
+function getCustomLoginAccount(acc: Account): string {
+  return acc.loginAccount?.trim() ?? ''
 }
 
 const formattedTotpCode = computed(() => {
@@ -127,15 +129,18 @@ let lastSyncedSecret = ''
 function syncFormFromAccount(acc: Account | null, resetVisibility: boolean) {
   if (!acc) {
     lastSyncedSecret = ''
+    detailsDirty.value = false
+    appStore.detailDrawerDirty = false
     stopTotpLoop()
     return
   }
   formGroupId.value = acc.groupId ?? ''
-  formLoginAccount.value = getEffectiveLoginAccount(acc)
+  formLoginAccount.value = getCustomLoginAccount(acc)
   formNotes.value = acc.notes ?? ''
   formPassword.value = acc.accountPassword ?? ''
   formTwoFactorSecret.value = acc.twoFactorSecret ?? ''
   detailsDirty.value = false
+  appStore.detailDrawerDirty = false
   if (resetVisibility) {
     showPassword.value = false
     showSecretInput.value = false
@@ -166,12 +171,16 @@ watch(
 
 watch([formGroupId, formLoginAccount, formNotes, formPassword, formTwoFactorSecret], () => {
   if (!props.account) return
-  detailsDirty.value =
+  const normalizedLogin =
+    formLoginAccount.value.trim() === props.account.email ? '' : formLoginAccount.value.trim()
+  const dirty =
     formGroupId.value !== (props.account.groupId ?? '') ||
-    formLoginAccount.value.trim() !== getEffectiveLoginAccount(props.account) ||
+    normalizedLogin !== getCustomLoginAccount(props.account) ||
     formNotes.value.trim() !== (props.account.notes ?? '').trim() ||
     formPassword.value !== (props.account.accountPassword ?? '') ||
     formTwoFactorSecret.value.trim() !== (props.account.twoFactorSecret ?? '').trim()
+  detailsDirty.value = dirty
+  appStore.detailDrawerDirty = dirty
 })
 
 function stopTotpLoop() {
@@ -229,6 +238,7 @@ async function refreshTotp(secret: string) {
 
 onBeforeUnmount(() => {
   unmounted = true
+  appStore.detailDrawerDirty = false
   stopTotpLoop()
 })
 
@@ -260,11 +270,12 @@ async function handleSaveDetails() {
       twoFactorSecret: formTwoFactorSecret.value,
     })
     formGroupId.value = updated.groupId ?? ''
-    formLoginAccount.value = getEffectiveLoginAccount(updated)
+    formLoginAccount.value = getCustomLoginAccount(updated)
     formNotes.value = updated.notes ?? ''
     formPassword.value = updated.accountPassword ?? ''
     formTwoFactorSecret.value = updated.twoFactorSecret ?? ''
     detailsDirty.value = false
+    appStore.detailDrawerDirty = false
     lastSyncedSecret = (updated.twoFactorSecret ?? '').trim()
     void refreshTotp(lastSyncedSecret)
   } catch (err) {
@@ -276,15 +287,12 @@ async function handleSaveDetails() {
 
 async function handleQuickWakeup() {
   if (!props.account) return
-  const defaultModel =
-    mergeAccountModels(props.account)[0]?.canonicalModelId ||
-    props.account.quota?.models?.[0]?.name ||
-    'gemini-3.8-flash-high'
+  const defaultModel = pickPreferredWakeupModel(mergedModels.value)
   await wakeupStore.runSingleTest({
     accountId: props.account.id,
     model: defaultModel,
     prompt: 'hi',
-    maxOutputTokens: 16,
+    maxOutputTokens: 64,
   })
 }
 
@@ -361,6 +369,11 @@ async function openValidationUrl(url: string) {
           <span
             v-for="credit in account.quota?.credits ?? []"
             :key="credit.creditType"
+            :title="
+              credit.minimumCreditAmountForUsage
+                ? `${credit.creditType}（最低起用门槛：${credit.minimumCreditAmountForUsage}）`
+                : credit.creditType
+            "
             class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10.5px] font-mono-num"
             style="background-color: var(--success-soft); color: var(--success-text)"
           >
@@ -447,9 +460,14 @@ async function openValidationUrl(url: string) {
         class="p-3.5 rounded-xl border space-y-2"
         style="background-color: var(--danger-soft); border-color: rgba(239, 68, 68, 0.28)"
       >
-        <div class="flex items-center gap-1.5 text-xs font-semibold" style="color: var(--danger-text)">
-          <AlertTriangle class="w-4 h-4 shrink-0" />
-          <span>{{ account.quotaError?.reason || (account.disabled ? '令牌已失效' : '账号异常') }}</span>
+        <div class="flex items-center justify-between gap-2 text-xs font-semibold" style="color: var(--danger-text)">
+          <span class="inline-flex items-center gap-1.5">
+            <AlertTriangle class="w-4 h-4 shrink-0" />
+            <span>{{ account.quotaError?.reason || (account.disabled ? '令牌已失效' : '账号异常') }}</span>
+          </span>
+          <span v-if="account.disabled && account.disabledAt" class="text-[10.5px] font-normal font-mono-num">
+            {{ formatDateTime(account.disabledAt) }}
+          </span>
         </div>
         <p class="text-[11.5px] leading-relaxed break-words" style="color: var(--danger-text)">
           {{ account.quotaError?.message || account.disabledReason || '请尝试重新授权或完成 Google 账号安全验证。' }}
@@ -487,7 +505,12 @@ async function openValidationUrl(url: string) {
             <ShieldCheck class="w-3.5 h-3.5" style="color: var(--accent)" />
             2FA 动态验证码
           </span>
-          <span v-if="totpResult" class="text-[11px] font-mono-num" style="color: var(--text-muted)">
+          <span
+            v-if="totpResult"
+            :title="`有效期至 ${formatDateTime(totpResult.validUntilUnix)}`"
+            class="text-[11px] font-mono-num"
+            style="color: var(--text-muted)"
+          >
             剩余 {{ totpResult.remainingSeconds }}s
           </span>
         </div>
@@ -590,19 +613,19 @@ async function openValidationUrl(url: string) {
               <input
                 id="detail-login-account-input"
                 v-model="formLoginAccount"
-                :type="appStore.settings.privacyMode ? 'password' : 'text'"
+                type="text"
                 autocomplete="off"
-                placeholder="填写登录账号（默认使用当前邮箱）"
+                :placeholder="`默认同邮箱：${maskEmail(account.email, appStore.settings.privacyMode)}`"
                 class="w-full pl-8 pr-2.5 py-1.5 text-xs rounded-lg border font-mono-num"
+                :class="{ 'privacy-disc': appStore.settings.privacyMode && Boolean(formLoginAccount) }"
                 style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
               />
             </div>
             <button
               type="button"
-              :disabled="!formLoginAccount.trim()"
               title="复制登录账号"
               aria-label="复制登录账号"
-              class="p-1.5 rounded-lg border shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-40"
+              class="p-1.5 rounded-lg border shrink-0 cursor-pointer hover:bg-[var(--bg-hover)]"
               style="border-color: var(--border-strong); color: var(--text-secondary)"
               @click="handleCopy('loginAccount', formLoginAccount.trim() || account.email, '登录账号')"
             >
@@ -777,7 +800,7 @@ async function openValidationUrl(url: string) {
         </div>
       </section>
 
-      <!-- 额度总览（三大分类：Gemini Argon / Gemini Flash / Claude/GPT，支持 5h 与周额度双窗口展示） -->
+      <!-- 额度总览（主分类：Gemini Argon / Gemini Carbon / Gemini Flash / Claude/GPT，支持 5h 与周额度双窗口展示） -->
       <section class="space-y-2.5">
         <div class="flex items-center justify-between gap-2">
           <h3 class="text-xs font-semibold" style="color: var(--text-primary)">
@@ -812,13 +835,20 @@ async function openValidationUrl(url: string) {
               <div class="flex items-center justify-between gap-2 text-[11.5px]">
                 <span class="inline-flex items-center gap-1.5" style="color: var(--text-secondary)">
                   <span
-                    class="px-1.5 py-0.2 rounded text-[10px] font-semibold"
+                    class="px-1.5 py-0.5 rounded text-[10px] font-semibold"
                     style="background-color: var(--bg-subtle); color: var(--text-muted)"
                   >
                     5小时
                   </span>
                   <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.fiveHour.percentage)">
                     {{ cat.fiveHour.percentage }}%
+                  </span>
+                  <span
+                    v-if="cat.fiveHour.exhausted"
+                    class="px-1 py-0.5 rounded text-[9.5px] font-medium"
+                    style="background-color: var(--danger-soft); color: var(--danger-text)"
+                  >
+                    已耗尽
                   </span>
                 </span>
                 <span class="text-[11px] tabular-nums shrink-0" style="color: var(--text-muted)">
@@ -834,13 +864,20 @@ async function openValidationUrl(url: string) {
                 <div class="flex items-center justify-between gap-2 text-[11.5px]">
                   <span class="inline-flex items-center gap-1.5" style="color: var(--text-secondary)">
                     <span
-                      class="px-1.5 py-0.2 rounded text-[10px] font-semibold"
+                      class="px-1.5 py-0.5 rounded text-[10px] font-semibold"
                       style="background-color: var(--bg-subtle); color: var(--text-muted)"
                     >
                       周额度
                     </span>
                     <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.weekly.percentage)">
                       {{ cat.weekly.percentage }}%
+                    </span>
+                    <span
+                      v-if="cat.weekly.exhausted"
+                      class="px-1 py-0.5 rounded text-[9.5px] font-medium"
+                      style="background-color: var(--danger-soft); color: var(--danger-text)"
+                    >
+                      已耗尽
                     </span>
                   </span>
                   <span class="text-[11px] tabular-nums shrink-0" style="color: var(--text-muted)">
@@ -853,7 +890,7 @@ async function openValidationUrl(url: string) {
                 <div class="flex items-center justify-between gap-2 text-[11.5px]">
                   <span class="inline-flex items-center gap-1.5" style="color: var(--text-secondary)">
                     <span
-                      class="px-1.5 py-0.2 rounded text-[10px] font-semibold"
+                      class="px-1.5 py-0.5 rounded text-[10px] font-semibold"
                       style="background-color: var(--bg-subtle); color: var(--text-muted)"
                     >
                       周额度
@@ -880,6 +917,60 @@ async function openValidationUrl(url: string) {
           style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
         >
           暂无额度数据，请点击上方「刷新配额」获取。
+        </div>
+      </section>
+
+      <!-- 全量模型配额明细（展示云端返回的全部客户端模型、思考深度变体与各自重置时间） -->
+      <section v-if="mergedModels.length > 0" class="space-y-2.5">
+        <div class="flex items-center justify-between gap-2">
+          <h3 class="text-xs font-semibold" style="color: var(--text-primary)">
+            全量模型配额明细 ({{ mergedModels.length }})
+          </h3>
+          <span class="text-[11px]" style="color: var(--text-muted)">同模型多深度已合并</span>
+        </div>
+
+        <div class="space-y-2">
+          <div
+            v-for="model in mergedModels"
+            :key="model.key"
+            class="p-2.5 rounded-xl border space-y-1.5"
+            style="border-color: var(--border-subtle); background-color: var(--bg-app)"
+          >
+            <div class="flex items-center justify-between gap-2 text-xs">
+              <span
+                class="font-medium truncate"
+                :title="`${model.displayName} (${model.baseId})`"
+                style="color: var(--text-primary)"
+              >
+                {{ model.displayName }}
+              </span>
+              <span class="inline-flex items-center gap-2 shrink-0">
+                <span v-if="model.resetTime" class="text-[11px] tabular-nums" style="color: var(--text-muted)">
+                  {{ formatResetCountdown(model.resetTime, appStore.nowMs) }}
+                </span>
+                <span class="font-mono-num font-semibold" :style="quotaValueStyle(model.percentage)">
+                  {{ model.percentage }}%
+                </span>
+              </span>
+            </div>
+
+            <QuotaBar :percentage="model.percentage" />
+
+            <div
+              v-if="model.variants.length > 1 || model.variants[0]?.depthLabel !== '标准'"
+              class="flex items-center flex-wrap gap-1 pt-0.5"
+            >
+              <span
+                v-for="v in model.variants"
+                :key="v.name"
+                :title="v.name"
+                class="px-1.5 py-0.5 rounded text-[10px] font-mono-num"
+                style="background-color: var(--bg-subtle); color: var(--text-muted)"
+              >
+                {{ model.hasMixedPercentages ? `${v.depthLabel}: ${v.percentage}%` : v.depthLabel }}
+              </span>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -928,3 +1019,9 @@ async function openValidationUrl(url: string) {
     </aside>
   </Transition>
 </template>
+
+<style scoped>
+.privacy-disc {
+  -webkit-text-security: disc;
+}
+</style>

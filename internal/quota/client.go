@@ -292,7 +292,8 @@ func (c *Client) tryOnboardUser(ctx context.Context, baseURL, accessToken, tierI
 			}
 			return "", nil
 		}
-		if strings.TrimSpace(op.Name) == "" {
+		opPath, ok := sanitizeOperationPath(op.Name)
+		if !ok {
 			return "", nil
 		}
 		select {
@@ -301,7 +302,7 @@ func (c *Client) tryOnboardUser(ctx context.Context, baseURL, accessToken, tierI
 		case <-time.After(500 * time.Millisecond):
 		}
 
-		pollReq, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1internal/"+strings.TrimSpace(op.Name), nil)
+		pollReq, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1internal/"+opPath, nil)
 		if err != nil {
 			return "", err
 		}
@@ -328,6 +329,22 @@ func (c *Client) tryOnboardUser(ctx context.Context, baseURL, accessToken, tierI
 		op = nextOp
 	}
 	return "", nil
+}
+
+func sanitizeOperationPath(raw string) (string, bool) {
+	cleaned := strings.TrimSpace(raw)
+	cleaned = strings.TrimPrefix(cleaned, "/")
+	cleaned = strings.TrimPrefix(cleaned, "v1internal/")
+	cleaned = strings.TrimPrefix(cleaned, "/")
+	if cleaned == "" {
+		return "", false
+	}
+	if strings.Contains(cleaned, "..") ||
+		strings.Contains(cleaned, "//") ||
+		strings.ContainsAny(cleaned, "?#\\ \t\r\n") {
+		return "", false
+	}
+	return cleaned, true
 }
 
 func isExplicitQuotaDenial(info model.QuotaErrorInfo) bool {
@@ -489,7 +506,7 @@ func (c *Client) FetchQuota(ctx context.Context, token model.TokenData, email st
 			return nil, lastErr
 		} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			errInfo := ParseGoogleAPIError(resp.StatusCode, string(body))
-			return nil, fmt.Errorf("查询 %s 配额失败 (HTTP %d): %s", email, resp.StatusCode, errInfo.Message)
+			return nil, fmt.Errorf("查询配额失败 (HTTP %d): %s", resp.StatusCode, errInfo.Message)
 		} else {
 			if err := json.Unmarshal(body, &modelsResp); err != nil {
 				return nil, fmt.Errorf("解析配额响应失败: %w", err)

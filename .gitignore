@@ -1,14 +1,15 @@
 # 编译产物与打包输出
 build/bin/
-dist/
+/dist/
 more-account
 MoreAccount
 *.app/
 *.exe
 
-# 前端依赖与构建缓存
+# 前端依赖与构建缓存（保留 dist/.gitkeep 供全新克隆直接执行 go test）
 frontend/node_modules/
-frontend/dist/
+frontend/dist/*
+!frontend/dist/.gitkeep
 frontend/wailsjs/
 frontend/package.json.md5
 

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // EncodeVarint 将无符号整数编码为 Protobuf Varint 字节序列。
@@ -104,6 +105,9 @@ func SkipField(data []byte, offset int, wireType uint8) (int, error) {
 
 // CreateOAuthTokenInfo 编码 Antigravity 客户端兼容的 OAuthTokenInfo 消息。
 func CreateOAuthTokenInfo(accessToken, refreshToken string, expiry int64, isGcpTos *bool, idToken, email string) []byte {
+	if expiry <= 0 {
+		expiry = time.Now().Add(time.Hour).Unix()
+	}
 	gcpTos := false
 	if isGcpTos != nil {
 		gcpTos = *isGcpTos
@@ -191,6 +195,7 @@ func RemoveUnifiedTopicEntry(data []byte, targetKey string) ([]byte, error) {
 
 func unifiedTopicEntryKey(entry []byte) string {
 	offset := 0
+	lastKey := ""
 	for offset < len(entry) {
 		tag, afterTag, err := ReadVarint(entry, offset)
 		if err != nil {
@@ -199,11 +204,13 @@ func unifiedTopicEntryKey(entry []byte) string {
 		wireType := uint8(tag & 7)
 		fieldNum := uint32(tag >> 3)
 		if fieldNum == 1 && wireType == 2 {
-			val, _, err := sliceLenDelim(entry, afterTag)
+			val, next, err := sliceLenDelim(entry, afterTag)
 			if err != nil {
 				return ""
 			}
-			return string(val)
+			lastKey = string(val)
+			offset = next
+			continue
 		}
 		next, err := SkipField(entry, afterTag, wireType)
 		if err != nil {
@@ -211,7 +218,7 @@ func unifiedTopicEntryKey(entry []byte) string {
 		}
 		offset = next
 	}
-	return ""
+	return lastKey
 }
 
 // ExtractOAuthInfoFromUnifiedOAuth 从 antigravityUnifiedStateSync.oauthToken 中提取 access_token、refresh_token 与 id_token。
@@ -239,6 +246,7 @@ func ExtractEmailFromUnifiedUserStatus(data []byte) string {
 
 func extractUnifiedTopicPayload(data []byte, targetKey string) []byte {
 	offset := 0
+	var lastPayload []byte
 	for offset < len(data) {
 		tag, afterTag, err := ReadVarint(data, offset)
 		if err != nil {
@@ -252,7 +260,7 @@ func extractUnifiedTopicPayload(data []byte, targetKey string) []byte {
 				return nil
 			}
 			if payload := extractPayloadFromEntry(entryBytes, targetKey); len(payload) > 0 {
-				return payload
+				lastPayload = payload
 			}
 			offset = next
 			continue
@@ -263,12 +271,12 @@ func extractUnifiedTopicPayload(data []byte, targetKey string) []byte {
 		}
 		offset = next
 	}
-	return nil
+	return lastPayload
 }
 
 func extractPayloadFromEntry(entry []byte, targetKey string) []byte {
 	offset := 0
-	matched := false
+	lastKey := ""
 	var rowData []byte
 
 	for offset < len(entry) {
@@ -283,8 +291,8 @@ func extractPayloadFromEntry(entry []byte, targetKey string) []byte {
 			if err != nil {
 				return nil
 			}
-			if fieldNum == 1 && string(val) == targetKey {
-				matched = true
+			if fieldNum == 1 {
+				lastKey = string(val)
 			} else if fieldNum == 2 {
 				rowData = val
 			}
@@ -298,7 +306,7 @@ func extractPayloadFromEntry(entry []byte, targetKey string) []byte {
 		offset = next
 	}
 
-	if !matched || len(rowData) == 0 {
+	if lastKey != targetKey || len(rowData) == 0 {
 		return nil
 	}
 	payloadB64 := extractStringField(rowData, 1)
@@ -314,6 +322,7 @@ func extractPayloadFromEntry(entry []byte, targetKey string) []byte {
 
 func extractStringField(data []byte, targetField uint32) string {
 	offset := 0
+	lastVal := ""
 	for offset < len(data) {
 		tag, afterTag, err := ReadVarint(data, offset)
 		if err != nil {
@@ -322,11 +331,13 @@ func extractStringField(data []byte, targetField uint32) string {
 		wireType := uint8(tag & 7)
 		fieldNum := uint32(tag >> 3)
 		if fieldNum == targetField && wireType == 2 {
-			val, _, err := sliceLenDelim(data, afterTag)
+			val, next, err := sliceLenDelim(data, afterTag)
 			if err != nil {
 				return ""
 			}
-			return string(val)
+			lastVal = string(val)
+			offset = next
+			continue
 		}
 		next, err := SkipField(data, afterTag, wireType)
 		if err != nil {
@@ -334,5 +345,5 @@ func extractStringField(data []byte, targetField uint32) string {
 		}
 		offset = next
 	}
-	return ""
+	return lastVal
 }

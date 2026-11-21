@@ -346,12 +346,12 @@ func ParseGenMetadata(buf []byte) ParsedGenMetadata {
 	return out
 }
 
-// estimateTokensFromPayload 当步骤缺少精确 API 遥测时，按 UTF-8 可读字符长度做启发式估算。
-func estimateTokensFromPayload(payload []byte) uint64 {
-	if len(payload) == 0 {
+// estimateTokensFromPayloadLen 当步骤缺少精确 API 遥测时，按载荷字节长度做启发式估算（无需将大 BLOB 读入 Go 内存）。
+func estimateTokensFromPayloadLen(payloadLen int64) uint64 {
+	if payloadLen <= 0 {
 		return 0
 	}
-	est := uint64(len(payload)) / 4
+	est := uint64(payloadLen) / 4
 	if est == 0 {
 		return 1
 	}

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 定时唤醒主视图：全局调度开关、任务列表卡片（新建/编辑/启停/立即执行/删除）与唤醒历史记录双分段。
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import {
   Plus,
   Play,
@@ -35,6 +35,11 @@ const deletingTask = ref<WakeupTask | null>(null)
 const deleting = ref(false)
 const clearHistoryConfirm = ref(false)
 const clearingHistory = ref(false)
+const validAccountIdSet = computed(() => new Set(appStore.accounts.map((a) => a.id)))
+
+function validTaskAccountCount(task: WakeupTask): number {
+  return (task.schedule.selectedAccounts ?? []).filter((id) => validAccountIdSet.value.has(id)).length
+}
 
 onMounted(() => {
   void wakeupStore.loadAll()
@@ -284,7 +289,7 @@ async function openUrl(url: string) {
                   class="px-2 py-0.5 rounded-md font-mono-num"
                   style="background-color: var(--bg-subtle); color: var(--text-secondary)"
                 >
-                  {{ task.schedule.selectedAccounts.length }} 个账号
+                  {{ validTaskAccountCount(task) }} 个账号
                 </span>
                 <span
                   v-for="m in task.schedule.selectedModels"
@@ -387,6 +392,14 @@ async function openUrl(url: string) {
                     <div v-if="item.success" class="flex items-center gap-1.5" style="color: var(--success-text)">
                       <CheckCircle2 class="w-3.5 h-3.5 shrink-0" />
                       <span class="truncate">{{ item.reply || '唤醒成功' }}</span>
+                      <span
+                        v-if="item.totalTokens"
+                        :title="`输入 ${item.promptTokens ?? 0} / 输出 ${item.completionTokens ?? 0}`"
+                        class="px-1.5 py-0.5 rounded text-[10px] font-mono-num shrink-0"
+                        style="background-color: var(--bg-subtle); color: var(--text-muted)"
+                      >
+                        {{ item.totalTokens }} tok
+                      </span>
                     </div>
                     <div v-else class="space-y-1">
                       <div class="flex items-center gap-1.5" style="color: var(--danger-text)">

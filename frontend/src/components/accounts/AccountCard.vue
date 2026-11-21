@@ -51,9 +51,11 @@ const isRefreshing = computed(() => Boolean(appStore.refreshingIds[props.account
 const isSwitching = computed(() => appStore.switchingId === props.account.id)
 const tier = computed(() => getTierLabel(props.account))
 const abnormal = computed(() => isAccountAbnormal(props.account))
-const lowQuota = computed(() => isAccountLowQuota(props.account, appStore.settings.lowQuotaThreshold))
-const quotaCategories = computed(() => summarizeQuotaCategories(props.account))
-const earliestReset = computed(() => getEarliestResetTime(props.account))
+const lowQuota = computed(() =>
+  isAccountLowQuota(props.account, appStore.settings.lowQuotaThreshold, appStore.nowMs),
+)
+const quotaCategories = computed(() => summarizeQuotaCategories(props.account, appStore.nowMs))
+const earliestReset = computed(() => getEarliestResetTime(props.account, appStore.nowMs))
 const groupInfo = computed(() =>
   props.account.groupId ? appStore.groupMap.get(props.account.groupId) ?? null : null,
 )

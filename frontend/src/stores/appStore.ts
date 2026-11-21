@@ -70,9 +70,13 @@ export const useAppStore = defineStore('app', () => {
   const sortBy = ref<AccountSortBy>('custom')
   const viewMode = ref<AccountViewMode>('cards')
 
-  // 多选与右侧详情抽屉
+  // 多选与右侧详情抽屉（含未保存修改保护）
   const selectedAccountIds = ref<string[]>([])
   const activeDetailAccountId = ref<string | null>(null)
+  const detailDrawerDirty = ref(false)
+  const pendingDetailTargetId = ref<string | null | undefined>(undefined)
+  const hasPendingUnsavedDetail = computed(() => pendingDetailTargetId.value !== undefined)
+  const oauthCompletedSeq = ref(0)
 
   // 运行态状态
   const refreshingIds = ref<Record<string, boolean>>({})
@@ -195,6 +199,28 @@ export const useAppStore = defineStore('app', () => {
           const res = payload as ActiveDetectionResult | null
           if (!res) return
           applyActiveDetectionResult(res, true)
+        }),
+      )
+      // 全局监听 OAuth 授权入库完成事件：即使授权换取令牌期间提前关闭了添加弹窗，也能自动刷新列表并提示用户
+      cleanups.push(
+        onWailsEvent('oauth:completed', (payload: unknown) => {
+          const p = payload as { account?: Account } | null
+          void reloadAccounts().then(() => {
+            if (p?.account?.id) {
+              if (!detailDrawerDirty.value) {
+                activeDetailAccountId.value = p.account.id
+              }
+            }
+          })
+          if (p?.account?.email) {
+            notify(
+              `已通过 Google 授权添加账号 ${maskEmail(p.account.email, settings.value.privacyMode)}`,
+              'success',
+            )
+          } else {
+            notify('OAuth 授权成功', 'success')
+          }
+          oauthCompletedSeq.value += 1
         }),
       )
 
@@ -334,7 +360,8 @@ export const useAppStore = defineStore('app', () => {
       const stats = await api.refreshAllQuotas()
       await reloadAccounts()
       if (stats.failed > 0) {
-        notify(`刷新完成：成功 ${stats.success} 个，失败 ${stats.failed} 个`, 'warning', 4500)
+        const firstErr = stats.errors?.[0] ? `（${stats.errors[0]}）` : ''
+        notify(`刷新完成：成功 ${stats.success} 个，失败 ${stats.failed} 个${firstErr}`, 'warning', 5200)
       } else {
         notify(`全部 ${stats.success} 个账号配额已更新`, 'success')
       }
@@ -576,6 +603,28 @@ export const useAppStore = defineStore('app', () => {
     onlyAbnormal.value = false
   }
 
+  function requestSelectDetailAccount(nextId: string | null) {
+    if (nextId === activeDetailAccountId.value) return
+    if (detailDrawerDirty.value && activeDetailAccountId.value) {
+      pendingDetailTargetId.value = nextId
+      return
+    }
+    activeDetailAccountId.value = nextId
+  }
+
+  function confirmDiscardDetailChanges() {
+    const next = pendingDetailTargetId.value
+    pendingDetailTargetId.value = undefined
+    detailDrawerDirty.value = false
+    if (next !== undefined) {
+      activeDetailAccountId.value = next
+    }
+  }
+
+  function cancelDiscardDetailChanges() {
+    pendingDetailTargetId.value = undefined
+  }
+
   // 计算属性
   const currentAccount = computed(() =>
     accounts.value.find((a) => a.id === currentAccountId.value) ?? null,
@@ -609,7 +658,7 @@ export const useAppStore = defineStore('app', () => {
   })
 
   const lowQuotaCount = computed(() =>
-    accounts.value.filter((a) => isAccountLowQuota(a, settings.value.lowQuotaThreshold)).length,
+    accounts.value.filter((a) => isAccountLowQuota(a, settings.value.lowQuotaThreshold, nowMs.value)).length,
   )
 
   const abnormalCount = computed(() =>
@@ -641,9 +690,9 @@ export const useAppStore = defineStore('app', () => {
 
       // 可选的「低配额 / 异常」过滤：同时勾选时取并集（查看所有需要关注的账号），单选时精准匹配。
       if (onlyLowQuota.value && onlyAbnormal.value) {
-        if (!isAccountLowQuota(acc, threshold) && !isAccountAbnormal(acc)) return false
+        if (!isAccountLowQuota(acc, threshold, nowMs.value) && !isAccountAbnormal(acc)) return false
       } else if (onlyLowQuota.value) {
-        if (!isAccountLowQuota(acc, threshold)) return false
+        if (!isAccountLowQuota(acc, threshold, nowMs.value)) return false
       } else if (onlyAbnormal.value) {
         if (!isAccountAbnormal(acc)) return false
       }
@@ -660,10 +709,24 @@ export const useAppStore = defineStore('app', () => {
     const sorted = [...list]
     switch (sortBy.value) {
       case 'quota_desc':
-        sorted.sort((a, b) => getMinQuotaPercentage(b) - getMinQuotaPercentage(a))
+        sorted.sort((a, b) => {
+          const qa = getMinQuotaPercentage(a, nowMs.value)
+          const qb = getMinQuotaPercentage(b, nowMs.value)
+          if (qa < 0 && qb < 0) return a.sortOrder - b.sortOrder
+          if (qa < 0) return 1
+          if (qb < 0) return -1
+          return qb - qa
+        })
         break
       case 'quota_asc':
-        sorted.sort((a, b) => getMinQuotaPercentage(a) - getMinQuotaPercentage(b))
+        sorted.sort((a, b) => {
+          const qa = getMinQuotaPercentage(a, nowMs.value)
+          const qb = getMinQuotaPercentage(b, nowMs.value)
+          if (qa < 0 && qb < 0) return a.sortOrder - b.sortOrder
+          if (qa < 0) return 1
+          if (qb < 0) return -1
+          return qa - qb
+        })
         break
       case 'last_used':
         sorted.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))
@@ -703,6 +766,9 @@ export const useAppStore = defineStore('app', () => {
     selectedAccountIds,
     activeDetailAccountId,
     activeDetailAccount,
+    detailDrawerDirty,
+    hasPendingUnsavedDetail,
+    oauthCompletedSeq,
     filteredAccounts,
     refreshingIds,
     switchingId,
@@ -739,5 +805,8 @@ export const useAppStore = defineStore('app', () => {
     clearSwitchHistory,
     toggleSelectAccount,
     clearAdvancedFilters,
+    requestSelectDetailAccount,
+    confirmDiscardDetailChanges,
+    cancelDiscardDetailChanges,
   }
 })

@@ -42,7 +42,7 @@ function handleGlobalKeydown(e: KeyboardEvent) {
   // 如果当前已有原生 <dialog> 打开，交由浏览器原生 Esc 处理
   if (document.querySelector('dialog[open]')) return
   if (appStore.activeDetailAccountId) {
-    appStore.activeDetailAccountId = null
+    appStore.requestSelectDetailAccount(null)
   }
   if (usageStore.detailOpen) {
     usageStore.closeConversationDetail()
@@ -132,7 +132,7 @@ async function confirmDeleteGroup() {
         <!-- 右侧悬浮账号详情抽屉：脱离文档流覆盖在主视图上方，不挤压原有布局 -->
         <AccountDetailDrawer
           :account="appStore.activeDetailAccount"
-          @close="appStore.activeDetailAccountId = null"
+          @close="appStore.requestSelectDetailAccount(null)"
           @export-account="(id) => openExportModal([id])"
           @delete-account="requestDeleteSingleAccount"
         />
@@ -180,6 +180,15 @@ async function confirmDeleteGroup() {
       :loading="deleting"
       @cancel="deleteGroupConfirm = null"
       @confirm="confirmDeleteGroup"
+    />
+
+    <ConfirmDialog
+      :open="appStore.hasPendingUnsavedDetail"
+      title="放弃未保存的更改"
+      message="当前账号详情中有尚未保存的备注、分组或凭据修改，确定要放弃这些更改吗？"
+      confirm-text="放弃更改"
+      @cancel="appStore.cancelDiscardDetailChanges"
+      @confirm="appStore.confirmDiscardDetailChanges"
     />
 
     <ToastContainer />

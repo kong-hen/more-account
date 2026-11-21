@@ -1,13 +1,13 @@
-// 配额分类（Gemini Argon / Gemini Flash / Claude/GPT，含 5h 与周额度双窗口）、同模型思考深度合并、健康度判定与格式化工具。
+// 配额分类（Gemini Argon / Gemini Carbon / Gemini Flash / Claude/GPT，含 5h 与周额度双窗口）、同模型思考深度合并、健康度判定与格式化工具。
 import type { Account, ModelQuota, QuotaBucket } from '@/types/models'
 
-export interface QuotaWindowSlot {
+interface QuotaWindowSlot {
   percentage: number
   resetTime: string
-  exhausted?: boolean
+  exhausted: boolean
 }
 
-export type QuotaCategoryKey = 'gemini-argon' | 'gemini-flash' | 'claude-gpt'
+type QuotaCategoryKey = 'gemini-argon' | 'gemini-carbon' | 'gemini-flash' | 'claude-gpt'
 
 export interface QuotaCategorySummary {
   key: QuotaCategoryKey
@@ -31,7 +31,7 @@ function isEarlierISO(candidate: string, current: string): boolean {
   return candidate < current
 }
 
-export interface MergedModelVariant {
+interface MergedModelVariant {
   name: string
   displayName: string
   depthLabel: string
@@ -184,6 +184,8 @@ const SUMMARY_BUCKET_ID_SET = new Set([
   'argon:5h',
   'argon:weekly',
   'gemini-argon-wtu-weekly',
+  'gemini-carbon-5h',
+  'carbon:5h',
   'carbon:weekly',
   'gemini-carbon-wtu-weekly',
 ])
@@ -192,7 +194,10 @@ function isSummaryBucketId(rawName: string): boolean {
   const lower = rawName.trim().toLowerCase()
   if (!lower) return false
   if (SUMMARY_BUCKET_ID_SET.has(lower)) return true
-  if (lower.startsWith('gemini-argon-') && (lower.endsWith('-weekly') || lower.endsWith('-5h'))) {
+  if (
+    (lower.startsWith('gemini-argon-') || lower.startsWith('gemini-carbon-')) &&
+    (lower.endsWith('-weekly') || lower.endsWith('-5h'))
+  ) {
     return true
   }
   return false
@@ -325,6 +330,26 @@ export function mergeAccountModels(account: Account | null | undefined): MergedM
   return mergeModelList(account?.quota?.models ?? [])
 }
 
+// 优先为唤醒测试选择轻量 Flash 模型，避免默认消耗昂贵的 Argon / Carbon / Opus 周额度。
+export function pickPreferredWakeupModel(candidates: MergedModelQuota[]): string {
+  const flashCandidate = candidates.find((c) => {
+    const text = `${c.baseId} ${c.displayName} ${c.canonicalModelId}`.toLowerCase()
+    return text.includes('flash') || text.includes('neon') || text.includes('hydrogen')
+  })
+  if (flashCandidate) {
+    return flashCandidate.canonicalModelId
+  }
+  const nonFlagship = candidates.find((c) => {
+    const text = `${c.baseId} ${c.displayName}`.toLowerCase()
+    return !text.includes('argon') && !text.includes('carbon') && !text.includes('opus')
+  })
+  return (
+    nonFlagship?.canonicalModelId ||
+    candidates[0]?.canonicalModelId ||
+    'gemini-3.8-flash-high'
+  )
+}
+
 function classifySummaryBucket(bucketId: string): { key: QuotaCategoryKey; period: 'fiveHour' | 'weekly' } | null {
   const id = bucketId.trim().toLowerCase()
   if (!id) return null
@@ -336,13 +361,13 @@ function classifySummaryBucket(bucketId: string): { key: QuotaCategoryKey; perio
   if (id.includes('argon')) {
     return { key: 'gemini-argon', period }
   }
+  if (id.includes('carbon')) {
+    return { key: 'gemini-carbon', period }
+  }
   if (id.includes('3p') || id.includes('claude') || id.includes('gpt')) {
     return { key: 'claude-gpt', period }
   }
-  if (
-    (id.includes('gemini') || id.includes('flash') || id.includes('neon') || id.includes('hydrogen')) &&
-    !id.includes('carbon')
-  ) {
+  if (id.includes('gemini') || id.includes('flash') || id.includes('neon') || id.includes('hydrogen')) {
     return { key: 'gemini-flash', period }
   }
   return null
@@ -351,32 +376,37 @@ function classifySummaryBucket(bucketId: string): { key: QuotaCategoryKey; perio
 function classifyModelCategory(m: MergedModelQuota): QuotaCategoryKey | null {
   const lower = `${m.baseId} ${m.displayName}`.toLowerCase()
   if (lower.includes('argon')) return 'gemini-argon'
+  if (lower.includes('carbon')) return 'gemini-carbon'
   if (lower.includes('claude') || lower.includes('gpt')) return 'claude-gpt'
   if (lower.includes('flash') || lower.includes('neon') || lower.includes('hydrogen')) {
     return 'gemini-flash'
   }
-  if (lower.includes('gemini') && !lower.includes('carbon') && !lower.includes('image')) {
+  if (lower.includes('gemini') && !lower.includes('image')) {
     return 'gemini-flash'
   }
   return null
 }
 
-function isWeeklyResetTime(iso?: string): boolean {
+function isWeeklyResetTime(iso?: string, nowMs = Date.now()): boolean {
   if (!iso) return false
   const ts = Date.parse(iso)
   if (Number.isNaN(ts)) return false
   // 距离重置超过 12 小时通常为周额度窗口（5h 窗口上限为 5 小时）
-  return ts - Date.now() > 12 * 3600 * 1000
+  return ts - nowMs > 12 * 3600 * 1000
 }
 
-// 汇总当前账号的三大配额分类（Gemini Argon / Gemini Flash / Claude/GPT，不含 Pro）：
+// 汇总当前账号的主配额分类（Gemini Argon / Gemini Carbon / Gemini Flash / Claude/GPT）：
 // 优先使用云端 retrieveUserQuotaSummary 返回的 5h 与周额度桶；两者都有则双窗口并列显示，只有周额度则仅显示周额度。
-export function summarizeQuotaCategories(account: Account | null | undefined): QuotaCategorySummary[] {
+export function summarizeQuotaCategories(
+  account: Account | null | undefined,
+  nowMs = Date.now(),
+): QuotaCategorySummary[] {
   if (!account?.quota) return []
 
   const isFree = getTierLabel(account) === 'FREE'
   const categoryDefs: Array<{ key: QuotaCategoryKey; label: string; shortLabel: string }> = [
     { key: 'gemini-argon', label: 'Gemini Argon', shortLabel: 'Argon' },
+    { key: 'gemini-carbon', label: 'Gemini Carbon', shortLabel: 'Carbon' },
     { key: 'gemini-flash', label: 'Gemini Flash', shortLabel: 'Flash' },
     { key: 'claude-gpt', label: 'Claude/GPT', shortLabel: 'Claude/GPT' },
   ]
@@ -407,7 +437,7 @@ export function summarizeQuotaCategories(account: Account | null | undefined): Q
     const slot: QuotaWindowSlot = {
       percentage: b.percentage,
       resetTime: (b.resetTime ?? '').trim(),
-      exhausted: b.exhausted || b.percentage <= 0,
+      exhausted: Boolean(b.exhausted) || b.percentage <= 0,
     }
     if (matched.period === 'fiveHour') {
       if (!entry.fiveHour || slot.percentage < entry.fiveHour.percentage) {
@@ -459,7 +489,12 @@ export function summarizeQuotaCategories(account: Account | null | undefined): Q
       resetTime: earliestReset,
       exhausted: minPct <= 0,
     }
-    if (def.key === 'gemini-argon' || isFree || isWeeklyResetTime(earliestReset)) {
+    if (
+      def.key === 'gemini-argon' ||
+      def.key === 'gemini-carbon' ||
+      isFree ||
+      isWeeklyResetTime(earliestReset, nowMs)
+    ) {
       entry.weekly = slot
     } else {
       entry.fiveHour = slot
@@ -495,20 +530,26 @@ export function summarizeQuotaCategories(account: Account | null | undefined): Q
   return result
 }
 
-// 返回账号综合最低配额百分比（同时覆盖 5h 与周额度窗口）；若尚未拉取配额则返回 -1。
-export function getMinQuotaPercentage(account: Account): number {
-  const categories = summarizeQuotaCategories(account)
-  if (categories.length > 0) {
+// 返回账号综合最低配额百分比（同时覆盖所有分类双窗口与合并后全部客户端模型）；若尚未拉取配额则返回 -1。
+export function getMinQuotaPercentage(account: Account, nowMs = Date.now()): number {
+  const categories = summarizeQuotaCategories(account, nowMs)
+  const merged = mergeAccountModels(account)
+
+  if (categories.length === 0 && merged.length === 0) {
+    const rawModels = account.quota?.models ?? []
+    if (rawModels.length === 0) return -1
     let min = 100
-    for (const cat of categories) {
-      if (cat.percentage < min) min = cat.percentage
+    for (const m of rawModels) {
+      if (m.percentage < min) min = m.percentage
     }
     return min
   }
-  const models = account.quota?.models ?? []
-  if (models.length === 0) return -1
+
   let min = 100
-  for (const m of models) {
+  for (const cat of categories) {
+    if (cat.percentage < min) min = cat.percentage
+  }
+  for (const m of merged) {
     if (m.percentage < min) min = m.percentage
   }
   return min
@@ -523,23 +564,27 @@ export function isAccountAbnormal(account: Account): boolean {
 }
 
 // 判断账号是否处于「低配额」状态（未异常且已拉取配额，最低剩余百分比 <= 阈值）。
-export function isAccountLowQuota(account: Account, threshold = 20): boolean {
+export function isAccountLowQuota(account: Account, threshold = 20, nowMs = Date.now()): boolean {
   if (isAccountAbnormal(account)) return false
-  const minPct = getMinQuotaPercentage(account)
+  const minPct = getMinQuotaPercentage(account, nowMs)
   return minPct >= 0 && minPct <= threshold
 }
 
-// 获取账号最早的配额重置时间文本（同时覆盖 5h / 周额度与模型明细）。
-export function getEarliestResetTime(account: Account): string {
+// 获取账号最早的配额重置时间文本（同时覆盖全部分类双窗口与单模型明细）。
+export function getEarliestResetTime(account: Account, nowMs = Date.now()): string {
   let earliest = ''
-  for (const cat of summarizeQuotaCategories(account)) {
+  for (const cat of summarizeQuotaCategories(account, nowMs)) {
     if (isEarlierISO(cat.resetTime, earliest)) {
       earliest = cat.resetTime
     }
   }
+  for (const m of mergeAccountModels(account)) {
+    if (m.resetTime && isEarlierISO(m.resetTime, earliest)) {
+      earliest = m.resetTime
+    }
+  }
   if (earliest) return earliest
-  const models = account.quota?.models ?? []
-  for (const m of models) {
+  for (const m of account.quota?.models ?? []) {
     if (m.resetTime && isEarlierISO(m.resetTime, earliest)) {
       earliest = m.resetTime
     }

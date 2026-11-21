@@ -41,6 +41,21 @@ function targetLabel(target: string): string {
   return 'Antigravity Desktop'
 }
 
+function errorStageLabel(stage?: string): string {
+  switch (stage) {
+    case 'token_refresh':
+      return '令牌刷新'
+    case 'credential_write':
+      return '凭据写入'
+    case 'state_commit':
+      return '状态保存'
+    case 'client_launch':
+      return '客户端启动'
+    default:
+      return stage ? stage : ''
+  }
+}
+
 async function handleClear() {
   clearing.value = true
   try {
@@ -187,16 +202,30 @@ async function handleClear() {
                   </div>
                   <div
                     v-else-if="item.success && item.errorMessage"
-                    class="inline-flex items-center gap-1.5"
+                    class="inline-flex items-center gap-1.5 max-w-full"
                     style="color: var(--warning-text)"
                   >
                     <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
+                    <span
+                      v-if="errorStageLabel(item.errorStage)"
+                      class="px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0"
+                      style="background-color: var(--warning-soft); color: var(--warning-text)"
+                    >
+                      {{ errorStageLabel(item.errorStage) }}
+                    </span>
                     <span class="truncate" :title="item.errorMessage">
                       凭据已切换（{{ item.errorMessage }}）
                     </span>
                   </div>
-                  <div v-else class="inline-flex items-center gap-1.5" style="color: var(--danger-text)">
+                  <div v-else class="inline-flex items-center gap-1.5 max-w-full" style="color: var(--danger-text)">
                     <XCircle class="w-3.5 h-3.5 shrink-0" />
+                    <span
+                      v-if="errorStageLabel(item.errorStage)"
+                      class="px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0"
+                      style="background-color: var(--danger-soft); color: var(--danger-text)"
+                    >
+                      {{ errorStageLabel(item.errorStage) }}
+                    </span>
                     <span class="truncate" :title="item.errorMessage">
                       {{ item.errorMessage || '切换失败' }}
                     </span>

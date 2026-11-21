@@ -53,8 +53,8 @@ const tableRows = computed(() =>
     account: acc,
     abnormal: isAccountAbnormal(acc),
     tier: getTierLabel(acc),
-    categories: summarizeQuotaCategories(acc),
-    earliestReset: getEarliestResetTime(acc),
+    categories: summarizeQuotaCategories(acc, appStore.nowMs),
+    earliestReset: getEarliestResetTime(acc, appStore.nowMs),
     group: acc.groupId ? (appStore.groupMap.get(acc.groupId) ?? null) : null,
   })),
 )

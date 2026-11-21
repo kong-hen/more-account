@@ -5,16 +5,32 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-// WriteJSONAtomic 以临时文件 + fsync + rename 方式原子写入 JSON，防止崩溃损坏文件。
-func WriteJSONAtomic(path string, v any, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("创建目录失败 %s: %w", dir, err)
+// ExpandHomePath 将以 ~ 或 ~/ 开头的路径展开为当前用户主目录。
+func ExpandHomePath(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
 	}
+	if trimmed == "~" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return home
+		}
+		return trimmed
+	}
+	if strings.HasPrefix(trimmed, "~/") || strings.HasPrefix(trimmed, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, trimmed[2:])
+		}
+	}
+	return trimmed
+}
 
+// WriteJSONAtomic 以排他临时文件 + fsync + rename 方式原子写入 JSON，防止崩溃损坏文件或权限泄露。
+func WriteJSONAtomic(path string, v any, perm os.FileMode) error {
 	raw, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化 JSON 失败: %w", err)
@@ -24,21 +40,24 @@ func WriteJSONAtomic(path string, v any, perm os.FileMode) error {
 	return WriteBytesAtomic(path, raw, perm)
 }
 
-// WriteBytesAtomic 将原始字节以原子替换方式写入目标路径。
+// WriteBytesAtomic 将原始字节以排他临时文件（O_EXCL）原子替换方式写入目标路径，并强制应用目标权限。
 func WriteBytesAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("创建目录失败 %s: %w", dir, err)
 	}
 
-	tmpPath := filepath.Join(dir, fmt.Sprintf(".%s.tmp-%d-%d", filepath.Base(path), os.Getpid(), time.Now().UnixNano()))
-	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	file, err := os.CreateTemp(dir, fmt.Sprintf(".%s.tmp-*", filepath.Base(path)))
 	if err != nil {
 		return fmt.Errorf("创建临时文件失败: %w", err)
 	}
+	tmpPath := file.Name()
 
 	closed := false
 	writeErr := func() error {
+		if err := file.Chmod(perm); err != nil {
+			return err
+		}
 		if _, err := file.Write(data); err != nil {
 			return err
 		}
@@ -64,6 +83,7 @@ func WriteBytesAtomic(path string, data []byte, perm os.FileMode) error {
 			}
 			_ = os.Remove(backupPath)
 		}
+		_ = os.Chmod(path, perm)
 		return nil
 	}()
 

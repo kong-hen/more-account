@@ -1,14 +1,43 @@
 <script setup lang="ts">
-// 响应式 Flexbox Token 堆叠趋势柱状图，支持悬浮查看精确输入 / 输出 / Thinking / 缓存与估算分布。
-import { computed, ref } from 'vue'
+// 响应式 Flexbox Token 堆叠趋势柱状图，支持按天/周/月切换粒度与悬浮查看精确输入 / 输出 / Thinking / 缓存与估算分布。
+import { computed, ref, watch } from 'vue'
 import { formatExactNumber, formatTokenCount } from '@/utils/quota'
-import type { UsageTrendBucket } from '@/types/models'
+import type { TokenUsageQuery, UsageTrendBucket } from '@/types/models'
 
-const props = defineProps<{
-  buckets: UsageTrendBucket[]
+const props = withDefaults(
+  defineProps<{
+    buckets: UsageTrendBucket[]
+    granularity?: TokenUsageQuery['granularity']
+  }>(),
+  {
+    granularity: 'day',
+  },
+)
+
+const emit = defineEmits<{
+  (e: 'update:granularity', val: TokenUsageQuery['granularity']): void
 }>()
 
+const granularityOptions: Array<{ id: TokenUsageQuery['granularity']; label: string }> = [
+  { id: 'day', label: '按天' },
+  { id: 'week', label: '按周' },
+  { id: 'month', label: '按月' },
+]
+
 const hoveredIndex = ref<number | null>(null)
+
+watch(
+  () => [props.buckets, props.granularity] as const,
+  () => {
+    hoveredIndex.value = null
+  },
+)
+
+const unitLabel = computed(() => {
+  if (props.granularity === 'month') return '单月'
+  if (props.granularity === 'week') return '单周'
+  return '单日'
+})
 
 const visibleBuckets = computed(() => {
   // 最多优雅展示最近 24 个时间桶，保证柱宽清晰不拥挤
@@ -81,23 +110,48 @@ const hoveredBucket = computed(() => {
         </p>
       </div>
 
-      <!-- 图例 -->
-      <div class="flex items-center gap-3 text-[11px]" style="color: var(--text-muted)">
-        <span class="inline-flex items-center gap-1.5">
-          <span class="w-2.5 h-2.5 rounded-sm" style="background-color: var(--accent)" />输入
-        </span>
-        <span class="inline-flex items-center gap-1.5">
-          <span class="w-2.5 h-2.5 rounded-sm" style="background-color: var(--success)" />输出
-        </span>
-        <span class="inline-flex items-center gap-1.5">
-          <span class="w-2.5 h-2.5 rounded-sm" style="background-color: #8b5cf6" />Thinking
-        </span>
-        <span class="inline-flex items-center gap-1.5">
-          <span class="w-2.5 h-2.5 rounded-sm" style="background-color: var(--warning)" />缓存
-        </span>
-        <span v-if="hasAnyEstimated" class="inline-flex items-center gap-1.5">
-          <span class="w-2.5 h-2.5 rounded-sm" style="background-color: var(--text-muted)" />估算
-        </span>
+      <div class="flex items-center flex-wrap gap-3">
+        <!-- 图例 -->
+        <div class="flex items-center gap-3 text-[11px]" style="color: var(--text-muted)">
+          <span class="inline-flex items-center gap-1.5">
+            <span class="w-2.5 h-2.5 rounded-sm" style="background-color: var(--accent)" />输入
+          </span>
+          <span class="inline-flex items-center gap-1.5">
+            <span class="w-2.5 h-2.5 rounded-sm" style="background-color: var(--success)" />输出
+          </span>
+          <span class="inline-flex items-center gap-1.5">
+            <span class="w-2.5 h-2.5 rounded-sm" style="background-color: #8b5cf6" />Thinking
+          </span>
+          <span class="inline-flex items-center gap-1.5">
+            <span class="w-2.5 h-2.5 rounded-sm" style="background-color: var(--warning)" />缓存
+          </span>
+          <span v-if="hasAnyEstimated" class="inline-flex items-center gap-1.5">
+            <span class="w-2.5 h-2.5 rounded-sm" style="background-color: var(--text-muted)" />估算
+          </span>
+        </div>
+
+        <!-- 聚合粒度切换 -->
+        <div
+          class="inline-flex items-center p-0.5 rounded-lg border"
+          style="border-color: var(--border-subtle); background-color: var(--bg-app)"
+          role="group"
+          aria-label="趋势图时间粒度"
+        >
+          <button
+            v-for="opt in granularityOptions"
+            :key="opt.id"
+            type="button"
+            class="px-2 py-0.5 rounded-md text-[11px] font-medium cursor-pointer transition-colors"
+            :style="
+              granularity === opt.id
+                ? { backgroundColor: 'var(--bg-surface)', color: 'var(--accent)', boxShadow: 'var(--shadow-card)' }
+                : { color: 'var(--text-secondary)' }
+            "
+            @click="emit('update:granularity', opt.id)"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -125,7 +179,7 @@ const hoveredBucket = computed(() => {
           </span>
         </template>
         <span v-else style="color: var(--text-muted)">
-          将鼠标移动至柱状图查看单日消耗详情
+          将鼠标移动至柱状图查看{{ unitLabel }}消耗详情
         </span>
       </div>
 

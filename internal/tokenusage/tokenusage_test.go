@@ -2,8 +2,10 @@ package tokenusage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -283,6 +285,19 @@ func TestAggregatorStrictWeakOrderingWorkspaceAndCacheIsolation(t *testing.T) {
 		if pt.Exact.TotalTokens != 0 || pt.EstimatedTotalTokens != 0 {
 			t.Fatalf("零用量步骤不应在时间序列产生非零桶: %+v", pt)
 		}
+	}
+
+	// 验证零有效步骤对话的 GetConversationDetail 始终序列化为空数组 [] 而非 null
+	zeroDetail, err := svc.GetConversationDetail("zero-conv")
+	if err != nil {
+		t.Fatalf("读取 zero-conv 详情失败: %v", err)
+	}
+	rawDetailJSON, err := json.Marshal(zeroDetail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rawDetailJSON), `"turns":null`) {
+		t.Fatalf("ConversationDetail.Turns 绝不允许序列化为 null: %s", string(rawDetailJSON))
 	}
 
 	// 切换到空目录 dir2，重新创建 Service 读取磁盘缓存，不应串联出 dir1 的对话

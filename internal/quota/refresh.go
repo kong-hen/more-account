@@ -46,26 +46,14 @@ func (s *Service) RefreshAccount(ctx context.Context, accountID string) (model.A
 
 	freshToken, refreshed, err := s.oauthClient.EnsureFreshToken(ctx, acc.Token)
 	if err != nil {
-		now := time.Now().Unix()
 		isInvalid := errors.Is(err, oauth.ErrInvalidGrant)
-		errInfo := &model.QuotaErrorInfo{
-			Message:   err.Error(),
-			Reason:    classifyTokenErrorReason(err),
-			Timestamp: now,
-		}
-		saved, updateErr := s.store.UpdateAccount(accountID, func(target *model.Account) error {
-			if isInvalid {
-				target.Disabled = true
-				target.DisabledReason = "invalid_grant: " + err.Error()
-				target.DisabledAt = now
-			}
-			target.QuotaError = errInfo
-			return nil
-		})
-		if updateErr == nil {
+		if saved, updateErr := s.store.RecordTokenRefreshFailure(accountID, err, isInvalid); updateErr == nil {
 			return saved, err
 		}
-		acc.QuotaError = errInfo
+		acc.QuotaError = &model.QuotaErrorInfo{
+			Message:   err.Error(),
+			Timestamp: time.Now().Unix(),
+		}
 		return acc, err
 	}
 
@@ -145,13 +133,6 @@ func (s *Service) RefreshAccount(ctx context.Context, accountID string) (model.A
 		return acc, saveErr
 	}
 	return saved, nil
-}
-
-func classifyTokenErrorReason(err error) string {
-	if errors.Is(err, oauth.ErrInvalidGrant) {
-		return "INVALID_GRANT"
-	}
-	return "TOKEN_REFRESH_FAILED"
 }
 
 // RefreshAll 并发刷新全部账号配额，通过 onProgress 向前端汇报实时进度。

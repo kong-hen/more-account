@@ -3,6 +3,7 @@ package switcher
 import (
 	"database/sql"
 	"encoding/base64"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -205,4 +206,39 @@ func TestInjectStateDBPreservesSiblingSentinelsAndHandlesEmptyDB(t *testing.T) {
 	}
 	checkHasKey(userStatusKey, "customUserStatusSibling")
 	checkHasKey(enterpriseKey, "customEnterpriseSibling")
+}
+
+func TestMatchMacProcessCommandAndAppPathValidation(t *testing.T) {
+	// 1. 验证字面量前缀匹配免疫正则元字符且不误匹配将路径作为参数的编辑器进程
+	appBundle := "/Applications/Antigravity (Beta)+1.app"
+	if !matchMacProcessCommand(appBundle+"/Contents/MacOS/Antigravity --flag", appBundle, "") {
+		t.Fatal("应当匹配 .app 包内可执行文件启动的进程")
+	}
+	if matchMacProcessCommand("/usr/bin/vim "+appBundle+"/Contents/Info.plist", appBundle, "") {
+		t.Fatal("不应误匹配仅在参数中包含 .app 路径的无关编辑器进程")
+	}
+	if matchMacProcessCommand("/Applications/OtherApp.app/Contents/MacOS/Other", "/", "/") {
+		t.Fatal("根路径或宽泛目录绝不允许匹配任何进程")
+	}
+
+	// 2. 验证客户端路径合法性检查拒绝普通目录（如 TempDir 或 /）
+	plainDir := t.TempDir()
+	if isValidClientAppPathForOS(plainDir, "darwin") || isValidClientAppPathForOS("/", "darwin") {
+		t.Fatal("普通目录不应通过 macOS 客户端应用路径校验")
+	}
+	fakeApp := filepath.Join(plainDir, "Antigravity.app")
+	if err := os.MkdirAll(filepath.Join(fakeApp, "Contents", "MacOS"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !isValidClientAppPathForOS(fakeApp, "darwin") {
+		t.Fatal("包含 Contents/MacOS 的合法 .app 目录应当通过校验")
+	}
+
+	// 3. 验证 Protobuf 重复标量字段遵循 Last-One-Wins 规范
+	var dupMsg []byte
+	dupMsg = append(dupMsg, EncodeStringField(1, "stale-token")...)
+	dupMsg = append(dupMsg, EncodeStringField(1, "latest-token")...)
+	if got := extractStringField(dupMsg, 1); got != "latest-token" {
+		t.Fatalf("重复标量字段应返回最后一个值 latest-token，实际 %q", got)
+	}
 }

@@ -79,6 +79,7 @@ type scannedConversation struct {
 
 type scanSnapshot struct {
 	DataDir        string
+	DirMarker      string
 	Conversations  []scannedConversation
 	ScanDurationMs int64
 	ScannedFiles   int
@@ -116,7 +117,7 @@ func DefaultAntigravityDataDir() string {
 func (s *Service) resolveDataDir() (customDir, effectiveDir, defaultDir string) {
 	defaultDir = DefaultAntigravityDataDir()
 	if s.getCustomDir != nil {
-		customDir = strings.TrimSpace(s.getCustomDir())
+		customDir = storage.ExpandHomePath(s.getCustomDir())
 	}
 	if customDir != "" {
 		effectiveDir = customDir
@@ -126,7 +127,27 @@ func (s *Service) resolveDataDir() (customDir, effectiveDir, defaultDir string) 
 	return customDir, effectiveDir, defaultDir
 }
 
-// Query 零阻塞读取当前内存快照并按查询条件聚合；若尚无快照则执行一次增量扫描。
+func computeQuickDirMarker(dataDir string) string {
+	if dataDir == "" {
+		return ""
+	}
+	targets := []string{
+		filepath.Join(dataDir, "conversation_summaries.db"),
+		filepath.Join(dataDir, "conversation_summaries.db-wal"),
+		filepath.Join(dataDir, "conversations"),
+	}
+	var sb strings.Builder
+	for _, p := range targets {
+		if st, err := os.Stat(p); err == nil {
+			fmt.Fprintf(&sb, "%d:%d;", st.ModTime().UnixNano(), st.Size())
+		} else {
+			sb.WriteString("0;")
+		}
+	}
+	return sb.String()
+}
+
+// Query 读取当前内存快照并按查询条件聚合；若尚无快照，或检测到本地会话摘要/目录发生变更（且距上次扫描超过 5 秒），自动执行增量保鲜扫描。
 func (s *Service) Query(query model.TokenUsageQuery) (*model.TokenUsageBundle, error) {
 	_, effectiveDir, _ := s.resolveDataDir()
 	s.snapMu.RLock()
@@ -134,7 +155,9 @@ func (s *Service) Query(query model.TokenUsageQuery) (*model.TokenUsageBundle, e
 	s.snapMu.RUnlock()
 
 	if snap != nil && snap.DataDir == effectiveDir {
-		return s.buildBundle(snap, query), nil
+		if time.Since(snap.LastSyncedAt) < 5*time.Second || snap.DirMarker == computeQuickDirMarker(effectiveDir) {
+			return s.buildBundle(snap, query), nil
+		}
 	}
 	return s.Sync(false, query)
 }
@@ -158,6 +181,7 @@ func (s *Service) runScan(dataDir string, rebuild bool) *scanSnapshot {
 	started := time.Now()
 	snap := &scanSnapshot{
 		DataDir:      dataDir,
+		DirMarker:    computeQuickDirMarker(dataDir),
 		LastSyncedAt: time.Now(),
 	}
 
@@ -538,10 +562,10 @@ func scanSingleConversationDB(dbPath string, fp fileFingerprint) (cachedConvEntr
 	}
 	bucketMap := make(map[bucketKey]*cachedModelBucket)
 
-	rows, err := db.Query(`SELECT idx, metadata, step_payload FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
+	rows, err := db.Query(`SELECT idx, metadata, COALESCE(LENGTH(step_payload), 0) FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
 	if err != nil {
 		// 若表结构不同，尝试只读 metadata
-		rows, err = db.Query(`SELECT idx, metadata, NULL FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
+		rows, err = db.Query(`SELECT idx, metadata, 0 FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
 		if err != nil {
 			return entry, err
 		}
@@ -550,8 +574,9 @@ func scanSingleConversationDB(dbPath string, fp fileFingerprint) (cachedConvEntr
 
 	for rows.Next() {
 		var idx int
-		var metaBlob, payloadBlob []byte
-		if err := rows.Scan(&idx, &metaBlob, &payloadBlob); err != nil {
+		var metaBlob []byte
+		var payloadLen int64
+		if err := rows.Scan(&idx, &metaBlob, &payloadLen); err != nil {
 			continue
 		}
 		stepMeta := ParseStepMetadata(metaBlob)
@@ -570,7 +595,7 @@ func scanSingleConversationDB(dbPath string, fp fileFingerprint) (cachedConvEntr
 
 		// 仅在存在精确遥测或有效载荷估算时才建桶统计，避免残留全零幽灵桶虚增对话数。
 		hasExact := usage != nil && usage.TotalTokens > 0
-		hasEst := !hasExact && len(payloadBlob) > 0
+		hasEst := !hasExact && payloadLen > 0
 		if !hasExact && !hasEst {
 			continue
 		}
@@ -625,7 +650,7 @@ func scanSingleConversationDB(dbPath string, fp fileFingerprint) (cachedConvEntr
 				TotalTokens:      usage.TotalTokens,
 			})
 		} else if hasEst {
-			estOut := estimateTokensFromPayload(payloadBlob)
+			estOut := estimateTokensFromPayloadLen(payloadLen)
 			bucket.EstimatedTurnCount++
 			bucket.EstOutput += estOut
 		}
@@ -704,22 +729,23 @@ func (s *Service) GetConversationDetail(conversationID string) (*model.Conversat
 		_ = genRows.Close()
 	}
 
-	rows, err := db.Query(`SELECT idx, status, metadata, step_payload FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
+	rows, err := db.Query(`SELECT idx, status, metadata, COALESCE(LENGTH(step_payload), 0) FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
 	if err != nil {
-		rows, err = db.Query(`SELECT idx, 0, metadata, NULL FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
+		rows, err = db.Query(`SELECT idx, 0, metadata, 0 FROM steps WHERE step_type = 15 ORDER BY idx ASC`)
 		if err != nil {
 			return nil, fmt.Errorf("查询对话步骤失败: %w", err)
 		}
 	}
 	defer rows.Close()
 
-	var turns []model.TurnUsageRecord
+	turns := make([]model.TurnUsageRecord, 0)
 	sliceMap := make(map[string]*model.ConversationModelSlice)
 
 	for rows.Next() {
 		var idx, status int
-		var metaBlob, payloadBlob []byte
-		if err := rows.Scan(&idx, &status, &metaBlob, &payloadBlob); err != nil {
+		var metaBlob []byte
+		var payloadLen int64
+		if err := rows.Scan(&idx, &status, &metaBlob, &payloadLen); err != nil {
 			continue
 		}
 		stepMeta := ParseStepMetadata(metaBlob)
@@ -752,7 +778,7 @@ func (s *Service) GetConversationDetail(conversationID string) (*model.Conversat
 		resolved := ResolveModelInfo(rawEnum, respModel, rawProvider)
 
 		hasExact := usage != nil && usage.TotalTokens > 0
-		hasEst := !hasExact && len(payloadBlob) > 0
+		hasEst := !hasExact && payloadLen > 0
 		if !hasExact && !hasEst {
 			continue
 		}
@@ -791,7 +817,7 @@ func (s *Service) GetConversationDetail(conversationID string) (*model.Conversat
 			slice.TurnCount++
 			slice.Exact.Add(turn.Exact)
 		} else {
-			estOut := estimateTokensFromPayload(payloadBlob)
+			estOut := estimateTokensFromPayloadLen(payloadLen)
 			turn.Estimated = model.EstimatedTokenTotals{
 				OutputTokens:       estOut,
 				TotalTokens:        estOut,

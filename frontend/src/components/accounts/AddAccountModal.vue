@@ -6,8 +6,7 @@ import BaseModal from '@/components/common/BaseModal.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { api, extractErrorMessage, onWailsEvent } from '@/services/api'
-import { copyToClipboard, maskEmail } from '@/utils/privacy'
-import type { Account } from '@/types/models'
+import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
 
 const props = defineProps<{
   open: boolean
@@ -30,6 +29,7 @@ const groupOptions = computed(() => [
 // OAuth 状态
 const oauthWaiting = ref(false)
 const oauthAuthUrl = ref('')
+const oauthRedirectUri = ref('')
 const oauthCallbackInput = ref('')
 const oauthUrlCopied = ref(false)
 const oauthError = ref('')
@@ -46,28 +46,10 @@ const tokenImporting = ref(false)
 const tokenError = ref('')
 const tokenSummary = ref('')
 
-let offComplete: (() => void) | null = null
 let offFailed: (() => void) | null = null
 
 function bindOAuthEvents() {
   unbindOAuthEvents()
-  offComplete = onWailsEvent('oauth:completed', async (payload: unknown) => {
-    const p = payload as { account?: Account } | null
-    oauthWaiting.value = false
-    oauthAuthUrl.value = ''
-    oauthCallbackInput.value = ''
-    await appStore.reloadAccounts()
-    if (p?.account?.email) {
-      appStore.notify(
-        `已通过 Google 授权添加账号 ${maskEmail(p.account.email, appStore.settings.privacyMode)}`,
-        'success',
-      )
-      appStore.activeDetailAccountId = p.account.id
-    } else {
-      appStore.notify('OAuth 授权成功', 'success')
-    }
-    emit('close')
-  })
   offFailed = onWailsEvent('oauth:failed', (payload: unknown) => {
     const p = payload as { error?: string } | null
     oauthWaiting.value = false
@@ -76,11 +58,22 @@ function bindOAuthEvents() {
 }
 
 function unbindOAuthEvents() {
-  offComplete?.()
   offFailed?.()
-  offComplete = null
   offFailed = null
 }
+
+// 接收 appStore 全局 OAuth 入库完成通知，自动收起弹窗（避免与全局监听重复弹 Toast，同时确保提前关窗也不丢账号）
+watch(
+  () => appStore.oauthCompletedSeq,
+  () => {
+    if (!props.open) return
+    oauthWaiting.value = false
+    oauthAuthUrl.value = ''
+    oauthRedirectUri.value = ''
+    oauthCallbackInput.value = ''
+    emit('close')
+  },
+)
 
 watch(
   () => props.open,
@@ -122,6 +115,7 @@ async function startOAuth() {
   try {
     const sess = await api.startOAuthLogin(targetGroupId.value)
     oauthAuthUrl.value = sess.authUrl
+    oauthRedirectUri.value = sess.redirectUri
   } catch (err) {
     oauthWaiting.value = false
     oauthError.value = extractErrorMessage(err)
@@ -131,6 +125,7 @@ async function startOAuth() {
 async function cancelOAuth() {
   oauthWaiting.value = false
   oauthAuthUrl.value = ''
+  oauthRedirectUri.value = ''
   oauthCallbackInput.value = ''
   await api.cancelOAuthLogin().catch(() => {})
 }
@@ -186,6 +181,13 @@ async function handleImportLocal() {
   }
 }
 
+function formatFailedSource(source: string): string {
+  if (!appStore.settings.privacyMode) return source
+  if (source.includes('@')) return maskEmail(source, true)
+  if (source.startsWith('第 ')) return source
+  return maskToken(source)
+}
+
 async function handleImportTokens() {
   if (!tokenInput.value.trim()) {
     tokenError.value = '请输入 Refresh Token（每行一条）或粘贴账号 JSON'
@@ -204,7 +206,7 @@ async function handleImportTokens() {
       tokenInput.value = ''
       emit('close')
     } else if (okCount > 0) {
-      tokenSummary.value = `成功导入 ${okCount} 个，失败 ${failCount} 个：${res.failed.map((f) => `${f.source}(${f.error})`).join('；')}`
+      tokenSummary.value = `成功导入 ${okCount} 个，失败 ${failCount} 个：${res.failed.map((f) => `${formatFailedSource(f.source)}(${f.error})`).join('；')}`
       appStore.notify(`部分导入成功（${okCount} 成功 / ${failCount} 失败）`, 'warning')
     } else {
       tokenError.value = res.failed?.[0]?.error || '导入失败，请检查令牌或 JSON 格式'
@@ -223,6 +225,8 @@ async function handleImportTokens() {
     title="添加反重力账号"
     subtitle="支持 Google OAuth 授权、读取本机已登录账号或批量导入 Refresh Token / JSON"
     width-class="w-[540px]"
+    :prevent-close="localImporting || tokenImporting"
+    :close-on-outside="!(localImporting || tokenImporting)"
     @close="emit('close')"
   >
     <div class="space-y-4">
@@ -347,7 +351,7 @@ async function handleImportTokens() {
                   id="manual-callback-url"
                   v-model="oauthCallbackInput"
                   type="text"
-                  placeholder="http://127.0.0.1:xxxxx/oauth-callback?code=..."
+                  :placeholder="oauthRedirectUri ? `${oauthRedirectUri}?code=...` : 'http://127.0.0.1:xxxxx/oauth-callback?code=...'"
                   class="flex-1 px-2.5 py-1.5 text-xs rounded-lg border font-mono-num"
                   style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
                 />

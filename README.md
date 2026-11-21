@@ -23,11 +23,11 @@
 ### 常用命令
 
 ```bash
+# 前端依赖安装、类型检查与构建
+cd frontend && pnpm install && pnpm typecheck && pnpm build
+
 # 运行全部 Go 后端单元测试（含并发竞争检测）
 go test -race ./...
-
-# 前端类型检查与构建
-cd frontend && pnpm typecheck && pnpm build
 
 # 开发调试模式（热重载）
 wails dev

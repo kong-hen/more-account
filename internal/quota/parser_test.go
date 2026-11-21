@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -327,5 +328,40 @@ func TestRefreshAccountPreservesDetailsAndPriorTierSummaryOnPartialFailure(t *te
 	}
 	if len(updated.Quota.SummaryBuckets) != 1 || updated.Quota.SummaryBuckets[0].BucketID != "gemini-weekly" {
 		t.Fatalf("retrieveUserQuotaSummary 瞬时失败时应保留既有共享额度桶: %+v", updated.Quota.SummaryBuckets)
+	}
+}
+
+func TestSanitizeOverrideURLOperationPathAndPrivacyError(t *testing.T) {
+	if got := sanitizeCloudCodeBaseURLOverride("http://evil.example.com"); got != "" {
+		t.Fatalf("非本机回环的明文 http 覆盖地址必须被拦截，实际 %q", got)
+	}
+	if got := sanitizeCloudCodeBaseURLOverride("http://127.0.0.1:8080/"); got != "http://127.0.0.1:8080" {
+		t.Fatalf("本机回环测试地址应当允许，实际 %q", got)
+	}
+	if got := sanitizeCloudCodeBaseURLOverride("https://custom-cloudcode.googleapis.com/"); got != "https://custom-cloudcode.googleapis.com" {
+		t.Fatalf("合法 https 覆盖地址应当允许，实际 %q", got)
+	}
+
+	if _, ok := sanitizeOperationPath("../admin/secret"); ok {
+		t.Fatal("包含 .. 的 operation 路径必须被拦截")
+	}
+	if clean, ok := sanitizeOperationPath("v1internal/operations/op-123"); !ok || clean != "operations/op-123" {
+		t.Fatalf("应自动剥离重复的 v1internal/ 前缀，实际 ok=%v clean=%q", ok, clean)
+	}
+
+	// 验证非 2xx 错误消息不拼接明文邮箱，防止绕过前端隐私模式
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad request"}}`))
+	}))
+	defer srv.Close()
+
+	client := &Client{HTTPClient: srv.Client(), BaseURLOverride: srv.URL}
+	_, err := client.FetchQuota(context.Background(), model.TokenData{AccessToken: "at"}, "secret-user@example.com")
+	if err == nil {
+		t.Fatal("HTTP 400 应返回错误")
+	}
+	if strings.Contains(err.Error(), "secret-user@example.com") {
+		t.Fatalf("配额错误消息不应泄露明文邮箱: %v", err)
 	}
 }

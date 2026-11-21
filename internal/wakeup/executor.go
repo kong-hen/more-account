@@ -18,10 +18,12 @@ import (
 )
 
 const (
-	streamPath              = "/v1internal:streamGenerateContent?alt=sse"
-	defaultWakeupPrompt     = "hi"
-	defaultWakeupModel      = "gemini-3.8-flash-high"
-	antigravitySystemPrompt = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
+	streamPath                  = "/v1internal:streamGenerateContent?alt=sse"
+	defaultWakeupPrompt         = "hi"
+	defaultWakeupModel          = "gemini-3.8-flash-high"
+	defaultMaxOutputTokens      = 64
+	minThinkingModelOutputToken = 256
+	antigravitySystemPrompt     = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
 // StreamResult 表示一次 SSE 唤醒请求的解析结果。
@@ -41,11 +43,37 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// isLikelyThinkingModel 判断模型是否默认启用思维链（thought tokens 计入 maxOutputTokens 预算）。
+func isLikelyThinkingModel(modelName string) bool {
+	lower := strings.ToLower(strings.TrimSpace(modelName))
+	if lower == "" {
+		return true
+	}
+	for _, kw := range []string{"-high", "-medium", "-low", "thinking", "argon", "carbon", "opus", "sonnet", "gemini-3", "gemini-4"} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeWakeupMaxOutputTokens(modelName string, requested int) int {
+	if requested <= 0 {
+		requested = defaultMaxOutputTokens
+	}
+	// Thinking 模型会将思考片段计入 maxOutputTokens；若上限过小（如 16），流会在思考阶段因 MAX_TOKENS 提前截断而无正文分片。
+	if isLikelyThinkingModel(modelName) && requested < minThinkingModelOutputToken {
+		return minThinkingModelOutputToken
+	}
+	return requested
+}
+
 func buildWakeupPayload(projectID, modelName, prompt string, maxOutputTokens int) map[string]any {
 	nowMs := time.Now().UnixMilli()
-	genCfg := map[string]any{"temperature": 0}
-	if maxOutputTokens > 0 {
-		genCfg["maxOutputTokens"] = maxOutputTokens
+	effectiveMaxTokens := normalizeWakeupMaxOutputTokens(modelName, maxOutputTokens)
+	genCfg := map[string]any{
+		"temperature":     0,
+		"maxOutputTokens": effectiveMaxTokens,
 	}
 	body := map[string]any{
 		"requestId":   fmt.Sprintf("req_%d_%s", nowMs, randomHex(3)),
@@ -73,11 +101,14 @@ func buildWakeupPayload(projectID, modelName, prompt string, maxOutputTokens int
 }
 
 // ParseStreamResult 解析 CloudCode SSE 流式文本中的最终回复和 Token 用量，过滤 thought 思考片段。
+// 若模型返回合法 HTTP 200 流且完成了思考推理（产生 thought 分片或有效候选输出 Token），即使未输出非思考可见字符也视为唤醒成功。
 func ParseStreamResult(rawText string) (*StreamResult, error) {
 	var (
-		replyParts []string
-		res        StreamResult
-		gotEvent   bool
+		replyParts     []string
+		res            StreamResult
+		gotEvent       bool
+		sawCandidate   bool
+		sawThoughtPart bool
 	)
 
 	processObj := func(obj map[string]any) {
@@ -100,6 +131,7 @@ func ParseStreamResult(rawText string) (*StreamResult, error) {
 		}
 
 		if cand != nil {
+			sawCandidate = true
 			if content, ok := cand["content"].(map[string]any); ok {
 				if parts, ok := content["parts"].([]any); ok {
 					for _, p := range parts {
@@ -108,6 +140,9 @@ func ParseStreamResult(rawText string) (*StreamResult, error) {
 							continue
 						}
 						if thought, ok := pm["thought"].(bool); ok && thought {
+							if txt, _ := pm["text"].(string); strings.TrimSpace(txt) != "" {
+								sawThoughtPart = true
+							}
 							continue
 						}
 						if txt, ok := pm["text"].(string); ok && txt != "" {
@@ -156,18 +191,31 @@ func ParseStreamResult(rawText string) (*StreamResult, error) {
 	}
 	res.Reply = strings.TrimSpace(strings.Join(replyParts, ""))
 	if res.Reply == "" {
-		return nil, fmt.Errorf("唤醒请求未收到模型文本回复")
+		if sawThoughtPart || (sawCandidate && res.TotalTokens > 0) {
+			res.Reply = "[已完成思考唤醒]"
+		} else {
+			return nil, fmt.Errorf("唤醒请求未收到模型文本回复")
+		}
 	}
 	return &res, nil
 }
 
-// extractUsageMeta 从流式分片中更新累计 Token 计数，始终取最新且不回退的最大累计值。
+// extractUsageMeta 从流式分片中更新累计 Token 计数，始终取最新且不回退的最大累计值（兼容 thoughtsTokenCount）。
 func extractUsageMeta(usage map[string]any, res *StreamResult) {
 	if v, ok := usage["promptTokenCount"].(float64); ok && int(v) > res.PromptTokens {
 		res.PromptTokens = int(v)
 	}
-	if v, ok := usage["candidatesTokenCount"].(float64); ok && int(v) > res.CompletionTokens {
-		res.CompletionTokens = int(v)
+	candTokens := 0
+	if v, ok := usage["candidatesTokenCount"].(float64); ok && int(v) > 0 {
+		candTokens = int(v)
+	}
+	thoughtTokens := 0
+	if v, ok := usage["thoughtsTokenCount"].(float64); ok && int(v) > 0 {
+		thoughtTokens = int(v)
+	}
+	combinedOut := candTokens + thoughtTokens
+	if combinedOut > res.CompletionTokens {
+		res.CompletionTokens = combinedOut
 	}
 	if v, ok := usage["totalTokenCount"].(float64); ok && int(v) > res.TotalTokens {
 		res.TotalTokens = int(v)
@@ -190,9 +238,6 @@ func ExecuteWakeupRequest(ctx context.Context, httpClient *http.Client, token mo
 	}
 	if strings.TrimSpace(prompt) == "" {
 		prompt = defaultWakeupPrompt
-	}
-	if maxOutputTokens <= 0 {
-		maxOutputTokens = 16
 	}
 	if strings.TrimSpace(modelName) == "" {
 		modelName = defaultWakeupModel

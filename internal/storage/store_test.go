@@ -1,8 +1,11 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"more-account/internal/model"
@@ -287,5 +290,62 @@ func TestStoreDeepCopyAndAtomicPartialUpdates(t *testing.T) {
 	finalWS := store.GetWakeupState()
 	if finalWS.Tasks[0].Name != "改名后的任务" || finalWS.Tasks[0].LastRunAt != 1700000000000 {
 		t.Fatalf("UpdateWakeupTaskLastRun 状态异常: %+v", finalWS.Tasks[0])
+	}
+
+	// 6. 前端旧快照覆盖保存时不得回退后端较新的 LastRunAt，且删除账号必须级联清理唤醒任务引用
+	staleSnapshot := store.GetWakeupState()
+	staleSnapshot.Tasks[0].LastRunAt = 1600000000000 // 模拟旧快照
+	if err := store.SaveWakeupState(staleSnapshot); err != nil {
+		t.Fatalf("保存旧快照失败: %v", err)
+	}
+	if got := store.GetWakeupState().Tasks[0].LastRunAt; got != 1700000000000 {
+		t.Fatalf("SaveWakeupState 不应把 LastRunAt 回退为旧值: got=%d", got)
+	}
+
+	if err := store.DeleteAccounts([]string{acc2.ID}); err != nil {
+		t.Fatalf("删除账号 2 失败: %v", err)
+	}
+	if rem := store.GetWakeupState().Tasks[0].Schedule.SelectedAccounts; len(rem) != 0 {
+		t.Fatalf("删除账号后唤醒任务仍残留失效账号 ID: %v", rem)
+	}
+
+	// 7. RecordTokenRefreshFailure / RecordTokenRefreshSuccess 闭环测试
+	if _, err := store.RecordTokenRefreshFailure(acc3.ID, errors.New("token revoked"), true); err != nil {
+		t.Fatalf("记录 invalid_grant 失败: %v", err)
+	}
+	disabledAcc, _ := store.GetAccount(acc3.ID)
+	if !disabledAcc.Disabled || disabledAcc.QuotaError == nil || disabledAcc.QuotaError.Reason != "INVALID_GRANT" {
+		t.Fatalf("期望账号进入 INVALID_GRANT 禁用状态，实际: %+v", disabledAcc)
+	}
+	if _, err := store.RecordTokenRefreshSuccess(acc3.ID, model.TokenData{AccessToken: "recovered", RefreshToken: "rt-3"}); err != nil {
+		t.Fatalf("记录令牌恢复失败: %v", err)
+	}
+	recoveredAcc, _ := store.GetAccount(acc3.ID)
+	if recoveredAcc.Disabled {
+		t.Fatalf("令牌刷新恢复后应自动解除 invalid_grant 禁用标记: %+v", recoveredAcc)
+	}
+}
+
+func TestWriteBytesAtomicTightensPermissionsAndExpandHome(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "export.json")
+	if err := os.WriteFile(target, []byte("public-old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteBytesAtomic(target, []byte(`{"secret":"token"}`), 0600); err != nil {
+		t.Fatalf("WriteBytesAtomic 失败: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		st, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != 0600 {
+			t.Fatalf("覆盖已有 0644 文件后权限必须收紧为 0600，实际 %o", st.Mode().Perm())
+		}
+	}
+
+	expanded := ExpandHomePath("~/.gemini/antigravity")
+	if strings.HasPrefix(expanded, "~") {
+		t.Fatalf("ExpandHomePath 未展开波浪号路径: %q", expanded)
 	}
 }

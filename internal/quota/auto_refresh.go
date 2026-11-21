@@ -132,8 +132,17 @@ func (r *AutoRefresher) RunDueOnce(ctx context.Context) int {
 	}
 	currentAccountID := r.store.GetCurrentAccountID()
 	accounts := r.store.ListAccounts()
+	aliveIDs := make(map[string]struct{}, len(accounts))
+	for _, acc := range accounts {
+		aliveIDs[acc.ID] = struct{}{}
+	}
 
 	r.mu.Lock()
+	for id := range r.summaryBackfillTried {
+		if _, ok := aliveIDs[id]; !ok {
+			delete(r.summaryBackfillTried, id)
+		}
+	}
 	dueIDs, backfillIDs := selectDueAccountIDs(
 		accounts,
 		currentAccountID,
@@ -159,11 +168,15 @@ func (r *AutoRefresher) RunDueOnce(ctx context.Context) int {
 	}
 
 	refreshed, succeededIDs := r.refreshIDs(ctx, dueIDs, 4)
-	if len(backfillSet) > 0 && len(succeededIDs) > 0 {
-		// 仅在补拉实际成功时记录，避免断网失败后永久不再立即补拉。
+	if len(succeededIDs) > 0 {
+		// 仅在刷新实际成功时记录（含首次拉取后确认无 summaryBuckets 的账号），避免 30s 后无意义二次补拉，同时保证断网失败后仍可重试。
 		r.mu.Lock()
 		for _, id := range succeededIDs {
 			if _, ok := backfillSet[id]; ok {
+				r.summaryBackfillTried[id] = true
+				continue
+			}
+			if latest, ok := r.store.GetAccount(id); ok && latest.Quota != nil && len(latest.Quota.Models) > 0 && len(latest.Quota.SummaryBuckets) == 0 {
 				r.summaryBackfillTried[id] = true
 			}
 		}

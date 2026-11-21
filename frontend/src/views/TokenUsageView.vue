@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Token 用量统计主视图：严格只读扫描本地 ~/.gemini/antigravity，展示 KPI 卡、SVG 趋势图、模型/工作区分布及分页对话表。
+// Token 用量统计主视图：严格只读扫描本地 ~/.gemini/antigravity，展示 KPI 卡、堆叠趋势图、模型/工作区分布及可筛选排序的分页对话表。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   RefreshCw,
@@ -13,6 +13,11 @@ import {
   ChevronLeft,
   ChevronRight,
   FolderOpen,
+  AlertTriangle,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
+  X,
 } from 'lucide-vue-next'
 import UsageTrendChart from '@/components/tokenusage/UsageTrendChart.vue'
 import ConversationDetailDrawer from '@/components/tokenusage/ConversationDetailDrawer.vue'
@@ -22,6 +27,8 @@ import { formatDateTime, formatExactNumber, formatTokenCount } from '@/utils/quo
 import type { TokenUsageQuery } from '@/types/models'
 
 const usageStore = useTokenUsageStore()
+
+type SortColumn = TokenUsageQuery['sort']
 
 const presets: Array<{ id: TokenUsageQuery['preset']; label: string }> = [
   { id: 'today', label: '今日' },
@@ -33,18 +40,18 @@ const presets: Array<{ id: TokenUsageQuery['preset']; label: string }> = [
 
 const overview = computed(() => usageStore.bundle?.overview ?? null)
 const conversations = computed(() => usageStore.bundle?.conversations ?? null)
+const usageSettings = computed(() => usageStore.bundle?.settings ?? null)
 const totalAllTokens = computed(() => {
   if (!overview.value) return 0
   return overview.value.exact.totalTokens + overview.value.estimated.totalTokens
 })
 
 const searchInput = ref(usageStore.query.search)
+const sortStatusAnnouncement = ref('')
 let searchDebounceTimer: number | null = null
 
 onMounted(() => {
-  if (!usageStore.bundle) {
-    void usageStore.fetchQuery()
-  }
+  void usageStore.fetchQuery()
 })
 
 onBeforeUnmount(() => {
@@ -58,6 +65,10 @@ function setPreset(preset: TokenUsageQuery['preset']) {
   void usageStore.fetchQuery({ preset, page: 1 })
 }
 
+function setGranularity(granularity: TokenUsageQuery['granularity']) {
+  void usageStore.fetchQuery({ granularity })
+}
+
 const kindOptions = [
   { value: '', label: '全部类型' },
   { value: 'main', label: '主对话' },
@@ -65,8 +76,69 @@ const kindOptions = [
   { value: 'swarm', label: 'Swarm' },
 ]
 
+const modelFilterOptions = computed(() => {
+  const displayById = new Map<string, string>()
+  for (const m of overview.value?.models ?? []) {
+    if (m.modelId) displayById.set(m.modelId, m.modelDisplayName || m.modelId)
+  }
+  const list = (overview.value?.availableModels ?? []).map((id) => ({
+    value: id,
+    label: displayById.get(id) || id,
+  }))
+  if (usageStore.query.model && !list.some((opt) => opt.value === usageStore.query.model)) {
+    list.unshift({
+      value: usageStore.query.model,
+      label: displayById.get(usageStore.query.model) || usageStore.query.model,
+    })
+  }
+  return [{ value: '', label: '全部模型' }, ...list]
+})
+
+const workspaceFilterOptions = computed(() => {
+  const list = (overview.value?.availableWorkspaces ?? []).map((ws) => ({
+    value: ws,
+    label: ws,
+  }))
+  if (usageStore.query.workspace && !list.some((opt) => opt.value === usageStore.query.workspace)) {
+    list.unshift({ value: usageStore.query.workspace, label: usageStore.query.workspace })
+  }
+  return [{ value: '', label: '全部工作区' }, ...list]
+})
+
+const hasActiveTableFilters = computed(() =>
+  Boolean(
+    usageStore.query.kind ||
+      usageStore.query.model ||
+      usageStore.query.workspace ||
+      usageStore.query.search.trim(),
+  ),
+)
+
 function setKind(kind: string) {
   void usageStore.fetchQuery({ kind, page: 1 })
+}
+
+function setModel(model: string) {
+  void usageStore.fetchQuery({ model, page: 1 })
+}
+
+function setWorkspace(workspace: string) {
+  void usageStore.fetchQuery({ workspace, page: 1 })
+}
+
+function clearTableFilters() {
+  searchInput.value = ''
+  if (searchDebounceTimer !== null) {
+    window.clearTimeout(searchDebounceTimer)
+    searchDebounceTimer = null
+  }
+  void usageStore.fetchQuery({
+    kind: '',
+    model: '',
+    workspace: '',
+    search: '',
+    page: 1,
+  })
 }
 
 function setSearch(val: string) {
@@ -78,6 +150,27 @@ function setSearch(val: string) {
     searchDebounceTimer = null
     void usageStore.fetchQuery({ search: val, page: 1 })
   }, 250)
+}
+
+const sortColumnLabels: Record<SortColumn, string> = {
+  turnCount: '轮数',
+  totalTokens: '总消耗',
+  lastModifiedTime: '最近活动',
+}
+
+// 仅在当前激活排序的 <th> 上设置 aria-sort="ascending" | "descending"，未排序列省略属性
+function getAriaSort(col: SortColumn): 'ascending' | 'descending' | undefined {
+  if (usageStore.query.sort !== col) return undefined
+  return usageStore.query.order === 'asc' ? 'ascending' : 'descending'
+}
+
+function toggleSort(col: SortColumn) {
+  let nextOrder: TokenUsageQuery['order'] = 'desc'
+  if (usageStore.query.sort === col) {
+    nextOrder = usageStore.query.order === 'desc' ? 'asc' : 'desc'
+  }
+  sortStatusAnnouncement.value = `已按${sortColumnLabels[col]}${nextOrder === 'asc' ? '升序' : '降序'}排列`
+  void usageStore.fetchQuery({ sort: col, order: nextOrder, page: 1 })
 }
 
 function goPage(next: number) {
@@ -115,7 +208,16 @@ function kindLabel(kind: string): string {
             class="text-[11.5px] font-mono-num truncate min-w-0"
             style="color: var(--text-muted)"
           >
-            {{ overview.conversationCount }} 对话 · {{ overview.turnCount }} 轮
+            {{ overview.conversationCount }} 对话 · {{ overview.turnCount }} 轮（精确 {{ overview.exactTurnCount }} 轮）
+          </span>
+          <span
+            v-if="overview && overview.skippedErrors > 0"
+            :title="`扫描期间已安全跳过 ${overview.skippedErrors} 个无法解析或已损坏的会话文件`"
+            class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-medium shrink-0"
+            style="background-color: var(--warning-soft); color: var(--warning-text)"
+          >
+            <AlertTriangle class="w-3 h-3" />
+            跳过 {{ overview.skippedErrors }} 异常
           </span>
         </div>
 
@@ -177,14 +279,17 @@ function kindLabel(kind: string): string {
         </div>
 
         <div
-          v-if="usageStore.bundle && !usageStore.bundle.settings.dataDirExists"
+          v-if="usageSettings && !usageSettings.dataDirExists"
           class="p-4 rounded-2xl border flex items-center gap-3 text-xs"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-secondary)"
         >
           <FolderOpen class="w-5 h-5 shrink-0" style="color: var(--text-muted)" />
           <div>
             未检测到本地反重力会话目录
-            <code class="font-mono-num">{{ usageStore.bundle.settings.effectiveDataDir }}</code>，可在左下角「设置」中自定义扫描目录。
+            <code class="font-mono-num">{{ usageSettings.effectiveDataDir }}</code>
+            <span v-if="usageSettings.customDataDir && usageSettings.defaultDataDir">
+              （默认目录：<code class="font-mono-num">{{ usageSettings.defaultDataDir }}</code>）
+            </span>，可在左下角「设置」中自定义扫描目录。
           </div>
         </div>
 
@@ -259,18 +364,32 @@ function kindLabel(kind: string): string {
           </div>
         </div>
 
-        <!-- 趋势柱状图 -->
-        <UsageTrendChart :buckets="overview?.trend ?? []" />
+        <!-- 趋势柱状图（含按天 / 按周 / 按月粒度切换） -->
+        <UsageTrendChart
+          :buckets="overview?.trend ?? []"
+          :granularity="usageStore.query.granularity"
+          @update:granularity="setGranularity"
+        />
 
-        <!-- 模型分布 + 工作区分布 -->
+        <!-- 模型分布 + 工作区分布（支持点击联动过滤下方对话表） -->
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div
             class="p-4 rounded-2xl border space-y-3"
             style="background-color: var(--bg-surface); border-color: var(--border-subtle)"
           >
-            <h3 class="text-xs font-semibold" style="color: var(--text-primary)">模型消耗排行</h3>
+            <div class="flex items-center justify-between gap-2">
+              <h3 class="text-xs font-semibold" style="color: var(--text-primary)">模型消耗排行</h3>
+              <span class="text-[11px]" style="color: var(--text-muted)">点击按模型筛选</span>
+            </div>
             <div v-if="overview?.models?.length" class="space-y-2.5">
-              <div v-for="m in overview.models.slice(0, 6)" :key="m.modelId" class="space-y-1">
+              <button
+                v-for="m in overview.models.slice(0, 6)"
+                :key="m.modelId"
+                type="button"
+                class="w-full text-left p-1.5 -mx-1.5 rounded-lg space-y-1 cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+                :style="usageStore.query.model === m.modelId ? { backgroundColor: 'var(--accent-soft)' } : undefined"
+                @click="setModel(usageStore.query.model === m.modelId ? '' : m.modelId)"
+              >
                 <div class="flex items-center justify-between text-xs gap-2">
                   <span class="truncate font-medium" style="color: var(--text-primary)">{{ m.modelDisplayName }}</span>
                   <span class="font-mono-num text-[11.5px] shrink-0" style="color: var(--text-secondary)">
@@ -286,7 +405,7 @@ function kindLabel(kind: string): string {
                     }"
                   />
                 </div>
-              </div>
+              </button>
             </div>
             <p v-else class="text-xs py-6 text-center" style="color: var(--text-muted)">暂无模型统计数据</p>
           </div>
@@ -295,9 +414,19 @@ function kindLabel(kind: string): string {
             class="p-4 rounded-2xl border space-y-3"
             style="background-color: var(--bg-surface); border-color: var(--border-subtle)"
           >
-            <h3 class="text-xs font-semibold" style="color: var(--text-primary)">工作区消耗排行</h3>
+            <div class="flex items-center justify-between gap-2">
+              <h3 class="text-xs font-semibold" style="color: var(--text-primary)">工作区消耗排行</h3>
+              <span class="text-[11px]" style="color: var(--text-muted)">点击按工作区筛选</span>
+            </div>
             <div v-if="overview?.workspaces?.length" class="space-y-2.5">
-              <div v-for="ws in overview.workspaces.slice(0, 6)" :key="ws.workspacePath || ws.workspaceName" class="space-y-1">
+              <button
+                v-for="ws in overview.workspaces.slice(0, 6)"
+                :key="ws.workspacePath || ws.workspaceName"
+                type="button"
+                class="w-full text-left p-1.5 -mx-1.5 rounded-lg space-y-1 cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+                :style="usageStore.query.workspace === ws.workspaceName ? { backgroundColor: 'var(--success-soft)' } : undefined"
+                @click="setWorkspace(usageStore.query.workspace === ws.workspaceName ? '' : ws.workspaceName)"
+              >
                 <div class="flex items-center justify-between text-xs gap-2">
                   <span class="truncate font-medium" :title="ws.workspacePath || ws.workspaceName" style="color: var(--text-primary)">{{ ws.workspaceName }}</span>
                   <span class="font-mono-num text-[11.5px] shrink-0" style="color: var(--text-secondary)">
@@ -314,7 +443,7 @@ function kindLabel(kind: string): string {
                     }"
                   />
                 </div>
-              </div>
+              </button>
             </div>
             <p v-else class="text-xs py-6 text-center" style="color: var(--text-muted)">暂无工作区统计数据</p>
           </div>
@@ -329,13 +458,20 @@ function kindLabel(kind: string): string {
             class="px-4 py-3 border-b flex items-center justify-between gap-3 flex-wrap"
             style="border-color: var(--border-subtle)"
           >
-            <div class="flex items-center gap-2">
-              <MessageSquare class="w-4 h-4" style="color: var(--text-muted)" />
-              <h3 class="text-xs font-semibold" style="color: var(--text-primary)">对话消耗明细</h3>
+            <div class="flex items-center gap-2 min-w-0">
+              <MessageSquare class="w-4 h-4 shrink-0" style="color: var(--text-muted)" />
+              <h3 class="text-xs font-semibold shrink-0" style="color: var(--text-primary)">对话消耗明细</h3>
+              <span
+                v-if="overview?.lastSyncedAt"
+                class="text-[11px] font-mono-num truncate"
+                style="color: var(--text-muted)"
+              >
+                索引 {{ overview.cachedFiles }} 文件 · 同步于 {{ formatDateTime(overview.lastSyncedAt) }}
+              </span>
             </div>
 
             <div class="flex items-center flex-wrap gap-2">
-              <div class="relative w-48 max-w-full">
+              <div class="relative w-44 max-w-full">
                 <Search
                   class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
                   style="color: var(--text-muted)"
@@ -343,7 +479,7 @@ function kindLabel(kind: string): string {
                 <input
                   :value="searchInput"
                   type="search"
-                  placeholder="搜索对话标题或工作区..."
+                  placeholder="搜索标题或工作区..."
                   class="w-full h-7 pl-8 pr-2.5 text-xs rounded-lg border"
                   style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-primary)"
                   @input="setSearch(($event.target as HTMLInputElement).value)"
@@ -358,22 +494,121 @@ function kindLabel(kind: string): string {
                 class="w-28 shrink-0"
                 @update:model-value="setKind"
               />
+
+              <AppSelect
+                :model-value="usageStore.query.model"
+                aria-label="筛选使用模型"
+                size="sm"
+                :options="modelFilterOptions"
+                class="w-36 shrink-0"
+                @update:model-value="setModel"
+              />
+
+              <AppSelect
+                :model-value="usageStore.query.workspace"
+                aria-label="筛选所属工作区"
+                size="sm"
+                :options="workspaceFilterOptions"
+                class="w-36 shrink-0"
+                @update:model-value="setWorkspace"
+              />
+
+              <button
+                v-if="hasActiveTableFilters"
+                type="button"
+                class="h-7 inline-flex items-center gap-1 px-2 rounded-lg border text-[11px] cursor-pointer hover:bg-[var(--bg-hover)]"
+                style="border-color: var(--border-subtle); color: var(--text-secondary); background-color: var(--bg-app)"
+                @click="clearTableFilters"
+              >
+                <X class="w-3 h-3" />
+                <span>重置</span>
+              </button>
             </div>
           </div>
 
-          <div class="overflow-x-auto custom-scroll">
-            <table class="w-full text-left border-collapse text-xs">
+          <div role="status" aria-live="polite" class="sr-only">
+            {{ sortStatusAnnouncement }}
+          </div>
+
+          <div
+            class="overflow-x-auto custom-scroll"
+            role="region"
+            aria-label="对话消耗明细表"
+            tabindex="0"
+          >
+            <table class="w-full text-left border-collapse text-xs sortable-usage-table">
               <thead>
                 <tr
                   class="border-b text-[11px]"
                   style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
                 >
-                  <th class="py-2.5 px-4 whitespace-nowrap">对话</th>
-                  <th class="py-2.5 px-3 whitespace-nowrap">类型</th>
-                  <th class="py-2.5 px-3 whitespace-nowrap">工作区</th>
-                  <th class="py-2.5 px-3 whitespace-nowrap">主力模型</th>
-                  <th class="py-2.5 px-3 text-right whitespace-nowrap">总消耗</th>
-                  <th class="py-2.5 px-4 text-right whitespace-nowrap">最近活动</th>
+                  <th scope="col" class="py-2.5 px-4 whitespace-nowrap">对话</th>
+                  <th scope="col" class="py-2.5 px-3 whitespace-nowrap">类型</th>
+                  <th scope="col" class="py-2.5 px-3 whitespace-nowrap">工作区</th>
+                  <th scope="col" class="py-2.5 px-3 whitespace-nowrap">主力模型</th>
+                  <th scope="col" :aria-sort="getAriaSort('turnCount')" class="p-0 whitespace-nowrap">
+                    <button
+                      type="button"
+                      class="w-full py-2.5 px-3 inline-flex items-center justify-end gap-1 font-medium cursor-pointer hover:bg-[var(--bg-hover)] transition-colors"
+                      :style="{ color: usageStore.query.sort === 'turnCount' ? 'var(--text-primary)' : 'var(--text-muted)' }"
+                      @click="toggleSort('turnCount')"
+                    >
+                      <span>轮数</span>
+                      <ArrowUp
+                        v-if="usageStore.query.sort === 'turnCount' && usageStore.query.order === 'asc'"
+                        class="w-3 h-3 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <ArrowDown
+                        v-else-if="usageStore.query.sort === 'turnCount'"
+                        class="w-3 h-3 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <ArrowUpDown v-else class="w-3 h-3 shrink-0 opacity-45" aria-hidden="true" />
+                    </button>
+                  </th>
+                  <th scope="col" :aria-sort="getAriaSort('totalTokens')" class="p-0 whitespace-nowrap">
+                    <button
+                      type="button"
+                      class="w-full py-2.5 px-3 inline-flex items-center justify-end gap-1 font-medium cursor-pointer hover:bg-[var(--bg-hover)] transition-colors"
+                      :style="{ color: usageStore.query.sort === 'totalTokens' ? 'var(--text-primary)' : 'var(--text-muted)' }"
+                      @click="toggleSort('totalTokens')"
+                    >
+                      <span>总消耗</span>
+                      <ArrowUp
+                        v-if="usageStore.query.sort === 'totalTokens' && usageStore.query.order === 'asc'"
+                        class="w-3 h-3 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <ArrowDown
+                        v-else-if="usageStore.query.sort === 'totalTokens'"
+                        class="w-3 h-3 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <ArrowUpDown v-else class="w-3 h-3 shrink-0 opacity-45" aria-hidden="true" />
+                    </button>
+                  </th>
+                  <th scope="col" :aria-sort="getAriaSort('lastModifiedTime')" class="p-0 whitespace-nowrap">
+                    <button
+                      type="button"
+                      class="w-full py-2.5 px-4 inline-flex items-center justify-end gap-1 font-medium cursor-pointer hover:bg-[var(--bg-hover)] transition-colors"
+                      :style="{ color: usageStore.query.sort === 'lastModifiedTime' ? 'var(--text-primary)' : 'var(--text-muted)' }"
+                      @click="toggleSort('lastModifiedTime')"
+                    >
+                      <span>最近活动</span>
+                      <ArrowUp
+                        v-if="usageStore.query.sort === 'lastModifiedTime' && usageStore.query.order === 'asc'"
+                        class="w-3 h-3 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <ArrowDown
+                        v-else-if="usageStore.query.sort === 'lastModifiedTime'"
+                        class="w-3 h-3 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <ArrowUpDown v-else class="w-3 h-3 shrink-0 opacity-45" aria-hidden="true" />
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-[var(--border-hairline)]">
@@ -383,7 +618,7 @@ function kindLabel(kind: string): string {
                   class="cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
                   @click="usageStore.openConversationDetail(item.conversationId)"
                 >
-                  <td class="py-2.5 px-4 max-w-[280px]">
+                  <td class="py-2.5 px-4 max-w-[260px]">
                     <div class="font-medium truncate" style="color: var(--text-primary)">
                       {{ item.displayTitle }}
                     </div>
@@ -405,6 +640,9 @@ function kindLabel(kind: string): string {
                   <td class="py-2.5 px-3 truncate max-w-[160px]" style="color: var(--text-secondary)">
                     {{ item.primaryModelDisplayName }}
                   </td>
+                  <td class="py-2.5 px-3 text-right font-mono-num whitespace-nowrap" style="color: var(--text-secondary)">
+                    {{ item.turnCount }}
+                  </td>
                   <td class="py-2.5 px-3 text-right font-mono-num font-semibold whitespace-nowrap" style="color: var(--text-primary)">
                     {{ formatTokenCount(item.exact.totalTokens + item.estimated.totalTokens) }}
                   </td>
@@ -413,7 +651,7 @@ function kindLabel(kind: string): string {
                   </td>
                 </tr>
                 <tr v-if="!conversations?.items?.length">
-                  <td colspan="6" class="py-10 text-center text-xs" style="color: var(--text-muted)">
+                  <td colspan="7" class="py-10 text-center text-xs" style="color: var(--text-muted)">
                     {{ usageStore.loading ? '正在只读扫描本地对话记录...' : '暂无符合条件的对话消耗记录' }}
                   </td>
                 </tr>
@@ -431,6 +669,7 @@ function kindLabel(kind: string): string {
             <div class="flex items-center gap-1.5">
               <button
                 type="button"
+                aria-label="上一页"
                 :disabled="conversations.page <= 1"
                 class="p-1 rounded-lg border cursor-pointer disabled:opacity-40"
                 style="border-color: var(--border-strong); background-color: var(--bg-surface)"
@@ -440,6 +679,7 @@ function kindLabel(kind: string): string {
               </button>
               <button
                 type="button"
+                aria-label="下一页"
                 :disabled="conversations.page >= conversations.totalPages"
                 class="p-1 rounded-lg border cursor-pointer disabled:opacity-40"
                 style="border-color: var(--border-strong); background-color: var(--bg-surface)"

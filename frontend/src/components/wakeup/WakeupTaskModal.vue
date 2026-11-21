@@ -6,7 +6,7 @@ import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
 import { maskEmail } from '@/utils/privacy'
-import { mergeModelList, type MergedModelQuota } from '@/utils/quota'
+import { mergeModelList, pickPreferredWakeupModel, type MergedModelQuota } from '@/utils/quota'
 import type { ModelQuota, WakeupRepeatMode, WakeupTask } from '@/types/models'
 
 const props = defineProps<{
@@ -31,7 +31,7 @@ const intervalStartTime = ref('08:00')
 const intervalEndTime = ref('22:00')
 const crontab = ref('0 9 * * *')
 const customPrompt = ref('hi')
-const maxOutputTokens = ref(16)
+const maxOutputTokens = ref(64)
 const selectedAccounts = ref<string[]>([])
 const selectedModels = ref<string[]>([])
 const error = ref('')
@@ -131,15 +131,15 @@ watch(
       intervalEndTime.value = task.schedule.intervalEndTime || '22:00'
       crontab.value = task.schedule.crontab || '0 9 * * *'
       customPrompt.value = task.schedule.customPrompt || 'hi'
-      maxOutputTokens.value = task.schedule.maxOutputTokens || 16
-      const fallbackModel = modelCandidates.value[0]?.canonicalModelId || 'gemini-3.8-flash-high'
+      maxOutputTokens.value = task.schedule.maxOutputTokens || 64
+      const fallbackModel = pickPreferredWakeupModel(modelCandidates.value)
       // 过滤掉已删除的无效账号 ID，避免勾选计数与全选状态失真
       selectedAccounts.value = (task.schedule.selectedAccounts ?? []).filter((id) => validAccountIds.has(id))
       selectedModels.value = task.schedule.selectedModels?.length
         ? [...task.schedule.selectedModels]
         : [fallbackModel]
     } else {
-      const fallbackModel = modelCandidates.value[0]?.canonicalModelId || 'gemini-3.8-flash-high'
+      const fallbackModel = pickPreferredWakeupModel(modelCandidates.value)
       name.value = ''
       enabled.value = true
       repeatMode.value = 'daily'
@@ -150,7 +150,7 @@ watch(
       intervalEndTime.value = '22:00'
       crontab.value = '0 9 * * *'
       customPrompt.value = 'hi'
-      maxOutputTokens.value = 16
+      maxOutputTokens.value = 64
       selectedAccounts.value =
         appStore.currentAccountId && validAccountIds.has(appStore.currentAccountId)
           ? [appStore.currentAccountId]
@@ -246,8 +246,8 @@ async function handleSave() {
   const rawMaxTokens = Number(maxOutputTokens.value)
   const cleanMaxTokens =
     Number.isFinite(rawMaxTokens) && rawMaxTokens > 0
-      ? Math.min(128, Math.max(4, Math.round(rawMaxTokens)))
-      : 16
+      ? Math.min(512, Math.max(4, Math.round(rawMaxTokens)))
+      : 64
 
   const task: WakeupTask = {
     id: props.editingTask?.id ?? '',
@@ -497,7 +497,7 @@ async function handleSave() {
             v-model.number="maxOutputTokens"
             type="number"
             min="4"
-            max="128"
+            max="512"
             class="w-full px-3 py-1.5 text-xs font-mono-num rounded-lg border"
             style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
           />

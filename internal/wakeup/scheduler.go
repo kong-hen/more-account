@@ -2,6 +2,7 @@ package wakeup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -14,6 +15,9 @@ import (
 	"more-account/internal/quota"
 	"more-account/internal/storage"
 )
+
+// ErrWakeupCanceled 表示唤醒请求被用户主动取消或随应用退出中止。
+var ErrWakeupCanceled = errors.New("已取消唤醒测试")
 
 type cancelScopeEntry struct {
 	cancel context.CancelFunc
@@ -30,7 +34,7 @@ type Service struct {
 	mu            sync.Mutex
 	stopCancel    context.CancelFunc
 	runningTasks  map[string]bool
-	lastResetSeen map[string]string // key: taskID:accountID:model -> resetTime
+	lastResetSeen map[string]string // key: taskID:accountID:modelOrBucket -> resetTime
 	cancelScopes  map[string]*cancelScopeEntry
 }
 
@@ -51,7 +55,8 @@ func NewService(store *storage.Store, oauthClient *oauth.Client, quotaService *q
 	}
 }
 
-// Start 启动后台每 30 秒轮询一次的轻量定时调度器。
+// Start 启动后台每 30 秒轮询一次的轻量定时调度器，并在启动瞬间先行建立本地持久化配额的重置基线，
+// 防止 AutoRefresher 在 1.5s 后率先刷新覆盖旧 ResetTime 导致离线重置漏触发。
 func (s *Service) Start(parent context.Context) {
 	s.mu.Lock()
 	if s.stopCancel != nil {
@@ -65,6 +70,8 @@ func (s *Service) Start(parent context.Context) {
 	s.stopCancel = cancel
 	s.mu.Unlock()
 
+	s.SyncResetBaseline()
+
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -77,6 +84,41 @@ func (s *Service) Start(parent context.Context) {
 			}
 		}
 	}()
+}
+
+// SyncResetBaseline 为当前所有启用配额重置监测的任务补齐缺失的初始 resetTime 基线（仅填充未见过的键，不覆盖待触发变更）。
+func (s *Service) SyncResetBaseline() {
+	if s.store == nil {
+		return
+	}
+	state := s.store.GetWakeupState()
+	activeTaskIDs := make(map[string]struct{}, len(state.Tasks))
+	for _, task := range state.Tasks {
+		activeTaskIDs[task.ID] = struct{}{}
+	}
+	s.pruneResetCache(activeTaskIDs)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, task := range state.Tasks {
+		if !(task.Schedule.RepeatMode == "quota_reset" || task.Schedule.WakeOnReset) {
+			continue
+		}
+		selectedModels := buildSelectedModelSet(task.Schedule.SelectedModels)
+		for _, accID := range task.Schedule.SelectedAccounts {
+			acc, ok := s.store.GetAccount(accID)
+			if !ok || acc.Disabled || acc.Quota == nil {
+				continue
+			}
+			for _, entry := range collectTrackableResets(acc.Quota, selectedModels) {
+				key := task.ID + ":" + accID + ":" + entry.id
+				if s.lastResetSeen[key] == "" {
+					s.lastResetSeen[key] = entry.resetTime
+				}
+			}
+		}
+	}
 }
 
 // Stop 停止后台定时调度器与所有进行中的取消作用域。
@@ -137,13 +179,13 @@ func (s *Service) TestNow(parent context.Context, req model.WakeupTestRequest) (
 	}
 
 	item, err := s.runSingleAccountWakeup(ctx, "", "", "manual", req.AccountID, req.Model, req.Prompt, req.MaxOutputTokens)
-	if s.onUpdated != nil {
+	if item != nil && s.onUpdated != nil {
 		s.onUpdated()
 	}
 	return item, err
 }
 
-// RunTaskNow 立即手动触发执行某条定时唤醒任务（覆盖该任务选中的所有账号与模型）。
+// RunTaskNow 立即手动触发执行某条定时唤醒任务（覆盖该任务选中的所有有效账号与模型）。
 func (s *Service) RunTaskNow(parent context.Context, taskID string) ([]model.WakeupHistoryItem, error) {
 	state := s.store.GetWakeupState()
 	var target *model.WakeupTask
@@ -157,6 +199,17 @@ func (s *Service) RunTaskNow(parent context.Context, taskID string) ([]model.Wak
 	if target == nil {
 		return nil, fmt.Errorf("未找到唤醒任务: %s", taskID)
 	}
+
+	validAccounts := 0
+	for _, accID := range target.Schedule.SelectedAccounts {
+		if _, ok := s.store.GetAccount(accID); ok {
+			validAccounts++
+		}
+	}
+	if validAccounts == 0 {
+		return nil, fmt.Errorf("唤醒任务「%s」未绑定任何有效账号，请先编辑任务选择账号", target.Name)
+	}
+
 	results, started := s.executeTask(parent, *target, "manual")
 	if !started {
 		return nil, fmt.Errorf("唤醒任务「%s」正在执行中，请稍候", target.Name)
@@ -207,17 +260,105 @@ func (s *Service) pruneResetCache(activeTaskIDs map[string]struct{}) {
 	}
 }
 
-// checkQuotaResetTrigger 追踪任务选中模型（或全部模型）的 resetTime 变更。
-// 无论模型当前是否处于低配额状态都会记录其 resetTime，一旦检测到重置时间推进且当前额度恢复至 >= 95% 即触发唤醒。
-func (s *Service) checkQuotaResetTrigger(task model.WakeupTask, now time.Time) bool {
-	inCooldown := task.LastRunAt > 0 && now.Sub(time.UnixMilli(task.LastRunAt)) < 10*time.Minute
+type trackableReset struct {
+	id         string
+	percentage int
+	resetTime  string
+}
 
-	selectedModels := make(map[string]struct{}, len(task.Schedule.SelectedModels))
-	for _, m := range task.Schedule.SelectedModels {
+func buildSelectedModelSet(models []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(models))
+	for _, m := range models {
 		if trimmed := strings.ToLower(strings.TrimSpace(m)); trimmed != "" {
-			selectedModels[trimmed] = struct{}{}
+			out[trimmed] = struct{}{}
 		}
 	}
+	return out
+}
+
+func modelMatchesBucketFamily(selectedModels map[string]struct{}, bucketID string) bool {
+	if len(selectedModels) == 0 {
+		return true
+	}
+	lowerBucket := strings.ToLower(bucketID)
+	var family string
+	switch {
+	case strings.Contains(lowerBucket, "carbon"):
+		family = "carbon"
+	case strings.Contains(lowerBucket, "flash"):
+		family = "flash"
+	case strings.Contains(lowerBucket, "claude") || strings.Contains(lowerBucket, "anthropic") || strings.Contains(lowerBucket, "gpt-oss"):
+		family = "claude"
+	case strings.Contains(lowerBucket, "argon") || strings.Contains(lowerBucket, "neon") || strings.Contains(lowerBucket, "gemini"):
+		family = "gemini-pro"
+	default:
+		return false
+	}
+
+	for sel := range selectedModels {
+		switch family {
+		case "carbon":
+			if strings.Contains(sel, "carbon") {
+				return true
+			}
+		case "flash":
+			if strings.Contains(sel, "flash") {
+				return true
+			}
+		case "claude":
+			if strings.Contains(sel, "claude") || strings.Contains(sel, "sonnet") || strings.Contains(sel, "opus") || strings.Contains(sel, "gpt-oss") {
+				return true
+			}
+		case "gemini-pro":
+			if !strings.Contains(sel, "flash") && !strings.Contains(sel, "carbon") &&
+				(strings.Contains(sel, "argon") || strings.Contains(sel, "neon") || strings.Contains(sel, "gemini")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func collectTrackableResets(q *model.QuotaData, selectedModels map[string]struct{}) []trackableReset {
+	if q == nil {
+		return nil
+	}
+	var out []trackableReset
+	for _, m := range q.Models {
+		rt := strings.TrimSpace(m.ResetTime)
+		if rt == "" {
+			continue
+		}
+		if len(selectedModels) > 0 {
+			if _, want := selectedModels[strings.ToLower(strings.TrimSpace(m.Name))]; !want {
+				continue
+			}
+		}
+		out = append(out, trackableReset{
+			id:         m.Name,
+			percentage: m.Percentage,
+			resetTime:  rt,
+		})
+	}
+	for _, b := range q.SummaryBuckets {
+		rt := strings.TrimSpace(b.ResetTime)
+		if rt == "" || !modelMatchesBucketFamily(selectedModels, b.BucketID) {
+			continue
+		}
+		out = append(out, trackableReset{
+			id:         "bucket:" + b.BucketID,
+			percentage: b.Percentage,
+			resetTime:  rt,
+		})
+	}
+	return out
+}
+
+// checkQuotaResetTrigger 追踪任务选中模型（或全部模型及共享配额桶）的 resetTime 变更。
+// 处于 10 分钟冷却期内或刚推进窗口但配额尚为 0% 时不提前覆写基线，确保冷却结束后不漏触发。
+func (s *Service) checkQuotaResetTrigger(task model.WakeupTask, now time.Time) bool {
+	inCooldown := task.LastRunAt > 0 && now.Sub(time.UnixMilli(task.LastRunAt)) < 10*time.Minute
+	selectedModels := buildSelectedModelSet(task.Schedule.SelectedModels)
 
 	triggered := false
 	s.mu.Lock()
@@ -228,21 +369,26 @@ func (s *Service) checkQuotaResetTrigger(task model.WakeupTask, now time.Time) b
 		if !ok || acc.Disabled || acc.Quota == nil {
 			continue
 		}
-		for _, m := range acc.Quota.Models {
-			if strings.TrimSpace(m.ResetTime) == "" {
+		for _, entry := range collectTrackableResets(acc.Quota, selectedModels) {
+			key := task.ID + ":" + accID + ":" + entry.id
+			prevReset := s.lastResetSeen[key]
+			if prevReset == "" {
+				s.lastResetSeen[key] = entry.resetTime
 				continue
 			}
-			if len(selectedModels) > 0 {
-				if _, want := selectedModels[strings.ToLower(strings.TrimSpace(m.Name))]; !want {
-					continue
+			if prevReset == entry.resetTime {
+				continue
+			}
+			if entry.percentage >= 95 {
+				if !inCooldown {
+					triggered = true
+					s.lastResetSeen[key] = entry.resetTime
 				}
+				// 若处于冷却期内，保留旧 prevReset，待冷却期结束后下一轮 tick 正常触发并推进基线
+			} else if entry.percentage > 0 {
+				// 非满额但非 0% 的新窗口，正常推进基线
+				s.lastResetSeen[key] = entry.resetTime
 			}
-			key := task.ID + ":" + accID + ":" + m.Name
-			prevReset := s.lastResetSeen[key]
-			if prevReset != "" && prevReset != m.ResetTime && m.Percentage >= 95 && !inCooldown {
-				triggered = true
-			}
-			s.lastResetSeen[key] = m.ResetTime
 		}
 	}
 	return triggered
@@ -276,11 +422,19 @@ func (s *Service) executeTask(parent context.Context, task model.WakeupTask, tri
 	}
 	maxTokens := task.Schedule.MaxOutputTokens
 	if maxTokens <= 0 {
-		maxTokens = 16
+		maxTokens = defaultMaxOutputTokens
 	}
 
 	var results []model.WakeupHistoryItem
 	for _, accID := range task.Schedule.SelectedAccounts {
+		acc, ok := s.store.GetAccount(accID)
+		if !ok {
+			continue
+		}
+		// 后台自动定时调度跳过已失效/禁用账号，避免持续发送无效请求
+		if triggerType == "scheduled" && acc.Disabled {
+			continue
+		}
 		for _, modelName := range models {
 			if parent.Err() != nil {
 				break
@@ -303,6 +457,16 @@ func (s *Service) executeTask(parent context.Context, task model.WakeupTask, tri
 	return results, true
 }
 
+func isWakeupContextCanceled(ctx context.Context, err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return true
+	}
+	return false
+}
+
 func (s *Service) runSingleAccountWakeup(
 	ctx context.Context,
 	taskID, taskName, triggerType, accountID, modelName, prompt string,
@@ -322,6 +486,11 @@ func (s *Service) runSingleAccountWakeup(
 	started := time.Now()
 	freshTok, refreshed, err := s.oauthClient.EnsureFreshToken(ctx, acc.Token)
 	if err != nil {
+		// 用户主动取消时不污染唤醒执行历史记录
+		if isWakeupContextCanceled(ctx, err) {
+			return nil, fmt.Errorf("%w: %v", ErrWakeupCanceled, err)
+		}
+		_, _ = s.store.RecordTokenRefreshFailure(acc.ID, err, errors.Is(err, oauth.ErrInvalidGrant))
 		item := model.WakeupHistoryItem{
 			Timestamp:    time.Now().UnixMilli(),
 			TaskID:       taskID,
@@ -339,10 +508,7 @@ func (s *Service) runSingleAccountWakeup(
 		return &item, err
 	}
 	if refreshed {
-		if saved, uErr := s.store.UpdateAccount(acc.ID, func(target *model.Account) error {
-			target.Token = freshTok
-			return nil
-		}); uErr == nil {
+		if saved, uErr := s.store.RecordTokenRefreshSuccess(acc.ID, freshTok); uErr == nil {
 			acc = saved
 		} else {
 			acc.Token = freshTok
@@ -357,6 +523,10 @@ func (s *Service) runSingleAccountWakeup(
 	}
 
 	res, errInfo, reqErr := ExecuteWakeupRequest(ctx, s.httpClient, acc.Token, modelName, prompt, maxOutputTokens)
+	if reqErr != nil && isWakeupContextCanceled(ctx, reqErr) {
+		return nil, fmt.Errorf("%w: %v", ErrWakeupCanceled, reqErr)
+	}
+
 	item := model.WakeupHistoryItem{
 		Timestamp:    time.Now().UnixMilli(),
 		TaskID:       taskID,

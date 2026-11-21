@@ -108,6 +108,7 @@ func (d *ActiveDetector) Stop() {
 
 // TriggerCheck 非阻塞唤醒后台探测器立即执行一次探测（如窗口切回前台或切换目标客户端设置时）。
 func (d *ActiveDetector) TriggerCheck() {
+	InvalidateSystemCredentialCache()
 	select {
 	case d.wakeCh <- struct{}{}:
 	default:
@@ -169,6 +170,7 @@ func (d *ActiveDetector) DetectOnce(ctx context.Context) ActiveDetectionResult {
 
 // DetectOnceSilent 执行一次同步探测并更新基线，但不触发后台变更回调（供手动探测 RPC 调用，避免与事件推送重复弹通知）。
 func (d *ActiveDetector) DetectOnceSilent(ctx context.Context) ActiveDetectionResult {
+	InvalidateSystemCredentialCache()
 	return d.detect(ctx, false)
 }
 

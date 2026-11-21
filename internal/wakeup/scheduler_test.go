@@ -297,4 +297,74 @@ func TestTestNowConcurrentSameScopeDoesNotDeleteNewerCancelHandle(t *testing.T) 
 	case <-time.After(2 * time.Second):
 		t.Fatal("第二次测试的取消句柄被第一次测试误删，导致 CancelTest 失效")
 	}
+	if hist := store.ListWakeupHistory(); len(hist) != 0 {
+		t.Fatalf("用户主动取消的唤醒测试不应写入失败历史记录，实际写入 %d 条: %+v", len(hist), hist)
+	}
+}
+
+func TestThinkingOnlyStreamSucceedsAndCooldownPreservesReset(t *testing.T) {
+	// 1. 思考模型仅返回 thought 分片与 thoughtsTokenCount 时应兼容判定唤醒成功
+	thoughtOnlySSE := "" +
+		"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"internal reasoning...\",\"thought\":true}]},\"finishReason\":\"MAX_TOKENS\"}],\"usageMetadata\":{\"promptTokenCount\":20,\"thoughtsTokenCount\":16,\"totalTokenCount\":36}}}\n\n" +
+		"data: [DONE]\n"
+	parsed, err := ParseStreamResult(thoughtOnlySSE)
+	if err != nil {
+		t.Fatalf("思考耗尽预算但 HTTP 200 有效流不应报错，实际: %v", err)
+	}
+	if parsed.Reply == "" || parsed.TotalTokens != 36 || parsed.CompletionTokens != 16 {
+		t.Fatalf("思考流解析结果异常: %+v", parsed)
+	}
+
+	// 空响应仍应报错
+	if _, err := ParseStreamResult(`data: {}`); err == nil {
+		t.Fatal("无候选内容与无思考分片的空响应应当返回错误")
+	}
+
+	// 2. 验证 10 分钟冷却期内发生的配额重置不会被提前吞掉，冷却结束后仍能触发
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	acc, err := store.UpsertAccount(model.Account{
+		Email: "cooldown@example.com",
+		Token: model.TokenData{RefreshToken: "rt-cd"},
+		Quota: &model.QuotaData{
+			Models: []model.ModelQuota{
+				{Name: "gemini-3.8-flash-high", Percentage: 10, ResetTime: "2026-11-21T10:00:00Z"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseNow := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	task := model.WakeupTask{
+		ID:        "task-cd",
+		Enabled:   true,
+		LastRunAt: baseNow.UnixMilli(), // 刚刚执行过，处于 10 分钟冷却期内
+		Schedule: model.WakeupSchedule{
+			RepeatMode:       "quota_reset",
+			WakeOnReset:      true,
+			SelectedAccounts: []string{acc.ID},
+		},
+	}
+	_ = store.SaveWakeupState(model.WakeupState{Enabled: true, Tasks: []model.WakeupTask{task}})
+
+	svc := NewService(store, nil, nil, nil)
+	svc.SyncResetBaseline() // 启动时立即建立 10:00:00Z 基线
+
+	// 冷却期内（+2 分钟）配额重置至 100% 且 resetTime 推进
+	_, _ = store.UpdateAccount(acc.ID, func(target *model.Account) error {
+		target.Quota.Models[0].Percentage = 100
+		target.Quota.Models[0].ResetTime = "2026-11-21T15:00:00Z"
+		return nil
+	})
+	if svc.checkQuotaResetTrigger(task, baseNow.Add(2*time.Minute)) {
+		t.Fatal("冷却期内不应立即触发")
+	}
+	// 冷却期结束后（+11 分钟），此前未消费的重置事件必须正常触发
+	if !svc.checkQuotaResetTrigger(task, baseNow.Add(11*time.Minute)) {
+		t.Fatal("冷却期结束后应当触发此前未消费的配额重置事件")
+	}
 }

@@ -27,6 +27,8 @@ const emit = defineEmits<{
 
 const dialogRef = ref<HTMLDialogElement | null>(null)
 const titleId = `dlg-title-${Math.random().toString(36).slice(2, 9)}`
+const supportsNativeClosedBy =
+  typeof HTMLDialogElement !== 'undefined' && 'closedBy' in HTMLDialogElement.prototype
 let pressedOutside = false
 
 const closedByAttr = computed(() => {
@@ -71,13 +73,20 @@ function isPointerOutside(e: PointerEvent): boolean {
 }
 
 function handlePointerDown(e: PointerEvent) {
-  if (props.preventClose || !props.closeOnOutside) return
+  if (supportsNativeClosedBy || props.preventClose || !props.closeOnOutside) return
+  const el = dialogRef.value
+  // 仅当点击事件直接落在 <dialog> 元素自身（即 backdrop 区域）时记录，忽略内部子元素或原生下拉菜单点击
+  if (!el || e.target !== el) {
+    pressedOutside = false
+    return
+  }
   pressedOutside = isPointerOutside(e)
 }
 
 function handlePointerUp(e: PointerEvent) {
-  if (props.preventClose || !props.closeOnOutside) return
-  if (pressedOutside && isPointerOutside(e)) {
+  if (supportsNativeClosedBy || props.preventClose || !props.closeOnOutside) return
+  const el = dialogRef.value
+  if (pressedOutside && el && e.target === el && isPointerOutside(e)) {
     emit('close')
   }
   pressedOutside = false
