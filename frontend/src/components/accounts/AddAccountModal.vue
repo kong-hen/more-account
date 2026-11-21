@@ -34,6 +34,8 @@ const localImporting = ref(false)
 const localError = ref('')
 
 // Token / JSON 批量导入状态
+const tokenPlaceholder = '1//0g...\n或粘贴 [{"email":"...","refresh_token":"1//0g..."}]'
+
 const tokenInput = ref('')
 const tokenImporting = ref(false)
 const tokenError = ref('')
@@ -389,7 +391,7 @@ async function handleImportTokens() {
             id="token-import-textarea"
             v-model="tokenInput"
             rows="6"
-            placeholder="1//0g...&#10;或粘贴 [{"email":"...","refresh_token":"1//0g..."}]"
+            :placeholder="tokenPlaceholder"
             class="w-full p-3 text-xs font-mono-num rounded-xl border resize-y custom-scroll"
             style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
           />
