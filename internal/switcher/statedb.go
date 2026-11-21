@@ -92,27 +92,63 @@ func InjectAccountToStateDB(dbPath string, account model.Account) error {
 
 // ReadRefreshTokenFromStateDB 以只读方式从 state.vscdb 中提取当前账号的 refresh_token。
 func ReadRefreshTokenFromStateDB(dbPath string) (string, error) {
-	if _, err := os.Stat(dbPath); err != nil {
+	cred, err := ReadCredentialFromStateDB(dbPath)
+	if err != nil || cred == nil {
 		return "", err
+	}
+	return cred.RefreshToken, nil
+}
+
+// ReadCredentialFromStateDB 以只读方式从 state.vscdb 中提取当前账号的令牌与邮箱信息。
+// 若数据库文件不存在或未写入登录态，返回 (nil, nil)。
+func ReadCredentialFromStateDB(dbPath string) (*SystemCredential, error) {
+	if strings.TrimSpace(dbPath) == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	dsn := fmt.Sprintf("file:%s?mode=ro", dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return "", fmt.Errorf("只读打开 state.vscdb 失败: %w", err)
+		return nil, fmt.Errorf("只读打开 state.vscdb 失败: %w", err)
 	}
 	defer db.Close()
 
-	var encoded string
-	err = db.QueryRow(`SELECT value FROM ItemTable WHERE key = ?`, "antigravityUnifiedStateSync.oauthToken").Scan(&encoded)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", nil
+	var accessTok, refreshTok, idTok, email string
+
+	var encodedOAuth string
+	err = db.QueryRow(`SELECT value FROM ItemTable WHERE key = ?`, "antigravityUnifiedStateSync.oauthToken").Scan(&encodedOAuth)
+	if err == nil && strings.TrimSpace(encodedOAuth) != "" {
+		if raw, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(encodedOAuth)); decErr == nil {
+			accessTok, refreshTok, idTok = ExtractOAuthInfoFromUnifiedOAuth(raw)
 		}
-		return "", fmt.Errorf("读取 state.vscdb oauthToken 失败: %w", err)
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("读取 state.vscdb oauthToken 失败: %w", err)
 	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
-	if err != nil {
-		return "", fmt.Errorf("解码 state.vscdb Base64 失败: %w", err)
+
+	if idTok != "" {
+		email = ExtractEmailFromIDToken(idTok)
 	}
-	return ExtractRefreshTokenFromUnifiedOAuth(raw), nil
+	if email == "" {
+		var encodedStatus string
+		if sErr := db.QueryRow(`SELECT value FROM ItemTable WHERE key = ?`, "antigravityUnifiedStateSync.userStatus").Scan(&encodedStatus); sErr == nil && strings.TrimSpace(encodedStatus) != "" {
+			if raw, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(encodedStatus)); decErr == nil {
+				email = ExtractEmailFromUnifiedUserStatus(raw)
+			}
+		}
+	}
+
+	if strings.TrimSpace(refreshTok) == "" && strings.TrimSpace(email) == "" {
+		return nil, nil
+	}
+	return &SystemCredential{
+		AccessToken:  strings.TrimSpace(accessTok),
+		RefreshToken: strings.TrimSpace(refreshTok),
+		IDToken:      strings.TrimSpace(idTok),
+		Email:        strings.TrimSpace(email),
+	}, nil
 }

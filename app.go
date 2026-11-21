@@ -41,6 +41,7 @@ type App struct {
 	quotaService    *quota.Service
 	autoRefresher   *quota.AutoRefresher
 	switcherService *switcher.Service
+	activeDetector  *switcher.ActiveDetector
 	importerService *importer.Service
 	usageService    *tokenusage.Service
 	wakeupService   *wakeup.Service
@@ -82,6 +83,19 @@ func NewApp() *App {
 		},
 	)
 
+	app.activeDetector = switcher.NewActiveDetector(
+		store,
+		oauthClient,
+		switchSvc.IsSwitching,
+		func(res switcher.ActiveDetectionResult) {
+			app.emitEvent("account:active_detected", res)
+			// 探测到激活账号变化后，触发一次配额检查以按新身份应用刷新周期
+			if res.Changed && res.Managed && app.autoRefresher != nil {
+				app.autoRefresher.TriggerCheck()
+			}
+		},
+	)
+
 	app.wakeupService = wakeup.NewService(store, oauthClient, quotaSvc, func() {
 		app.emitEvent("wakeup:updated", nil)
 	})
@@ -91,11 +105,13 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.wakeupService.Start(ctx)
+	a.activeDetector.Start(ctx)
 	a.autoRefresher.Start(ctx)
 }
 
 func (a *App) shutdown(ctx context.Context) {
 	a.oauthManager.Cancel()
+	a.activeDetector.Stop()
 	a.autoRefresher.Stop()
 	a.wakeupService.Stop()
 }
@@ -127,11 +143,16 @@ func (a *App) GetSettings() model.AppSettings {
 	return a.store.GetSettings()
 }
 
-// SaveSettings 保存全局设置，并通知后台自动刷新调度器立即应用新间隔。
+// SaveSettings 保存全局设置，并通知后台自动刷新与账号探测器立即应用新配置。
 func (a *App) SaveSettings(settings model.AppSettings) (model.AppSettings, error) {
 	saved, err := a.store.SaveSettings(settings)
-	if err == nil && a.autoRefresher != nil {
-		a.autoRefresher.TriggerCheck()
+	if err == nil {
+		if a.activeDetector != nil {
+			a.activeDetector.TriggerCheck()
+		}
+		if a.autoRefresher != nil {
+			a.autoRefresher.TriggerCheck()
+		}
 	}
 	return saved, err
 }
@@ -140,6 +161,23 @@ func (a *App) SaveSettings(settings model.AppSettings) (model.AppSettings, error
 func (a *App) TriggerAutoRefreshIfDue() {
 	if a.autoRefresher != nil {
 		a.autoRefresher.TriggerCheck()
+	}
+}
+
+// DetectActiveAccount 立即同步探测本机当前正在使用的反重力账号，并返回最新探测结果。
+func (a *App) DetectActiveAccount() switcher.ActiveDetectionResult {
+	if a.activeDetector == nil {
+		return switcher.ActiveDetectionResult{DetectedAt: time.Now().Unix()}
+	}
+	ctx, cancel := context.WithTimeout(a.baseCtx(), 15*time.Second)
+	defer cancel()
+	return a.activeDetector.DetectOnce(ctx)
+}
+
+// TriggerActiveDetect 异步唤醒后台探测器检查本机是否在其他程序中切换了账号。
+func (a *App) TriggerActiveDetect() {
+	if a.activeDetector != nil {
+		a.activeDetector.TriggerCheck()
 	}
 }
 
@@ -207,28 +245,49 @@ func (a *App) GetCurrentAccountID() string {
 func (a *App) AddAccountByRefreshToken(refreshToken, groupID string) (model.Account, error) {
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 45*time.Second)
 	defer cancel()
-	return a.importerService.AddByRefreshToken(ctx, refreshToken, groupID, nil)
+	acc, err := a.importerService.AddByRefreshToken(ctx, refreshToken, groupID, nil)
+	if err == nil && a.activeDetector != nil {
+		a.activeDetector.TriggerCheck()
+	}
+	return acc, err
 }
 
 // ImportRefreshTokens 批量导入多行 Refresh Token 或 JSON 文本。
 func (a *App) ImportRefreshTokens(rawInput, groupID string) (*importer.BatchImportResult, error) {
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 3*time.Minute)
 	defer cancel()
-	return a.importerService.ImportRefreshTokens(ctx, rawInput, groupID)
+	res, err := a.importerService.ImportRefreshTokens(ctx, rawInput, groupID)
+	if err == nil && a.activeDetector != nil {
+		a.activeDetector.TriggerCheck()
+	}
+	return res, err
 }
 
 // ImportFromLocal 一键导入本机当前已登录的反重力账号。
 func (a *App) ImportFromLocal(groupID string) (model.Account, error) {
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 45*time.Second)
 	defer cancel()
-	return a.importerService.ImportFromLocal(ctx, groupID)
+	acc, err := a.importerService.ImportFromLocal(ctx, groupID)
+	if err == nil {
+		if a.activeDetector != nil {
+			a.activeDetector.SyncAfterInternalSwitch(acc)
+		}
+		if a.autoRefresher != nil {
+			a.autoRefresher.TriggerCheck()
+		}
+	}
+	return acc, err
 }
 
 // ImportFromJSON 通过 JSON 文本批量导入账号。
 func (a *App) ImportFromJSON(jsonContent, groupID string) (*importer.BatchImportResult, error) {
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 3*time.Minute)
 	defer cancel()
-	return a.importerService.ImportJSON(ctx, jsonContent, groupID)
+	res, err := a.importerService.ImportJSON(ctx, jsonContent, groupID)
+	if err == nil && a.activeDetector != nil {
+		a.activeDetector.TriggerCheck()
+	}
+	return res, err
 }
 
 // ExportAccounts 将选中账号（为空则全部）导出为 JSON 字符串。
@@ -284,7 +343,11 @@ func (a *App) UpdateAccountGroup(accountIDs []string, groupID string) error {
 
 // DeleteAccounts 删除单个或多个账号。
 func (a *App) DeleteAccounts(accountIDs []string) error {
-	return a.store.DeleteAccounts(accountIDs)
+	err := a.store.DeleteAccounts(accountIDs)
+	if err == nil && a.activeDetector != nil {
+		a.activeDetector.TriggerCheck()
+	}
+	return err
 }
 
 // ReorderAccounts 按指定顺序重排账号列表。
@@ -336,6 +399,9 @@ func (a *App) StartOAuthLogin(groupID string) (oauth.LoginSession, error) {
 			return
 		}
 
+		if a.activeDetector != nil {
+			a.activeDetector.TriggerCheck()
+		}
 		a.emitEvent("oauth:completed", map[string]any{"account": acc})
 	}(sess.RedirectURI, groupID)
 
@@ -379,7 +445,16 @@ func (a *App) RefreshAllQuotas() (*model.RefreshStats, error) {
 func (a *App) SwitchAccount(req switcher.SwitchRequest) (*switcher.SwitchOutcome, error) {
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 60*time.Second)
 	defer cancel()
-	return a.switcherService.SwitchAccount(ctx, req)
+	res, err := a.switcherService.SwitchAccount(ctx, req)
+	if err == nil && res != nil {
+		if a.activeDetector != nil {
+			a.activeDetector.SyncAfterInternalSwitch(res.Account)
+		}
+		if a.autoRefresher != nil {
+			a.autoRefresher.TriggerCheck()
+		}
+	}
+	return res, err
 }
 
 // ListSwitchHistory 返回切号历史记录。

@@ -18,21 +18,28 @@ func TestAppBootstrapAndCoreBindings(t *testing.T) {
 		t.Fatalf("期望默认主题为 light，实际 %q", boot.Settings.Theme)
 	}
 	if boot.Settings.AutoRefreshMinutes != 5 {
-		t.Fatalf("期望默认自动刷新间隔为 5 分钟，实际 %d", boot.Settings.AutoRefreshMinutes)
+		t.Fatalf("期望默认当前账号自动刷新间隔为 5 分钟，实际 %d", boot.Settings.AutoRefreshMinutes)
+	}
+	if boot.Settings.InactiveAutoRefreshMinutes != 60 {
+		t.Fatalf("期望默认未使用账号自动刷新间隔为 60 分钟，实际 %d", boot.Settings.InactiveAutoRefreshMinutes)
 	}
 
-	// 验证手动切换暗色主题与自动刷新间隔持久化
+	// 验证手动切换暗色主题与两档自动刷新间隔持久化
 	savedSettings, err := app.SaveSettings(model.AppSettings{
-		Theme:              "dark",
-		RuntimeTarget:      "desktop",
-		LaunchOnSwitch:     true,
-		LowQuotaThreshold:  25,
-		AutoRefreshMinutes: 10,
+		Theme:                      "dark",
+		RuntimeTarget:              "desktop",
+		LaunchOnSwitch:             true,
+		LowQuotaThreshold:          25,
+		AutoRefreshMinutes:         10,
+		InactiveAutoRefreshMinutes: 120,
 	})
 	if err != nil {
 		t.Fatalf("保存设置失败: %v", err)
 	}
-	if savedSettings.Theme != "dark" || savedSettings.LowQuotaThreshold != 25 || savedSettings.AutoRefreshMinutes != 10 {
+	if savedSettings.Theme != "dark" ||
+		savedSettings.LowQuotaThreshold != 25 ||
+		savedSettings.AutoRefreshMinutes != 10 ||
+		savedSettings.InactiveAutoRefreshMinutes != 120 {
 		t.Fatalf("设置保存异常: %+v", savedSettings)
 	}
 

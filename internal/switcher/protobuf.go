@@ -215,37 +215,65 @@ func unifiedTopicEntryKey(entry []byte) string {
 
 // ExtractRefreshTokenFromUnifiedOAuth 从 antigravityUnifiedStateSync.oauthToken 原始字节中提取 refresh_token。
 func ExtractRefreshTokenFromUnifiedOAuth(data []byte) string {
+	_, rt, _ := ExtractOAuthInfoFromUnifiedOAuth(data)
+	return rt
+}
+
+// ExtractOAuthInfoFromUnifiedOAuth 从 antigravityUnifiedStateSync.oauthToken 中提取 access_token、refresh_token 与 id_token。
+func ExtractOAuthInfoFromUnifiedOAuth(data []byte) (accessToken, refreshToken, idToken string) {
+	payload := extractUnifiedTopicPayload(data, "oauthTokenInfoSentinelKey")
+	if len(payload) == 0 {
+		return "", "", ""
+	}
+	return extractStringField(payload, 1), extractStringField(payload, 3), extractStringField(payload, 5)
+}
+
+// ExtractEmailFromUnifiedUserStatus 从 antigravityUnifiedStateSync.userStatus 中提取账号邮箱。
+func ExtractEmailFromUnifiedUserStatus(data []byte) string {
+	payload := extractUnifiedTopicPayload(data, "userStatusSentinelKey")
+	if len(payload) == 0 {
+		return ""
+	}
+	for _, fieldNum := range []uint32{3, 7} {
+		if candidate := strings.TrimSpace(extractStringField(payload, fieldNum)); strings.Contains(candidate, "@") {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func extractUnifiedTopicPayload(data []byte, targetKey string) []byte {
 	offset := 0
 	for offset < len(data) {
 		tag, afterTag, err := ReadVarint(data, offset)
 		if err != nil {
-			return ""
+			return nil
 		}
 		wireType := uint8(tag & 7)
 		fieldNum := uint32(tag >> 3)
 		if fieldNum == 1 && wireType == 2 {
 			length, contentOffset, err := ReadVarint(data, afterTag)
 			if err != nil {
-				return ""
+				return nil
 			}
 			end := contentOffset + int(length)
 			if end > len(data) {
-				return ""
+				return nil
 			}
-			if rt := extractRefreshTokenFromEntry(data[contentOffset:end]); rt != "" {
-				return rt
+			if payload := extractPayloadFromEntry(data[contentOffset:end], targetKey); len(payload) > 0 {
+				return payload
 			}
 		}
 		next, err := SkipField(data, afterTag, wireType)
 		if err != nil {
-			return ""
+			return nil
 		}
 		offset = next
 	}
-	return ""
+	return nil
 }
 
-func extractRefreshTokenFromEntry(entry []byte) string {
+func extractPayloadFromEntry(entry []byte, targetKey string) []byte {
 	offset := 0
 	matched := false
 	var rowData []byte
@@ -253,21 +281,21 @@ func extractRefreshTokenFromEntry(entry []byte) string {
 	for offset < len(entry) {
 		tag, afterTag, err := ReadVarint(entry, offset)
 		if err != nil {
-			return ""
+			return nil
 		}
 		wireType := uint8(tag & 7)
 		fieldNum := uint32(tag >> 3)
 		if wireType == 2 {
 			length, contentOffset, err := ReadVarint(entry, afterTag)
 			if err != nil {
-				return ""
+				return nil
 			}
 			end := contentOffset + int(length)
 			if end > len(entry) {
-				return ""
+				return nil
 			}
 			val := entry[contentOffset:end]
-			if fieldNum == 1 && string(val) == "oauthTokenInfoSentinelKey" {
+			if fieldNum == 1 && string(val) == targetKey {
 				matched = true
 			} else if fieldNum == 2 {
 				rowData = val
@@ -275,23 +303,23 @@ func extractRefreshTokenFromEntry(entry []byte) string {
 		}
 		next, err := SkipField(entry, afterTag, wireType)
 		if err != nil {
-			return ""
+			return nil
 		}
 		offset = next
 	}
 
 	if !matched || len(rowData) == 0 {
-		return ""
+		return nil
 	}
-	oauthB64 := extractStringField(rowData, 1)
-	if oauthB64 == "" {
-		return ""
+	payloadB64 := extractStringField(rowData, 1)
+	if payloadB64 == "" {
+		return nil
 	}
-	oauthBytes, err := base64.StdEncoding.DecodeString(oauthB64)
+	decoded, err := base64.StdEncoding.DecodeString(payloadB64)
 	if err != nil {
-		return ""
+		return nil
 	}
-	return extractStringField(oauthBytes, 3)
+	return decoded
 }
 
 func extractStringField(data []byte, targetField uint32) string {

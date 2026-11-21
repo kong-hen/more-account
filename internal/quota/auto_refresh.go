@@ -107,12 +107,13 @@ func (r *AutoRefresher) loop(ctx context.Context) {
 }
 
 // RunDueOnce 检查并并发刷新当前所有已到期（超时、缺少周额度桶或重置窗口刚到期）的可用账号。
+// 当前正在使用的账号与未使用账号分别遵循各自配置的自动刷新周期。
 func (r *AutoRefresher) RunDueOnce(ctx context.Context) int {
 	if r.store == nil || r.service == nil {
 		return 0
 	}
 	settings := r.store.GetSettings()
-	if settings.AutoRefreshMinutes <= 0 {
+	if settings.AutoRefreshMinutes <= 0 && settings.InactiveAutoRefreshMinutes <= 0 {
 		return 0
 	}
 	if !r.running.CompareAndSwap(false, true) {
@@ -121,10 +122,25 @@ func (r *AutoRefresher) RunDueOnce(ctx context.Context) int {
 	defer r.running.Store(false)
 
 	now := r.nowFunc()
-	interval := time.Duration(settings.AutoRefreshMinutes) * time.Minute
+	var activeInterval time.Duration
+	if settings.AutoRefreshMinutes > 0 {
+		activeInterval = time.Duration(settings.AutoRefreshMinutes) * time.Minute
+	}
+	var inactiveInterval time.Duration
+	if settings.InactiveAutoRefreshMinutes > 0 {
+		inactiveInterval = time.Duration(settings.InactiveAutoRefreshMinutes) * time.Minute
+	}
+	currentAccountID := r.store.GetCurrentAccountID()
 
 	r.mu.Lock()
-	dueIDs, backfillIDs := selectDueAccountIDs(r.store.ListAccounts(), now, interval, r.summaryBackfillTried)
+	dueIDs, backfillIDs := selectDueAccountIDs(
+		r.store.ListAccounts(),
+		currentAccountID,
+		now,
+		activeInterval,
+		inactiveInterval,
+		r.summaryBackfillTried,
+	)
 	for _, id := range backfillIDs {
 		r.summaryBackfillTried[id] = true
 	}
@@ -188,20 +204,24 @@ func (r *AutoRefresher) refreshIDs(ctx context.Context, ids []string, concurrenc
 	return int(updated.Load())
 }
 
-// selectDueAccountIDs 筛选需要自动刷新的账号 ID（跳过已失效及处于失败退避期内的账号）：
+// selectDueAccountIDs 筛选需要自动刷新的账号 ID（跳过已失效、该类别已关闭自动刷新及处于失败退避期内的账号）：
+// - 当前正在使用的账号使用 activeInterval，未使用账号使用 inactiveInterval；
 // 1) 从未拉取过配额；
 // 2) 已有模型但缺少 5h/周共享额度桶（单次进程内仅立即补拉一次，避免空桶账号死循环）；
-// 3) 距离上次刷新已达到配置的自动刷新间隔；
+// 3) 距离上次刷新已达到该账号类别配置的自动刷新间隔；
 // 4) 任意 5h/周额度或模型的重置时间刚到期（超过 5 秒宽限期）。
 func selectDueAccountIDs(
 	accounts []model.Account,
+	currentAccountID string,
 	now time.Time,
-	interval time.Duration,
+	activeInterval time.Duration,
+	inactiveInterval time.Duration,
 	summaryBackfillTried map[string]bool,
 ) (due []string, backfill []string) {
 	nowUnix := now.Unix()
-	intervalSecs := int64(interval.Seconds())
-	if intervalSecs <= 0 {
+	activeSecs := int64(activeInterval.Seconds())
+	inactiveSecs := int64(inactiveInterval.Seconds())
+	if activeSecs <= 0 && inactiveSecs <= 0 {
 		return nil, nil
 	}
 
@@ -211,14 +231,23 @@ func selectDueAccountIDs(
 		if acc.Disabled {
 			continue
 		}
-		// 若最近一次尝试以错误告终（如断网/代理波动），按退避窗口等待后再重试，避免每 30 秒高频空转
+		intervalSecs := inactiveSecs
+		if currentAccountID != "" && acc.ID == currentAccountID {
+			intervalSecs = activeSecs
+		}
+		// 当前账号所属类别（使用中 / 未使用）若关闭自动刷新，则跳过
+		if intervalSecs <= 0 {
+			continue
+		}
+
+		// 若最近一次尝试以错误告终（如断网/代理波动），按退避窗口（2~10 分钟上限）等待后再重试，避免每 30 秒空转
 		if acc.QuotaError != nil && acc.QuotaError.Timestamp > 0 {
 			lastSuccess := int64(0)
 			if acc.Quota != nil {
 				lastSuccess = acc.Quota.LastUpdated
 			}
 			if acc.QuotaError.Timestamp >= lastSuccess {
-				retryInterval := maxInt64(intervalSecs, 2*60)
+				retryInterval := maxInt64(minInt64(intervalSecs, 10*60), 2*60)
 				if nowUnix-acc.QuotaError.Timestamp < retryInterval {
 					continue
 				}
@@ -282,6 +311,13 @@ func hasPassedResetWindow(q *model.QuotaData, nowUnix int64) bool {
 
 func maxInt64(a, b int64) int64 {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
 		return a
 	}
 	return b

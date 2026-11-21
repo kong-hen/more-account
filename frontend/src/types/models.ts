@@ -102,9 +102,22 @@ export interface AppSettings {
   launchOnSwitch: boolean
   lowQuotaThreshold: number
   autoRefreshMinutes: number
+  inactiveAutoRefreshMinutes: number
   desktopAppPath?: string
   ideAppPath?: string
   tokenUsageDataDir?: string
+}
+
+export interface ActiveDetectionResult {
+  hasCredential: boolean
+  managed: boolean
+  matchedAccountId?: string
+  detectedEmail?: string
+  source?: string
+  targetClient: string
+  changed: boolean
+  detectedAt: number
+  error?: string
 }
 
 export interface ClientInstallInfo {

@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { api, extractErrorMessage, isWailsRuntime, onWailsEvent } from '@/services/api'
+import { maskEmail } from '@/utils/privacy'
 import {
   getMinQuotaPercentage,
   getTierLabel,
@@ -12,6 +13,7 @@ import type {
   Account,
   AccountDetailsUpdate,
   AccountGroup,
+  ActiveDetectionResult,
   AppSection,
   AppSettings,
   ClientInstallInfo,
@@ -47,7 +49,7 @@ export const useAppStore = defineStore('app', () => {
     cliDirOk: false,
   })
 
-  // 默认严格为浅色主题，不跟随系统暗色；后台自动刷新默认每 5 分钟
+  // 默认严格为浅色主题，不跟随系统暗色；当前账号默认每 5 分钟刷新、未使用账号默认每 60 分钟刷新
   const settings = ref<AppSettings>({
     theme: 'light',
     privacyMode: false,
@@ -55,6 +57,7 @@ export const useAppStore = defineStore('app', () => {
     launchOnSwitch: true,
     lowQuotaThreshold: 20,
     autoRefreshMinutes: 5,
+    inactiveAutoRefreshMinutes: 60,
   })
 
   // 账号工作台筛选与视图状态
@@ -75,6 +78,9 @@ export const useAppStore = defineStore('app', () => {
   const switchingId = ref<string | null>(null)
   const refreshingAll = ref(false)
   const autoRefreshing = ref(false)
+  const detectingActive = ref(false)
+  const importingLocal = ref(false)
+  const activeDetection = ref<ActiveDetectionResult | null>(null)
   const refreshProgress = ref({ done: 0, total: 0 })
   // 响应式当前时间戳（每 30 秒推进一次，驱动额度重置倒计时实时更新）
   const nowMs = ref(Date.now())
@@ -156,6 +162,13 @@ export const useAppStore = defineStore('app', () => {
           void reloadAccounts()
         }),
       )
+      cleanups.push(
+        onWailsEvent('account:active_detected', (payload: unknown) => {
+          const res = payload as ActiveDetectionResult | null
+          if (!res) return
+          applyActiveDetectionResult(res, true)
+        }),
+      )
 
       // 每 30 秒推进倒计时时钟，保证卡片/表格/右栏重置倒计时实时变化
       const clockTimer = window.setInterval(() => {
@@ -163,15 +176,21 @@ export const useAppStore = defineStore('app', () => {
       }, 30_000)
       cleanups.push(() => window.clearInterval(clockTimer))
 
-      // 窗口回到前台时自动保鲜：更新时间并触发后端检查到期账号（防抖 15 秒）
-      let lastFocusCheck = 0
+      // 窗口回到前台时：立即探测外部切号（2 秒防抖）并触发配额到期检查（15 秒防抖）
+      let lastQuotaFocusCheck = 0
+      let lastActiveFocusCheck = 0
       const handleForeground = () => {
         if (document.visibilityState === 'hidden') return
-        nowMs.value = Date.now()
         const now = Date.now()
-        if (now - lastFocusCheck < 15_000) return
-        lastFocusCheck = now
-        void api.triggerAutoRefreshIfDue().catch(() => {})
+        nowMs.value = now
+        if (now - lastActiveFocusCheck >= 2_000) {
+          lastActiveFocusCheck = now
+          void api.triggerActiveDetect().catch(() => {})
+        }
+        if (now - lastQuotaFocusCheck >= 15_000) {
+          lastQuotaFocusCheck = now
+          void api.triggerAutoRefreshIfDue().catch(() => {})
+        }
       }
       window.addEventListener('focus', handleForeground)
       document.addEventListener('visibilitychange', handleForeground)
@@ -181,7 +200,8 @@ export const useAppStore = defineStore('app', () => {
       })
 
       initialized.value = true
-      // 启动就绪后立即触发一次到期检查（补拉陈旧数据或缺失周额度桶的账号）
+      // 启动就绪后立即触发一次本机当前账号探测与配额到期检查
+      void detectActiveAccount(true)
       void api.triggerAutoRefreshIfDue().catch(() => {})
     } catch (err) {
       notify(`加载应用数据失败：${extractErrorMessage(err)}`, 'error', 5000)
@@ -294,6 +314,15 @@ export const useAppStore = defineStore('app', () => {
       })
       replaceAccountInList(outcome.account)
       currentAccountId.value = outcome.account.id
+      activeDetection.value = {
+        hasCredential: true,
+        managed: true,
+        matchedAccountId: outcome.account.id,
+        detectedEmail: outcome.account.email,
+        targetClient,
+        changed: false,
+        detectedAt: Math.floor(Date.now() / 1000),
+      }
       if (outcome.launchWarning) {
         notify(`账号已切换为 ${outcome.account.email}，但重启客户端失败：${outcome.launchWarning}`, 'warning', 5500)
       } else if (outcome.launched) {
@@ -381,6 +410,91 @@ export const useAppStore = defineStore('app', () => {
       selectedAccountIds.value = selectedAccountIds.value.filter((id) => id !== accountId)
     } else {
       selectedAccountIds.value = [...selectedAccountIds.value, accountId]
+    }
+  }
+
+  function applyActiveDetectionResult(res: ActiveDetectionResult, fromBackgroundEvent: boolean) {
+    activeDetection.value = res
+    if (res.error) return
+
+    const nextId = res.managed ? (res.matchedAccountId ?? '') : ''
+    const idChanged = nextId !== currentAccountId.value
+    if (idChanged) {
+      currentAccountId.value = nextId
+      void reloadAccounts()
+    }
+
+    if (fromBackgroundEvent && res.changed) {
+      if (res.managed && res.detectedEmail) {
+        notify(
+          `检测到本机已切换账号：${maskEmail(res.detectedEmail, settings.value.privacyMode)}`,
+          'info',
+          4000,
+        )
+      } else if (res.hasCredential && !res.managed) {
+        const label = res.detectedEmail
+          ? `：${maskEmail(res.detectedEmail, settings.value.privacyMode)}`
+          : ''
+        notify(`检测到本机切换至未纳管外部账号${label}`, 'warning', 4500)
+      } else if (!res.hasCredential) {
+        notify('检测到本机 Antigravity 账号已退出登录', 'info', 3800)
+      }
+    }
+  }
+
+  async function detectActiveAccount(silent = false) {
+    if (!isWailsRuntime() || detectingActive.value) return
+    detectingActive.value = true
+    try {
+      const res = await api.detectActiveAccount()
+      applyActiveDetectionResult(res, false)
+      if (!silent) {
+        if (res.error) {
+          notify(`探测本机账号失败：${res.error}`, 'error', 4200)
+        } else if (res.managed && res.detectedEmail) {
+          const emailText = maskEmail(res.detectedEmail, settings.value.privacyMode)
+          notify(
+            res.changed ? `已同步本机当前账号：${emailText}` : `本机当前正在使用：${emailText}`,
+            'success',
+          )
+        } else if (res.hasCredential && !res.managed) {
+          const emailText = res.detectedEmail
+            ? maskEmail(res.detectedEmail, settings.value.privacyMode)
+            : '未知账号'
+          notify(`检测到外部未纳管账号（${emailText}），可点击导入`, 'warning', 4500)
+        } else {
+          notify('本机暂未检测到已登录的 Antigravity 账号', 'info')
+        }
+      }
+    } catch (err) {
+      if (!silent) {
+        notify(`探测本机账号失败：${extractErrorMessage(err)}`, 'error', 4200)
+      }
+    } finally {
+      detectingActive.value = false
+    }
+  }
+
+  async function importLocalActiveAccount(groupId = '') {
+    if (!isWailsRuntime() || importingLocal.value) return
+    importingLocal.value = true
+    try {
+      const acc = await api.importFromLocal(groupId)
+      await reloadAccounts()
+      activeDetection.value = {
+        hasCredential: true,
+        managed: true,
+        matchedAccountId: acc.id,
+        detectedEmail: acc.email,
+        targetClient: settings.value.runtimeTarget,
+        changed: false,
+        detectedAt: Math.floor(Date.now() / 1000),
+      }
+      notify(`已导入并同步当前账号：${maskEmail(acc.email, settings.value.privacyMode)}`, 'success')
+    } catch (err) {
+      notify(`导入本机账号失败：${extractErrorMessage(err)}`, 'error', 4500)
+    } finally {
+      importingLocal.value = false
     }
   }
 
@@ -523,6 +637,9 @@ export const useAppStore = defineStore('app', () => {
     switchingId,
     refreshingAll,
     autoRefreshing,
+    detectingActive,
+    importingLocal,
+    activeDetection,
     refreshProgress,
     nowMs,
     toasts,
@@ -536,6 +653,8 @@ export const useAppStore = defineStore('app', () => {
     togglePrivacyMode,
     refreshAccount,
     refreshAllAccounts,
+    detectActiveAccount,
+    importLocalActiveAccount,
     switchToAccount,
     saveAccountDetails,
     assignAccountsToGroup,

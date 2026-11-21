@@ -144,13 +144,21 @@ func normalizeSettings(in model.AppSettings) model.AppSettings {
 	if in.LowQuotaThreshold <= 0 || in.LowQuotaThreshold > 100 {
 		in.LowQuotaThreshold = 20
 	}
-	// AutoRefreshMinutes: 0 视为旧配置缺省，升级为默认 5 分钟；< 0 统一归为 -1（关闭）；上限 120 分钟。
+	// AutoRefreshMinutes（当前使用账号）: 0 视为旧配置缺省，升级为默认 5 分钟；< 0 统一归为 -1（关闭）；上限 120 分钟。
 	if in.AutoRefreshMinutes == 0 {
 		in.AutoRefreshMinutes = 5
 	} else if in.AutoRefreshMinutes < 0 {
 		in.AutoRefreshMinutes = -1
 	} else if in.AutoRefreshMinutes > 120 {
 		in.AutoRefreshMinutes = 120
+	}
+	// InactiveAutoRefreshMinutes（未使用账号）: 0 视为旧配置缺省，升级为默认 60 分钟（1 小时）；< 0 归为 -1（关闭）；上限 1440 分钟（24 小时）。
+	if in.InactiveAutoRefreshMinutes == 0 {
+		in.InactiveAutoRefreshMinutes = 60
+	} else if in.InactiveAutoRefreshMinutes < 0 {
+		in.InactiveAutoRefreshMinutes = -1
+	} else if in.InactiveAutoRefreshMinutes > 1440 {
+		in.InactiveAutoRefreshMinutes = 1440
 	}
 	return in
 }

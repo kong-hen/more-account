@@ -98,6 +98,20 @@ const batchGroupOptions = computed(() => [
 function setSort(val: string) {
   appStore.sortBy = val as AccountSortBy
 }
+
+function formatRefreshInterval(minutes: number): string {
+  if (minutes <= 0) return '关闭'
+  if (minutes >= 60 && minutes % 60 === 0) return `每 ${minutes / 60} 小时`
+  return `每 ${minutes} 分钟`
+}
+
+const refreshButtonTooltip = computed(() => {
+  if (appStore.autoRefreshing) return '正在后台自动同步最新额度...'
+  const activeMin = appStore.settings.autoRefreshMinutes
+  const inactiveMin = appStore.settings.inactiveAutoRefreshMinutes
+  if (activeMin <= 0 && inactiveMin <= 0) return '手动刷新全部账号额度'
+  return `手动立即刷新全部额度（自动刷新：当前账号${formatRefreshInterval(activeMin)} / 未使用账号${formatRefreshInterval(inactiveMin)}）`
+})
 </script>
 
 <template>
@@ -293,13 +307,7 @@ function setSort(val: string) {
         <button
           type="button"
           :disabled="appStore.refreshingAll || appStore.accounts.length === 0"
-          :title="
-            appStore.autoRefreshing
-              ? '正在后台自动同步最新额度...'
-              : appStore.settings.autoRefreshMinutes > 0
-                ? `手动立即刷新全部额度（已开启每 ${appStore.settings.autoRefreshMinutes} 分钟自动刷新）`
-                : '手动刷新全部账号额度'
-          "
+          :title="refreshButtonTooltip"
           class="h-8 inline-flex items-center gap-1.5 px-2.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
           @click="appStore.refreshAllAccounts"

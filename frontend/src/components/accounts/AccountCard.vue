@@ -8,6 +8,7 @@ import {
   ShieldCheck,
   Clock,
   Check,
+  CheckCircle2,
   KeyRound,
 } from 'lucide-vue-next'
 import QuotaBar from '@/components/common/QuotaBar.vue'
@@ -62,18 +63,33 @@ function quotaValueStyle(percentage: number) {
 
 <template>
   <article
-    class="group relative flex flex-col justify-between p-4 rounded-2xl border cursor-pointer transition-colors"
+    class="group relative overflow-hidden flex flex-col justify-between p-4 rounded-2xl border cursor-pointer transition-all"
     :style="{
-      backgroundColor: 'var(--bg-surface)',
+      background: isCurrent
+        ? 'linear-gradient(180deg, var(--success-soft) 0%, var(--bg-surface) 38%)'
+        : 'var(--bg-surface)',
       borderColor: activeDetail
         ? 'var(--accent)'
         : isCurrent
-          ? 'var(--accent-border)'
+          ? 'var(--success)'
           : 'var(--border-subtle)',
-      boxShadow: 'var(--shadow-card)',
+      boxShadow: activeDetail
+        ? isCurrent
+          ? '0 0 0 1px var(--accent), 0 8px 20px -6px rgba(16, 185, 129, 0.24)'
+          : '0 0 0 1px var(--accent), var(--shadow-card)'
+        : isCurrent
+          ? '0 0 0 1px var(--success), 0 8px 20px -6px rgba(16, 185, 129, 0.24)'
+          : 'var(--shadow-card)',
     }"
     @click="emit('open-detail', account)"
   >
+    <!-- 当前正在使用账号的顶部翠绿强调条，一眼识别 -->
+    <div
+      v-if="isCurrent"
+      class="absolute inset-x-0 top-0 h-[3px] pointer-events-none"
+      style="background: linear-gradient(90deg, var(--success), #34d399)"
+    />
+
     <!-- 顶部信息行 -->
     <div class="space-y-2.5">
       <div class="flex items-start justify-between gap-2">
@@ -96,11 +112,11 @@ function quotaValueStyle(percentage: number) {
 
           <div class="min-w-0">
             <div class="flex items-center gap-1.5 min-w-0">
-              <span
+              <CheckCircle2
                 v-if="isCurrent"
-                class="w-2 h-2 rounded-full shrink-0"
-                style="background-color: var(--success)"
-                title="当前正在使用"
+                class="w-4 h-4 shrink-0"
+                style="color: var(--success)"
+                title="本机当前正在使用此账号"
               />
               <h3 class="text-[13.5px] font-semibold truncate" style="color: var(--text-primary)">
                 {{ maskEmail(account.email, appStore.settings.privacyMode) }}
@@ -112,36 +128,61 @@ function quotaValueStyle(percentage: number) {
           </div>
         </div>
 
-        <!-- 订阅等级徽章 -->
-        <span
-          v-if="tier !== 'UNKNOWN'"
-          class="px-1.5 py-0.5 rounded-md text-[10.5px] font-semibold tracking-wide shrink-0"
-          :style="
-            tier === 'ULTRA'
-              ? { backgroundColor: 'var(--accent-soft)', color: 'var(--accent)' }
-              : tier === 'PRO'
-                ? { backgroundColor: 'var(--success-soft)', color: 'var(--success-text)' }
-                : { backgroundColor: 'var(--bg-subtle)', color: 'var(--text-secondary)' }
-          "
-        >
-          {{ tier }}
-        </span>
+        <!-- 右上角状态徽章簇：使用中醒目标签 + 订阅等级 -->
+        <div class="flex items-center gap-1.5 shrink-0">
+          <span
+            v-if="isCurrent"
+            class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10.5px] font-semibold tracking-wide shrink-0"
+            style="background-color: var(--success); color: #ffffff"
+            title="本机当前正在使用此账号"
+          >
+            <span class="relative flex w-1.5 h-1.5">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75" />
+              <span class="relative inline-flex rounded-full w-1.5 h-1.5 bg-white" />
+            </span>
+            使用中
+          </span>
+
+          <span
+            v-if="tier !== 'UNKNOWN'"
+            class="px-1.5 py-0.5 rounded-md border text-[10.5px] font-semibold tracking-wide shrink-0"
+            :style="
+              tier === 'ULTRA'
+                ? { backgroundColor: 'var(--accent-soft)', color: 'var(--accent)', borderColor: 'transparent' }
+                : tier === 'PRO'
+                  ? isCurrent
+                    ? { backgroundColor: 'var(--bg-surface)', color: 'var(--success-text)', borderColor: 'rgba(16, 185, 129, 0.35)' }
+                    : { backgroundColor: 'var(--success-soft)', color: 'var(--success-text)', borderColor: 'transparent' }
+                  : { backgroundColor: 'var(--bg-subtle)', color: 'var(--text-secondary)', borderColor: 'transparent' }
+            "
+          >
+            {{ tier }}
+          </span>
+        </div>
       </div>
 
       <!-- 元数据胶囊行：自建分组 + 状态提示 + 2FA/密码小图标 -->
       <div class="flex items-center flex-wrap gap-1.5">
         <span
           v-if="groupInfo"
-          class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium"
-          style="background-color: var(--bg-subtle); color: var(--text-secondary)"
+          class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[11px] font-medium"
+          :style="
+            isCurrent
+              ? { backgroundColor: 'var(--bg-surface)', color: 'var(--text-secondary)', borderColor: 'var(--border-subtle)' }
+              : { backgroundColor: 'var(--bg-subtle)', color: 'var(--text-secondary)', borderColor: 'transparent' }
+          "
         >
           <span class="w-1.5 h-1.5 rounded-full" :style="{ backgroundColor: groupInfo.color }" />
           {{ groupInfo.name }}
         </span>
         <span
           v-else
-          class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px]"
-          style="background-color: var(--bg-subtle); color: var(--text-muted)"
+          class="inline-flex items-center px-2 py-0.5 rounded-full border text-[11px]"
+          :style="
+            isCurrent
+              ? { backgroundColor: 'var(--bg-surface)', color: 'var(--text-muted)', borderColor: 'var(--border-subtle)' }
+              : { backgroundColor: 'var(--bg-subtle)', color: 'var(--text-muted)', borderColor: 'transparent' }
+          "
         >
           未分组
         </span>
@@ -339,11 +380,19 @@ function quotaValueStyle(percentage: number) {
         <button
           type="button"
           :disabled="isSwitching"
-          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors disabled:opacity-50"
+          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors disabled:opacity-50"
           :style="
             isCurrent
-              ? { backgroundColor: 'var(--success-soft)', color: 'var(--success-text)' }
-              : { backgroundColor: 'var(--accent)', color: '#ffffff' }
+              ? {
+                  backgroundColor: 'var(--success-soft)',
+                  color: 'var(--success-text)',
+                  borderColor: 'var(--success)',
+                }
+              : {
+                  backgroundColor: 'var(--accent)',
+                  color: '#ffffff',
+                  borderColor: 'transparent',
+                }
           "
           @click="appStore.switchToAccount(account.id)"
         >

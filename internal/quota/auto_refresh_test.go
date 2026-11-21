@@ -9,7 +9,8 @@ import (
 
 func TestSelectDueAccountIDs(t *testing.T) {
 	now := time.Date(2026, 11, 21, 15, 30, 0, 0, time.UTC)
-	interval := 5 * time.Minute
+	activeInterval := 5 * time.Minute
+	inactiveInterval := 60 * time.Minute
 
 	accounts := []model.Account{
 		{
@@ -18,17 +19,8 @@ func TestSelectDueAccountIDs(t *testing.T) {
 			Disabled: true,
 		},
 		{
-			// 刚刷新过且有 summaryBuckets，尚未到期，不刷新
-			ID: "fresh-acc",
-			Quota: &model.QuotaData{
-				LastUpdated:    now.Add(-2 * time.Minute).Unix(),
-				Models:         []model.ModelQuota{{Name: "gemini-4-neon-high", Percentage: 90}},
-				SummaryBuckets: []model.QuotaBucket{{BucketID: "gemini-5h", Percentage: 90, ResetTime: now.Add(2 * time.Hour).Format(time.RFC3339)}},
-			},
-		},
-		{
-			// 超过自动刷新间隔（6 分钟 > 5 分钟），应刷新
-			ID: "stale-acc",
+			// 当前使用账号，已超过 5 分钟，应刷新
+			ID: "active-stale-acc",
 			Quota: &model.QuotaData{
 				LastUpdated:    now.Add(-6 * time.Minute).Unix(),
 				Models:         []model.ModelQuota{{Name: "gemini-4-neon-high", Percentage: 80}},
@@ -36,10 +28,28 @@ func TestSelectDueAccountIDs(t *testing.T) {
 			},
 		},
 		{
-			// 虽仅过去 1 分钟，但 5h 重置窗口刚刚到期（超过 5 秒宽限期），应立即刷新
+			// 未使用账号，仅过去 20 分钟（< 60 分钟），不应刷新
+			ID: "inactive-fresh-acc",
+			Quota: &model.QuotaData{
+				LastUpdated:    now.Add(-20 * time.Minute).Unix(),
+				Models:         []model.ModelQuota{{Name: "gemini-4-neon-high", Percentage: 90}},
+				SummaryBuckets: []model.QuotaBucket{{BucketID: "gemini-5h", Percentage: 90, ResetTime: now.Add(2 * time.Hour).Format(time.RFC3339)}},
+			},
+		},
+		{
+			// 未使用账号，已超过 60 分钟（65 分钟 > 60 分钟），应刷新
+			ID: "inactive-stale-acc",
+			Quota: &model.QuotaData{
+				LastUpdated:    now.Add(-65 * time.Minute).Unix(),
+				Models:         []model.ModelQuota{{Name: "gemini-4-neon-high", Percentage: 75}},
+				SummaryBuckets: []model.QuotaBucket{{BucketID: "gemini-5h", Percentage: 75}},
+			},
+		},
+		{
+			// 未使用账号虽仅过去 10 分钟，但 5h 重置窗口刚刚到期（超过 5 秒宽限期），应立即刷新
 			ID: "reset-passed-acc",
 			Quota: &model.QuotaData{
-				LastUpdated: now.Add(-1 * time.Minute).Unix(),
+				LastUpdated: now.Add(-10 * time.Minute).Unix(),
 				Models:      []model.ModelQuota{{Name: "gemini-4-neon-high", Percentage: 0}},
 				SummaryBuckets: []model.QuotaBucket{
 					{BucketID: "gemini-5h", Percentage: 0, ResetTime: now.Add(-10 * time.Second).Format(time.RFC3339)},
@@ -63,29 +73,29 @@ func TestSelectDueAccountIDs(t *testing.T) {
 			},
 		},
 		{
-			// 最近 1 分钟刚拉取失败的账号处于退避期，不应高频重试
+			// 未使用账号最近 5 分钟刚失败（未过 10 分钟退避上限），不应高频重试
 			ID: "recent-error-acc",
 			Quota: &model.QuotaData{
-				LastUpdated:    now.Add(-10 * time.Minute).Unix(),
+				LastUpdated:    now.Add(-90 * time.Minute).Unix(),
 				Models:         []model.ModelQuota{{Name: "gemini-4-neon-high", Percentage: 50}},
 				SummaryBuckets: []model.QuotaBucket{{BucketID: "gemini-5h", Percentage: 50}},
 			},
 			QuotaError: &model.QuotaErrorInfo{
 				Message:   "network timeout",
-				Timestamp: now.Add(-1 * time.Minute).Unix(),
+				Timestamp: now.Add(-5 * time.Minute).Unix(),
 			},
 		},
 		{
-			// 失败已超过退避间隔（6 分钟 > 5 分钟），应重新尝试刷新
+			// 未使用账号失败已超过 10 分钟退避上限（12 分钟 > 10 分钟），应重新尝试刷新
 			ID: "expired-error-acc",
 			Quota: &model.QuotaData{
-				LastUpdated:    now.Add(-15 * time.Minute).Unix(),
+				LastUpdated:    now.Add(-90 * time.Minute).Unix(),
 				Models:         []model.ModelQuota{{Name: "gemini-4-neon-high", Percentage: 50}},
 				SummaryBuckets: []model.QuotaBucket{{BucketID: "gemini-5h", Percentage: 50}},
 			},
 			QuotaError: &model.QuotaErrorInfo{
 				Message:   "network timeout",
-				Timestamp: now.Add(-6 * time.Minute).Unix(),
+				Timestamp: now.Add(-12 * time.Minute).Unix(),
 			},
 		},
 	}
@@ -93,9 +103,10 @@ func TestSelectDueAccountIDs(t *testing.T) {
 	tried := map[string]bool{
 		"already-backfilled-acc": true,
 	}
-	due, backfill := selectDueAccountIDs(accounts, now, interval, tried)
+	due, backfill := selectDueAccountIDs(accounts, "active-stale-acc", now, activeInterval, inactiveInterval, tried)
 	want := map[string]bool{
-		"stale-acc":           true,
+		"active-stale-acc":    true,
+		"inactive-stale-acc":  true,
 		"reset-passed-acc":    true,
 		"missing-summary-acc": true,
 		"expired-error-acc":   true,
@@ -110,5 +121,39 @@ func TestSelectDueAccountIDs(t *testing.T) {
 	}
 	if len(backfill) != 1 || backfill[0] != "missing-summary-acc" {
 		t.Fatalf("期望仅记录 missing-summary-acc 为补拉账号，实际: %v", backfill)
+	}
+}
+
+func TestSelectDueAccountIDsIndependentToggle(t *testing.T) {
+	now := time.Date(2026, 11, 21, 15, 30, 0, 0, time.UTC)
+	accounts := []model.Account{
+		{
+			ID: "active-acc",
+			Quota: &model.QuotaData{
+				LastUpdated:    now.Add(-2 * time.Hour).Unix(),
+				Models:         []model.ModelQuota{{Name: "gemini-4-neon-high", Percentage: 80}},
+				SummaryBuckets: []model.QuotaBucket{{BucketID: "gemini-5h", Percentage: 80}},
+			},
+		},
+		{
+			ID: "inactive-acc",
+			Quota: &model.QuotaData{
+				LastUpdated:    now.Add(-2 * time.Hour).Unix(),
+				Models:         []model.ModelQuota{{Name: "gemini-4-neon-high", Percentage: 80}},
+				SummaryBuckets: []model.QuotaBucket{{BucketID: "gemini-5h", Percentage: 80}},
+			},
+		},
+	}
+
+	// 仅开启当前账号刷新，关闭未使用账号刷新
+	due, _ := selectDueAccountIDs(accounts, "active-acc", now, 5*time.Minute, 0, nil)
+	if len(due) != 1 || due[0] != "active-acc" {
+		t.Fatalf("期望仅刷新 active-acc，实际 %v", due)
+	}
+
+	// 关闭当前账号刷新，仅开启未使用账号刷新
+	due, _ = selectDueAccountIDs(accounts, "active-acc", now, 0, 60*time.Minute, nil)
+	if len(due) != 1 || due[0] != "inactive-acc" {
+		t.Fatalf("期望仅刷新 inactive-acc，实际 %v", due)
 	}
 }

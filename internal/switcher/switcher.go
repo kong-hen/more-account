@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"more-account/internal/model"
@@ -31,6 +32,7 @@ type SwitchOutcome struct {
 // Service 编排反重力账号切换，内置单飞锁防止并发切号导致凭据竞争写入。
 type Service struct {
 	mu          sync.Mutex
+	switching   atomic.Bool
 	store       *storage.Store
 	oauthClient *oauth.Client
 }
@@ -46,12 +48,21 @@ func NewService(store *storage.Store, oauthClient *oauth.Client) *Service {
 	}
 }
 
+// IsSwitching 返回当前是否正在执行切换操作，用于避免后台账号探测器在写凭据中途并发误判。
+func (s *Service) IsSwitching() bool {
+	return s.switching.Load()
+}
+
 // SwitchAccount 执行完整切号流程：令牌预刷新 -> 停客户端 -> 写入系统凭据/数据库 -> 提交状态 -> 记历史 -> 重启客户端。
 func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*SwitchOutcome, error) {
 	if !s.mu.TryLock() {
 		return nil, fmt.Errorf("正在执行另一次账号切换，请稍候再试")
 	}
-	defer s.mu.Unlock()
+	s.switching.Store(true)
+	defer func() {
+		s.switching.Store(false)
+		s.mu.Unlock()
+	}()
 
 	started := time.Now()
 	target := normalizeTarget(req.TargetClient)

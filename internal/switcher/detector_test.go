@@ -1,0 +1,196 @@
+package switcher
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+
+	"more-account/internal/model"
+	"more-account/internal/storage"
+)
+
+func makeFakeIDToken(email string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payloadBytes, _ := json.Marshal(map[string]string{"email": email})
+	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	return header + "." + payload + ".sig"
+}
+
+func TestExtractEmailFromIDTokenAndParseCredential(t *testing.T) {
+	idTok := makeFakeIDToken("alice@gmail.com")
+	raw, err := BuildCredentialPayloadJSON(model.Account{
+		Email: "alice@gmail.com",
+		Token: model.TokenData{
+			AccessToken:  "at-alice",
+			RefreshToken: "rt-alice",
+			IDToken:      idTok,
+		},
+	})
+	if err != nil {
+		t.Fatalf("构造凭据失败: %v", err)
+	}
+	parsed, err := ParseSystemCredential(raw)
+	if err != nil {
+		t.Fatalf("解析凭据失败: %v", err)
+	}
+	if parsed.Email != "alice@gmail.com" {
+		t.Fatalf("期望从 id_token 解出 alice@gmail.com，实际 %q", parsed.Email)
+	}
+}
+
+func TestReadCredentialFromStateDBExtractsEmailAndTokens(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.vscdb")
+	acc := model.Account{
+		ID:    "a1",
+		Email: "ide-user@gmail.com",
+		Token: model.TokenData{
+			AccessToken:     "acc-ide",
+			RefreshToken:    "rt-ide",
+			ExpiryTimestamp: 1800000000,
+			IDToken:         "", // 故意不放 id_token，验证从 userStatus 兜底提取邮箱
+		},
+	}
+	if err := InjectAccountToStateDB(dbPath, acc); err != nil {
+		t.Fatalf("注入 state.vscdb 失败: %v", err)
+	}
+	cred, err := ReadCredentialFromStateDB(dbPath)
+	if err != nil || cred == nil {
+		t.Fatalf("读取 state.vscdb 凭据失败: cred=%+v err=%v", cred, err)
+	}
+	if cred.RefreshToken != "rt-ide" || cred.AccessToken != "acc-ide" || cred.Email != "ide-user@gmail.com" {
+		t.Fatalf("state.vscdb 提取字段不匹配: %+v", cred)
+	}
+}
+
+func TestActiveDetectorDetectsExternalSwitches(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("初始化 store 失败: %v", err)
+	}
+	accA, err := store.UpsertAccount(model.Account{
+		Email: "a@gmail.com",
+		Token: model.TokenData{RefreshToken: "rt-a"},
+	})
+	if err != nil {
+		t.Fatalf("写入账号 A 失败: %v", err)
+	}
+	accB, err := store.UpsertAccount(model.Account{
+		Email: "b@gmail.com",
+		Token: model.TokenData{RefreshToken: "rt-b"},
+	})
+	if err != nil {
+		t.Fatalf("写入账号 B 失败: %v", err)
+	}
+	if err := store.SetCurrentAccountID(accA.ID); err != nil {
+		t.Fatalf("设置初始激活账号失败: %v", err)
+	}
+
+	var (
+		mockCred    *SystemCredential
+		mockSource  = "keychain"
+		mockErr     error
+		switching   atomic.Bool
+		notifyCount int
+		lastNotify  ActiveDetectionResult
+	)
+
+	detector := NewActiveDetector(
+		store,
+		nil,
+		func() bool { return switching.Load() },
+		func(res ActiveDetectionResult) {
+			notifyCount++
+			lastNotify = res
+		},
+	)
+	detector.readLocal = func(target string) (*SystemCredential, string, error) {
+		return mockCred, mockSource, mockErr
+	}
+
+	// 场景 1：其他程序通过精确 RT 切换到账号 B
+	mockCred = &SystemCredential{RefreshToken: "rt-b"}
+	res := detector.DetectOnce(context.Background())
+	if !res.Changed || !res.Managed || res.MatchedAccountID != accB.ID {
+		t.Fatalf("期望切换到账号 B，实际 %+v", res)
+	}
+	if store.GetCurrentAccountID() != accB.ID {
+		t.Fatalf("store currentAccountID 期望 %s，实际 %s", accB.ID, store.GetCurrentAccountID())
+	}
+	if notifyCount != 1 {
+		t.Fatalf("期望触发 1 次通知，实际 %d", notifyCount)
+	}
+
+	// 重复轮询同一账号不应再次触发变更或通知
+	res = detector.DetectOnce(context.Background())
+	if res.Changed || notifyCount != 1 {
+		t.Fatalf("重复轮询不应误报变更: res=%+v notifyCount=%d", res, notifyCount)
+	}
+
+	// 场景 2：用户在 Antigravity 中重新登录了账号 A（全新 RT，靠 id_token 邮箱命中）
+	mockCred = &SystemCredential{
+		RefreshToken: "rt-a-brand-new",
+		Email:        "A@GMAIL.COM",
+	}
+	res = detector.DetectOnce(context.Background())
+	if !res.Changed || !res.Managed || res.MatchedAccountID != accA.ID {
+		t.Fatalf("期望通过邮箱命中账号 A，实际 %+v", res)
+	}
+	if store.GetCurrentAccountID() != accA.ID {
+		t.Fatalf("store currentAccountID 期望 %s，实际 %s", accA.ID, store.GetCurrentAccountID())
+	}
+
+	// 场景 3：切号进行中应跳过探测，不覆盖状态
+	switching.Store(true)
+	mockCred = &SystemCredential{RefreshToken: "rt-b"}
+	res = detector.DetectOnce(context.Background())
+	if store.GetCurrentAccountID() != accA.ID {
+		t.Fatalf("切号中不应修改 currentAccountID，实际 %s", store.GetCurrentAccountID())
+	}
+	switching.Store(false)
+
+	// 场景 4：读取凭据临时报错不应清空当前激活账号
+	mockCred = nil
+	mockErr = errors.New("keychain busy")
+	res = detector.DetectOnce(context.Background())
+	if res.Error == "" || store.GetCurrentAccountID() != accA.ID {
+		t.Fatalf("读取报错时应保留原激活账号: res=%+v current=%s", res, store.GetCurrentAccountID())
+	}
+	mockErr = nil
+
+	// 场景 5：外部切换到了未纳管的新账号 C，应清空旧激活态并上报外部邮箱
+	mockCred = &SystemCredential{
+		RefreshToken: "rt-external-c",
+		Email:        "external@gmail.com",
+	}
+	res = detector.DetectOnce(context.Background())
+	if !res.Changed || res.Managed || !res.HasCredential || res.DetectedEmail != "external@gmail.com" {
+		t.Fatalf("期望识别未纳管外部账号，实际 %+v", res)
+	}
+	if store.GetCurrentAccountID() != "" {
+		t.Fatalf("未纳管外部账号时应清空旧的 currentAccountID，实际 %q", store.GetCurrentAccountID())
+	}
+	if lastNotify.DetectedEmail != "external@gmail.com" {
+		t.Fatalf("回调应收到外部账号信息，实际 %+v", lastNotify)
+	}
+
+	// 场景 6：本程序内部切号后调用 SyncAfterInternalSwitch，下一次探测不应触发误报通知
+	_ = store.SetCurrentAccountID(accB.ID)
+	detector.SyncAfterInternalSwitch(accB)
+	prevNotify := notifyCount
+	mockCred = &SystemCredential{RefreshToken: "rt-b", Email: accB.Email}
+	res = detector.DetectOnce(context.Background())
+	if res.Changed || notifyCount != prevNotify {
+		t.Fatalf("内部切号同步基线后不应重复通知: res=%+v notifyCount=%d prev=%d", res, notifyCount, prevNotify)
+	}
+
+	// 场景 7：用户退出登录（无任何凭据）时清空 currentAccountID
+	mockCred = nil
+	res = detector.DetectOnce(context.Background())
+	if !res.Changed || res.HasCredential || store.GetCurrentAccountID() != "" {
+		t.Fatalf("退出登录后应清空激活态: res=%+v current=%q", res, store.GetCurrentAccountID())
+	}
+}

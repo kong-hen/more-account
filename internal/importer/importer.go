@@ -116,12 +116,19 @@ func (s *Service) AddByRefreshToken(ctx context.Context, refreshToken string, gr
 	return acc, nil
 }
 
-// ImportFromLocal 从本机已登录的反重力客户端自动提取当前账号（优先 2.0 系统凭据/回退文件，其次 state.vscdb）。
+// ImportFromLocal 从本机已登录的反重力客户端自动提取当前账号（按当前目标客户端优先顺序探测凭据）。
 func (s *Service) ImportFromLocal(ctx context.Context, groupID string) (model.Account, error) {
 	var refreshToken string
 
-	if cred, err := switcher.ReadDesktopCredential(); err == nil && cred != nil && strings.TrimSpace(cred.RefreshToken) != "" {
+	target := s.store.GetSettings().RuntimeTarget
+	if cred, _, err := switcher.ReadActiveCredentialForTarget(target); err == nil && cred != nil && strings.TrimSpace(cred.RefreshToken) != "" {
 		refreshToken = cred.RefreshToken
+	}
+
+	if refreshToken == "" {
+		if cred, err := switcher.ReadDesktopCredential(); err == nil && cred != nil && strings.TrimSpace(cred.RefreshToken) != "" {
+			refreshToken = cred.RefreshToken
+		}
 	}
 
 	if refreshToken == "" {
@@ -134,17 +141,15 @@ func (s *Service) ImportFromLocal(ctx context.Context, groupID string) (model.Ac
 	}
 
 	if strings.TrimSpace(refreshToken) == "" {
-		return model.Account{}, fmt.Errorf("未在本机检测到已登录的 Antigravity 账号凭据（Keychain、桌面回退文件及 state.vscdb 均为空）")
+		return model.Account{}, fmt.Errorf("未在本机检测到已登录的 Antigravity 账号凭据（Keychain、桌面回退文件、CLI 及 state.vscdb 均为空）")
 	}
 
 	acc, err := s.AddByRefreshToken(ctx, refreshToken, groupID, nil)
 	if err != nil {
 		return model.Account{}, err
 	}
-	// 如果尚未设置当前激活账号，自动将其标记为当前激活账号
-	if s.store.GetCurrentAccountID() == "" {
-		_ = s.store.SetCurrentAccountID(acc.ID)
-	}
+	// 本机导入的账号即当前正在使用的账号，同步将其设为当前激活账号
+	_ = s.store.SetCurrentAccountID(acc.ID)
 	return acc, nil
 }
 

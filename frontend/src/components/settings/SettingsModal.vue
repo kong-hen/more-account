@@ -39,9 +39,25 @@ const autoRefreshOptions = [
   { value: '30', label: '每 30 分钟' },
 ]
 
+const inactiveAutoRefreshOptions = [
+  { value: '-1', label: '关闭自动刷新' },
+  { value: '15', label: '每 15 分钟' },
+  { value: '30', label: '每 30 分钟' },
+  { value: '60', label: '每 1 小时（推荐）' },
+  { value: '120', label: '每 2 小时' },
+  { value: '360', label: '每 6 小时' },
+  { value: '720', label: '每 12 小时' },
+  { value: '1440', label: '每 24 小时' },
+]
+
 function setAutoRefreshMinutes(val: string) {
   const num = Number(val)
   form.value.autoRefreshMinutes = Number.isFinite(num) ? num : 5
+}
+
+function setInactiveAutoRefreshMinutes(val: string) {
+  const num = Number(val)
+  form.value.inactiveAutoRefreshMinutes = Number.isFinite(num) ? num : 60
 }
 
 const runtimeOptions: Array<{ value: RuntimeTarget; label: string; desc: string }> = [
@@ -188,24 +204,47 @@ async function handleSave() {
         </div>
       </section>
 
-      <!-- 后台自动刷新配额 -->
+      <!-- 后台自动刷新配额：区分当前使用账号与未使用账号 -->
       <section
-        class="p-3 rounded-xl border flex items-center justify-between gap-3"
+        class="p-3.5 rounded-xl border space-y-3"
         style="border-color: var(--border-subtle); background-color: var(--bg-app)"
       >
-        <div class="min-w-0">
+        <div>
           <div class="text-xs font-semibold" style="color: var(--text-primary)">后台自动刷新账号额度</div>
           <div class="mt-0.5 text-[11px]" style="color: var(--text-muted)">
-            开启后定时静默同步配额，并在 5h / 周额度重置到期后自动拉取最新余量
+            定时静默同步配额，并在 5h / 周额度重置到期后自动拉取最新余量；未使用账号建议设置较长周期以减少请求
           </div>
         </div>
-        <AppSelect
-          aria-label="后台自动刷新间隔"
-          :model-value="String(form.autoRefreshMinutes ?? 5)"
-          :options="autoRefreshOptions"
-          class="w-[144px] shrink-0"
-          @update:model-value="setAutoRefreshMinutes"
-        />
+
+        <div class="space-y-2.5 pt-1 border-t" style="border-color: var(--border-subtle)">
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-xs font-medium" style="color: var(--text-primary)">当前使用账号</div>
+              <div class="text-[11px]" style="color: var(--text-muted)">实时追踪正在消耗的账号余量</div>
+            </div>
+            <AppSelect
+              aria-label="当前使用账号自动刷新间隔"
+              :model-value="String(form.autoRefreshMinutes ?? 5)"
+              :options="autoRefreshOptions"
+              class="w-[152px] shrink-0"
+              @update:model-value="setAutoRefreshMinutes"
+            />
+          </div>
+
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-xs font-medium" style="color: var(--text-primary)">未使用账号</div>
+              <div class="text-[11px]" style="color: var(--text-muted)">低频保鲜备用账号，默认每 1 小时刷新</div>
+            </div>
+            <AppSelect
+              aria-label="未使用账号自动刷新间隔"
+              :model-value="String(form.inactiveAutoRefreshMinutes ?? 60)"
+              :options="inactiveAutoRefreshOptions"
+              class="w-[152px] shrink-0"
+              @update:model-value="setInactiveAutoRefreshMinutes"
+            />
+          </div>
+        </div>
       </section>
 
       <!-- 切号重启与低配额阈值 -->

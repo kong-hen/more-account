@@ -1,5 +1,6 @@
 <script setup lang="ts">
 // 三栏工作台左栏：整合 macOS 隐式标题栏拖拽区、模块导航、自建分组树、当前激活账号胶囊与底部工具行。
+import { computed } from 'vue'
 import {
   Users,
   BarChart3,
@@ -16,6 +17,8 @@ import {
   Layers,
   FolderOpen,
   Inbox,
+  Radar,
+  Download,
 } from 'lucide-vue-next'
 import { useAppStore } from '@/stores/appStore'
 import { maskEmail } from '@/utils/privacy'
@@ -60,6 +63,10 @@ function runtimeTargetLabel(target: string): string {
   if (target === 'cli') return 'CLI'
   return 'Desktop'
 }
+
+const isExternalUnmanaged = computed(() =>
+  Boolean(!appStore.currentAccount && appStore.activeDetection?.hasCredential && !appStore.activeDetection.managed),
+)
 </script>
 
 <template>
@@ -223,31 +230,70 @@ function runtimeTargetLabel(target: string): string {
       </div>
     </div>
 
-    <!-- 底部当前激活账号胶囊 + 快捷工具行 -->
+    <!-- 底部当前激活账号胶囊（支持自动探测其他程序切号与手动立即探测） + 快捷工具行 -->
     <div class="shrink-0 p-3 border-t space-y-2.5" style="border-color: var(--border-subtle)">
-      <button
-        type="button"
-        class="w-full text-left p-2.5 rounded-xl border cursor-pointer transition-colors hover:border-[var(--accent-border)]"
-        style="background-color: var(--bg-surface); border-color: var(--border-subtle)"
-        @click="openCurrentAccountDetail"
+      <div
+        class="w-full p-2.5 rounded-xl border transition-colors"
+        :style="
+          appStore.currentAccount
+            ? { backgroundColor: 'var(--bg-surface)', borderColor: 'var(--success)' }
+            : isExternalUnmanaged
+              ? { backgroundColor: 'var(--warning-soft)', borderColor: 'var(--warning)' }
+              : { backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }
+        "
       >
-        <div class="flex items-center justify-between gap-2 mb-1">
-          <span class="flex items-center gap-1.5 text-[11px] font-medium" style="color: var(--text-muted)">
-            <span
-              class="w-1.5 h-1.5 rounded-full"
-              :style="{ backgroundColor: appStore.currentAccount ? 'var(--success)' : 'var(--text-muted)' }"
-            />
-            当前激活
-          </span>
+        <div class="flex items-center justify-between gap-1.5 mb-1">
           <span
-            class="text-[10px] font-medium px-1.5 py-0.5 rounded"
-            style="background-color: var(--bg-subtle); color: var(--text-secondary)"
+            class="flex items-center gap-1.5 text-[11px] font-medium min-w-0"
+            :style="{
+              color: appStore.currentAccount
+                ? 'var(--success-text)'
+                : isExternalUnmanaged
+                  ? 'var(--warning-text)'
+                  : 'var(--text-muted)',
+            }"
           >
-            {{ runtimeTargetLabel(appStore.settings.runtimeTarget) }}
+            <span
+              class="w-1.5 h-1.5 rounded-full shrink-0"
+              :style="{
+                backgroundColor: appStore.currentAccount
+                  ? 'var(--success)'
+                  : isExternalUnmanaged
+                    ? 'var(--warning)'
+                    : 'var(--text-muted)',
+              }"
+            />
+            <span class="truncate">{{ isExternalUnmanaged ? '外部账号（未纳管）' : '当前使用' }}</span>
           </span>
+
+          <div class="flex items-center gap-1 shrink-0">
+            <span
+              class="text-[10px] font-medium px-1.5 py-0.5 rounded"
+              style="background-color: var(--bg-subtle); color: var(--text-secondary)"
+            >
+              {{ runtimeTargetLabel(appStore.settings.runtimeTarget) }}
+            </span>
+            <button
+              type="button"
+              :disabled="appStore.detectingActive"
+              title="立即探测本机当前正在使用的账号"
+              aria-label="探测当前账号"
+              class="p-1 rounded cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+              style="color: var(--text-muted)"
+              @click="appStore.detectActiveAccount(false)"
+            >
+              <Radar class="w-3.5 h-3.5" :class="{ 'animate-spin': appStore.detectingActive }" />
+            </button>
+          </div>
         </div>
-        <div v-if="appStore.currentAccount" class="flex items-center justify-between gap-1.5">
-          <span class="text-xs font-medium truncate" style="color: var(--text-primary)">
+
+        <button
+          v-if="appStore.currentAccount"
+          type="button"
+          class="w-full text-left flex items-center justify-between gap-1.5 cursor-pointer rounded-md py-0.5 transition-opacity hover:opacity-85"
+          @click="openCurrentAccountDetail"
+        >
+          <span class="text-xs font-semibold truncate" style="color: var(--text-primary)">
             {{ maskEmail(appStore.currentAccount.email, appStore.settings.privacyMode) }}
           </span>
           <span
@@ -257,11 +303,32 @@ function runtimeTargetLabel(target: string): string {
           >
             {{ getTierLabel(appStore.currentAccount) }}
           </span>
+        </button>
+
+        <div v-else-if="isExternalUnmanaged" class="space-y-1.5">
+          <div class="text-xs font-medium truncate" style="color: var(--text-primary)">
+            {{
+              appStore.activeDetection?.detectedEmail
+                ? maskEmail(appStore.activeDetection.detectedEmail, appStore.settings.privacyMode)
+                : '检测到本机登录凭据'
+            }}
+          </div>
+          <button
+            type="button"
+            :disabled="appStore.importingLocal"
+            class="w-full inline-flex items-center justify-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium cursor-pointer transition-opacity disabled:opacity-60"
+            style="background-color: var(--accent); color: #ffffff"
+            @click="appStore.importLocalActiveAccount()"
+          >
+            <Download class="w-3 h-3" />
+            <span>{{ appStore.importingLocal ? '导入中...' : '一键导入此账号' }}</span>
+          </button>
         </div>
+
         <div v-else class="text-xs" style="color: var(--text-muted)">
-          暂未激活本地账号
+          暂未检测到本机登录账号
         </div>
-      </button>
+      </div>
 
       <!-- 工具操作行：隐私脱敏 / 手动浅暗主题切换 / 设置 -->
       <div class="flex items-center justify-between gap-1">

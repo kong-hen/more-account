@@ -28,13 +28,15 @@ type antigravityCredentialPayload struct {
 	IDToken    string                     `json:"id_token,omitempty"`
 }
 
-// SystemCredential 表示从本机系统凭据库或桌面回退文件读取出的反重力登录态。
+// SystemCredential 表示从本机系统凭据库、桌面回退文件、CLI 凭据或 state.vscdb 读取出的反重力登录态。
 type SystemCredential struct {
 	AccessToken  string
 	RefreshToken string
 	TokenType    string
 	Expiry       string
 	AuthMethod   string
+	IDToken      string
+	Email        string
 }
 
 // BuildCredentialPayloadJSON 构造与 Antigravity 2.0 兼容的凭据 JSON。
@@ -81,8 +83,11 @@ func ParseSystemCredential(rawSecret string) (*SystemCredential, error) {
 			RefreshToken string `json:"refresh_token"`
 			TokenType    string `json:"token_type"`
 			Expiry       string `json:"expiry"`
+			IDToken      string `json:"id_token"`
 		} `json:"token"`
 		AuthMethod string `json:"auth_method"`
+		IDToken    string `json:"id_token"`
+		Email      string `json:"email"`
 	}
 	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
 		return nil, fmt.Errorf("解析系统凭据 JSON 失败: %w", err)
@@ -91,13 +96,45 @@ func ParseSystemCredential(rawSecret string) (*SystemCredential, error) {
 	if rt == "" {
 		return nil, fmt.Errorf("系统凭据中缺少 refresh_token")
 	}
+	idTok := strings.TrimSpace(parsed.IDToken)
+	if idTok == "" {
+		idTok = strings.TrimSpace(parsed.Token.IDToken)
+	}
+	email := strings.TrimSpace(parsed.Email)
+	if email == "" && idTok != "" {
+		email = ExtractEmailFromIDToken(idTok)
+	}
 	return &SystemCredential{
 		AccessToken:  strings.TrimSpace(parsed.Token.AccessToken),
 		RefreshToken: rt,
 		TokenType:    strings.TrimSpace(parsed.Token.TokenType),
 		Expiry:       strings.TrimSpace(parsed.Token.Expiry),
 		AuthMethod:   strings.TrimSpace(parsed.AuthMethod),
+		IDToken:      idTok,
+		Email:        email,
 	}, nil
+}
+
+// ExtractEmailFromIDToken 从 OpenID Connect JWT（id_token）的 payload 段本地解码邮箱，无需网络请求。
+func ExtractEmailFromIDToken(idToken string) string {
+	parts := strings.Split(strings.TrimSpace(idToken), ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		payload, err = base64.URLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return ""
+		}
+	}
+	var claims struct {
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.Email)
 }
 
 // WriteSystemCredentials 写入 Antigravity 2.0 系统凭据、桌面回退文件，并按需同步 CLI 凭据。
@@ -143,12 +180,24 @@ func WriteSystemCredentials(account model.Account, forceSyncCLI bool) error {
 
 // ReadDesktopCredential 依次从系统凭据库和桌面回退文件读取当前登录的反重力凭据。
 func ReadDesktopCredential() (*SystemCredential, error) {
-	if raw, err := readOSSystemCredential(); err == nil && strings.TrimSpace(raw) != "" {
-		if cred, parseErr := ParseSystemCredential(raw); parseErr == nil {
-			return cred, nil
-		}
+	if cred, err := readParsedOSSystemCredential(); err == nil && cred != nil {
+		return cred, nil
 	}
+	return readDesktopFallbackCredential()
+}
 
+func readParsedOSSystemCredential() (*SystemCredential, error) {
+	raw, err := readOSSystemCredential()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	return ParseSystemCredential(raw)
+}
+
+func readDesktopFallbackCredential() (*SystemCredential, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -161,5 +210,79 @@ func ReadDesktopCredential() (*SystemCredential, error) {
 		}
 		return nil, fmt.Errorf("读取桌面回退凭据文件失败: %w", err)
 	}
+	if strings.TrimSpace(string(rawBytes)) == "" {
+		return nil, nil
+	}
 	return ParseSystemCredential(string(rawBytes))
+}
+
+// ReadCLICredential 从 ~/.gemini/antigravity-cli/antigravity-oauth-token 读取 CLI 当前登录凭据。
+func ReadCLICredential() (*SystemCredential, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	cliPath := filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+	rawBytes, err := os.ReadFile(cliPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读取 Antigravity CLI 凭据文件失败: %w", err)
+	}
+	if strings.TrimSpace(string(rawBytes)) == "" {
+		return nil, nil
+	}
+	return ParseSystemCredential(string(rawBytes))
+}
+
+// ReadActiveCredentialForTarget 按目标客户端类型（desktop / ide / cli）的权威优先顺序读取本机当前激活凭据。
+// 返回值中 cred == nil 且 err == nil 表示全部已检查来源均明确无登录凭据（未登录或已退出）。
+func ReadActiveCredentialForTarget(target string) (*SystemCredential, string, error) {
+	type credProbe struct {
+		source string
+		read   func() (*SystemCredential, error)
+	}
+
+	var probes []credProbe
+	switch normalizeTarget(target) {
+	case "ide":
+		probes = []credProbe{
+			{source: "ide_statedb", read: func() (*SystemCredential, error) { return ReadCredentialFromStateDB(DefaultIDEStateDBPath()) }},
+			{source: "keychain", read: readParsedOSSystemCredential},
+			{source: "desktop_fallback", read: readDesktopFallbackCredential},
+			{source: "desktop_statedb", read: func() (*SystemCredential, error) { return ReadCredentialFromStateDB(DefaultDesktopStateDBPath()) }},
+		}
+	case "cli":
+		probes = []credProbe{
+			{source: "cli_file", read: ReadCLICredential},
+			{source: "keychain", read: readParsedOSSystemCredential},
+			{source: "desktop_fallback", read: readDesktopFallbackCredential},
+		}
+	default:
+		probes = []credProbe{
+			{source: "keychain", read: readParsedOSSystemCredential},
+			{source: "desktop_fallback", read: readDesktopFallbackCredential},
+			{source: "desktop_statedb", read: func() (*SystemCredential, error) { return ReadCredentialFromStateDB(DefaultDesktopStateDBPath()) }},
+			{source: "ide_statedb", read: func() (*SystemCredential, error) { return ReadCredentialFromStateDB(DefaultIDEStateDBPath()) }},
+		}
+	}
+
+	var firstErr error
+	for _, probe := range probes {
+		cred, err := probe.read()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if cred != nil && (strings.TrimSpace(cred.RefreshToken) != "" || strings.TrimSpace(cred.Email) != "") {
+			return cred, probe.source, nil
+		}
+	}
+	if firstErr != nil {
+		return nil, "", firstErr
+	}
+	return nil, "", nil
 }

@@ -3,6 +3,7 @@ import type {
   Account,
   AccountDetailsUpdate,
   AccountGroup,
+  ActiveDetectionResult,
   AppSettings,
   BatchImportResult,
   BootstrapState,
@@ -51,6 +52,8 @@ interface WailsAppBridge {
   RefreshAccountQuota(accountId: string): Promise<Account>
   RefreshAllQuotas(): Promise<RefreshStats>
   TriggerAutoRefreshIfDue(): Promise<void>
+  DetectActiveAccount(): Promise<ActiveDetectionResult>
+  TriggerActiveDetect(): Promise<void>
 
   SwitchAccount(req: SwitchRequest): Promise<SwitchOutcome>
   ListSwitchHistory(): Promise<SwitchHistoryItem[]>
@@ -151,6 +154,8 @@ export const api = {
   refreshAccountQuota: (accountId: string) => getBridge().RefreshAccountQuota(accountId),
   refreshAllQuotas: () => getBridge().RefreshAllQuotas(),
   triggerAutoRefreshIfDue: () => getBridge().TriggerAutoRefreshIfDue(),
+  detectActiveAccount: () => getBridge().DetectActiveAccount(),
+  triggerActiveDetect: () => getBridge().TriggerActiveDetect(),
 
   switchAccount: (req: SwitchRequest) => getBridge().SwitchAccount(req),
   listSwitchHistory: () => getBridge().ListSwitchHistory(),
