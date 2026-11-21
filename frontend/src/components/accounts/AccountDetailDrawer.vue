@@ -66,14 +66,12 @@ const savingDetails = ref(false)
 const detailsDirty = ref(false)
 
 const showPassword = ref(false)
-const showSecretInput = ref(false)
 const showRefreshToken = ref(false)
 const copiedField = ref('')
 
-// 实时 2FA TOTP 状态
+// 实时 2FA TOTP 状态（2FA 密钥与验证码均直接明文显示，不做隐藏遮挡）
 const totpResult = ref<TotpCodeResult | null>(null)
 const totpError = ref('')
-const secretInputFocused = ref(false)
 let totpTimer: number | null = null
 let totpDebounceTimer: number | null = null
 let totpGeneration = 0
@@ -126,7 +124,6 @@ const isSecretUnsaved = computed(() =>
 const formattedTotpCode = computed(() => {
   const code = totpResult.value?.code ?? ''
   if (!code) return '--- ---'
-  if (appStore.settings.privacyMode) return '••• •••'
   if (code.length === 6) return `${code.slice(0, 3)} ${code.slice(3)}`
   return code
 })
@@ -157,7 +154,6 @@ function syncFormFromAccount(acc: Account | null, resetVisibility: boolean) {
   appStore.detailDrawerDirty = false
   if (resetVisibility) {
     showPassword.value = false
-    showSecretInput.value = false
     showRefreshToken.value = false
   }
   const nextSecret = (acc.twoFactorSecret ?? '').trim()
@@ -215,13 +211,13 @@ function stopTotpLoop() {
   totpError.value = ''
 }
 
-async function refreshTotp(secret: string, suppressError = false) {
+async function refreshTotp(secret: string) {
   stopTotpLoop()
   const gen = totpGeneration
   const trimmed = secret.trim()
   if (!trimmed) return
 
-  const pull = async (silentErr: boolean) => {
+  const pull = async () => {
     try {
       const res = await api.generateTOTP(trimmed)
       if (unmounted || gen !== totpGeneration) return
@@ -230,11 +226,11 @@ async function refreshTotp(secret: string, suppressError = false) {
     } catch (err) {
       if (unmounted || gen !== totpGeneration) return
       totpResult.value = null
-      totpError.value = silentErr ? '' : extractErrorMessage(err)
+      totpError.value = extractErrorMessage(err)
     }
   }
 
-  await pull(suppressError)
+  await pull()
   // 防止在 IPC 异步等待期间切换账号或卸载组件后创建孤儿定时器
   if (unmounted || gen !== totpGeneration || !totpResult.value) return
   totpTimer = window.setInterval(() => {
@@ -248,7 +244,7 @@ async function refreshTotp(secret: string, suppressError = false) {
     if (!totpResult.value) return
     const nextRem = totpResult.value.remainingSeconds - 1
     if (nextRem <= 0) {
-      void pull(false)
+      void pull()
     } else {
       totpResult.value = {
         ...totpResult.value,
@@ -258,7 +254,7 @@ async function refreshTotp(secret: string, suppressError = false) {
   }, 1000)
 }
 
-// 实时响应 2FA 密钥填写与清空：填写有效密钥后立即在下方展示验证码与复制按钮，输入中途不提前报红字错误
+// 实时响应 2FA 密钥填写与清空：填写后立即在下方直接明文展示验证码与复制按钮
 watch(formTwoFactorSecret, (raw) => {
   clearTotpDebounce()
   const nextSecret = raw.trim()
@@ -271,24 +267,9 @@ watch(formTwoFactorSecret, (raw) => {
   totpDebounceTimer = window.setTimeout(() => {
     totpDebounceTimer = null
     lastSyncedSecret = nextSecret
-    void refreshTotp(nextSecret, secretInputFocused.value)
-  }, 220)
+    void refreshTotp(nextSecret)
+  }, 100)
 })
-
-function handleSecretInputBlur() {
-  secretInputFocused.value = false
-  clearTotpDebounce()
-  const currentSecret = formTwoFactorSecret.value.trim()
-  if (!currentSecret) {
-    lastSyncedSecret = ''
-    stopTotpLoop()
-    return
-  }
-  if (currentSecret !== lastSyncedSecret || (!totpResult.value && !totpError.value)) {
-    lastSyncedSecret = currentSecret
-    void refreshTotp(currentSecret, false)
-  }
-}
 
 onBeforeUnmount(() => {
   unmounted = true
@@ -672,17 +653,17 @@ async function openValidationUrl(url: string) {
           </div>
         </div>
 
-        <!-- 2FA TOTP 密钥及正下方动态验证码显示与复制（仅在填写了 2FA 密钥后显示） -->
+        <!-- 2FA TOTP 密钥及正下方动态验证码（均直接明文显示，仅在填写了 2FA 密钥后显示验证码与复制按钮） -->
         <div class="space-y-2">
           <div>
             <label for="detail-2fa-input" class="block text-[11.5px] mb-1" style="color: var(--text-muted)">
               2FA 密钥（支持 Base32 或 otpauth:// URI）
             </label>
-            <div class="relative">
+            <div class="flex items-center gap-1.5">
               <input
                 id="detail-2fa-input"
                 v-model="formTwoFactorSecret"
-                :type="showSecretInput && !appStore.settings.privacyMode ? 'text' : 'password'"
+                type="text"
                 autocomplete="off"
                 autocorrect="off"
                 autocapitalize="none"
@@ -690,38 +671,35 @@ async function openValidationUrl(url: string) {
                 :aria-invalid="Boolean(hasTwoFactorSecret && totpError)"
                 :aria-describedby="hasTwoFactorSecret && totpError ? 'detail-2fa-error' : undefined"
                 placeholder="例如：JBSWY3DPEHPK3PXP"
-                class="w-full pl-2.5 pr-8 py-1.5 text-xs rounded-lg border font-mono-num"
+                class="flex-1 min-w-0 px-2.5 py-1.5 text-xs rounded-lg border font-mono-num"
                 style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
-                @focus="secretInputFocused = true"
-                @blur="handleSecretInputBlur"
               />
               <button
                 type="button"
-                :disabled="appStore.settings.privacyMode"
-                :aria-pressed="showSecretInput && !appStore.settings.privacyMode"
-                :title="appStore.settings.privacyMode ? '全局隐私模式已开启' : showSecretInput ? '隐藏密钥' : '显示密钥'"
-                aria-label="切换密钥显示"
-                class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                style="color: var(--text-muted)"
-                @click="showSecretInput = !showSecretInput"
+                :disabled="!hasTwoFactorSecret"
+                title="复制 2FA 密钥"
+                aria-label="复制 2FA 密钥"
+                class="p-1.5 rounded-lg border shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-40"
+                style="border-color: var(--border-strong); color: var(--text-secondary)"
+                @click="handleCopy('twoFactorSecret', formTwoFactorSecret.trim(), '2FA 密钥')"
               >
-                <EyeOff v-if="showSecretInput && !appStore.settings.privacyMode" class="w-3.5 h-3.5" />
-                <Eye v-else class="w-3.5 h-3.5" />
+                <Check v-if="copiedField === 'twoFactorSecret'" class="w-3.5 h-3.5" style="color: var(--success)" />
+                <Copy v-else class="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
 
-          <!-- 仅在填写了 2FA 密钥后，在正下方展示实时 6 位动态验证码与复制按钮 -->
+          <!-- 仅在填写了 2FA 密钥后，直接在正下方明文显示 6 位验证码与一键复制 -->
           <div
-            v-if="hasTwoFactorSecret && (totpResult || totpError)"
+            v-if="hasTwoFactorSecret"
             class="p-3 rounded-xl border"
             style="border-color: var(--border-subtle); background-color: var(--bg-app)"
           >
-            <template v-if="totpResult">
+            <template v-if="!totpError">
               <div class="flex items-center justify-between gap-2 mb-1.5">
                 <span class="inline-flex items-center gap-1.5 text-[11.5px] font-medium" style="color: var(--text-secondary)">
                   <ShieldCheck class="w-3.5 h-3.5 shrink-0" style="color: var(--accent)" />
-                  <span>2FA 动态验证码</span>
+                  <span>2FA 验证码</span>
                   <span
                     v-if="isSecretUnsaved"
                     class="px-1.5 py-0.5 rounded text-[10px] font-medium"
@@ -731,6 +709,7 @@ async function openValidationUrl(url: string) {
                   </span>
                 </span>
                 <span
+                  v-if="totpResult"
                   :title="`有效期至 ${formatDateTime(totpResult.validUntilUnix)}`"
                   class="text-[11px] font-mono-num"
                   style="color: var(--text-muted)"
@@ -742,18 +721,19 @@ async function openValidationUrl(url: string) {
               <div class="flex items-center justify-between gap-3">
                 <button
                   type="button"
+                  :disabled="!totpResult?.code"
                   title="点击复制 2FA 验证码"
                   aria-label="点击验证码数字直接复制"
-                  class="text-xl font-bold tracking-widest font-mono-num cursor-pointer text-left transition-opacity hover:opacity-80"
+                  class="text-xl font-bold tracking-widest font-mono-num cursor-pointer text-left transition-opacity hover:opacity-80 disabled:cursor-default"
                   style="color: var(--text-primary)"
-                  @click="handleCopy('totp', totpResult.code, '2FA 验证码')"
+                  @click="totpResult && handleCopy('totp', totpResult.code, '2FA 验证码')"
                 >
                   {{ formattedTotpCode }}
                 </button>
 
                 <div class="flex items-center gap-2 shrink-0">
                   <!-- 30秒倒计时圆环 -->
-                  <svg class="w-7 h-7 -rotate-90" viewBox="0 0 36 36" aria-hidden="true">
+                  <svg v-if="totpResult" class="w-7 h-7 -rotate-90" viewBox="0 0 36 36" aria-hidden="true">
                     <circle
                       cx="18"
                       cy="18"
@@ -778,10 +758,11 @@ async function openValidationUrl(url: string) {
 
                   <button
                     type="button"
+                    :disabled="!totpResult?.code"
                     aria-label="复制 2FA 验证码"
-                    class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+                    class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
                     style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
-                    @click="handleCopy('totp', totpResult.code, '2FA 验证码')"
+                    @click="totpResult && handleCopy('totp', totpResult.code, '2FA 验证码')"
                   >
                     <Check v-if="copiedField === 'totp'" class="w-3.5 h-3.5" style="color: var(--success)" />
                     <Copy v-else class="w-3.5 h-3.5" />
@@ -791,7 +772,7 @@ async function openValidationUrl(url: string) {
               </div>
             </template>
 
-            <p v-else-if="totpError" id="detail-2fa-error" class="text-xs" style="color: var(--danger-text)">
+            <p v-else id="detail-2fa-error" class="text-xs" style="color: var(--danger-text)">
               {{ totpError }}
             </p>
           </div>
