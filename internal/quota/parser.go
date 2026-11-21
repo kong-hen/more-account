@@ -146,12 +146,29 @@ type rawQuotaInfo struct {
 	ResetTime         string   `json:"resetTime"`
 }
 
-type rawModelsResponse struct {
-	Models       map[string]rawModelInfo `json:"models"`
-	QuotaSummary map[string]any          `json:"quota_summary"`
+type rawAgentModelGroup struct {
+	ModelIDs []string `json:"modelIds"`
 }
 
-// isExcludedNonAntigravityModel 排除非反重力客户端的模型（如 Gemini 3 Flash、Flash Image、Flash Lite 等）。
+type rawAgentModelSort struct {
+	DisplayName string               `json:"displayName"`
+	Groups      []rawAgentModelGroup `json:"groups"`
+}
+
+type rawModelsPayload struct {
+	AgentModelSorts []rawAgentModelSort     `json:"agentModelSorts"`
+	Models          map[string]rawModelInfo `json:"models"`
+}
+
+type rawModelsResponse struct {
+	Payload         *rawModelsPayload       `json:"payload"`
+	AgentModelSorts []rawAgentModelSort     `json:"agentModelSorts"`
+	Models          map[string]rawModelInfo `json:"models"`
+	QuotaSummary    map[string]any          `json:"quota_summary"`
+}
+
+// isExcludedNonAntigravityModel 在服务端未返回 agentModelSorts 时的兜底过滤：
+// 排除已下线或非反重力客户端的模型（如 Gemini 2.5 Pro、Gemini 3 Flash、Flash Image、Flash Lite 等）。
 func isExcludedNonAntigravityModel(name, displayName string) bool {
 	norm := func(s string) string {
 		s = strings.ToLower(strings.TrimSpace(s))
@@ -162,6 +179,7 @@ func isExcludedNonAntigravityModel(name, displayName string) bool {
 	n := norm(name)
 	d := norm(displayName)
 	for _, target := range []string{
+		"gemini-2-5-pro",
 		"gemini-3-1-flash-image",
 		"gemini-3-1-flash-lite",
 		"gemini-3-5-flash-lite",
@@ -194,27 +212,92 @@ func isTrackedModel(name, displayName string) bool {
 		strings.Contains(combined, "gpt")
 }
 
+func extractModelsMap(resp rawModelsResponse) map[string]rawModelInfo {
+	if resp.Payload != nil && len(resp.Payload.Models) > 0 {
+		return resp.Payload.Models
+	}
+	return resp.Models
+}
+
+// extractSelectableModelIDs 提取服务端 agentModelSorts 下发的官方反重力客户端可选模型顺序。
+// CloudCode 的 models 映射表会混入已下线和内部模型，官方客户端选择器严格以 agentModelSorts 为准。
+func extractSelectableModelIDs(resp rawModelsResponse, entries map[string]rawModelInfo) []string {
+	sorts := resp.AgentModelSorts
+	if resp.Payload != nil && len(resp.Payload.AgentModelSorts) > 0 {
+		sorts = resp.Payload.AgentModelSorts
+	}
+	if len(sorts) == 0 {
+		return nil
+	}
+	ordered := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, s := range sorts {
+		for _, g := range s.Groups {
+			for _, rawID := range g.ModelIDs {
+				id := strings.TrimSpace(rawID)
+				if id == "" {
+					continue
+				}
+				if _, ok := entries[id]; !ok {
+					continue
+				}
+				if _, dup := seen[id]; dup {
+					continue
+				}
+				seen[id] = struct{}{}
+				ordered = append(ordered, id)
+			}
+		}
+	}
+	return ordered
+}
+
+func toModelQuota(name string, info rawModelInfo) model.ModelQuota {
+	pct := 0
+	if info.QuotaInfo != nil && info.QuotaInfo.RemainingFraction != nil {
+		pct = int(*info.QuotaInfo.RemainingFraction * 100.0)
+		if pct < 0 {
+			pct = 0
+		}
+		if pct > 100 {
+			pct = 100
+		}
+	}
+	resetTime := ""
+	if info.QuotaInfo != nil {
+		resetTime = strings.TrimSpace(info.QuotaInfo.ResetTime)
+	}
+	return model.ModelQuota{
+		Name:        name,
+		DisplayName: strings.TrimSpace(info.DisplayName),
+		Percentage:  pct,
+		ResetTime:   resetTime,
+	}
+}
+
 func buildQuotaData(resp rawModelsResponse, tierID string, credits []model.CreditInfo, projectID string) model.QuotaData {
-	models := make([]model.ModelQuota, 0, len(resp.Models))
-	for name, info := range resp.Models {
-		if info.QuotaInfo == nil || !isTrackedModel(name, info.DisplayName) {
-			continue
-		}
-		pct := 0
-		if info.QuotaInfo.RemainingFraction != nil {
-			pct = int(*info.QuotaInfo.RemainingFraction * 100.0)
-			if pct < 0 {
-				pct = 0
+	entries := extractModelsMap(resp)
+	selectableIDs := extractSelectableModelIDs(resp, entries)
+
+	models := make([]model.ModelQuota, 0, len(entries))
+	if len(selectableIDs) > 0 {
+		// 严格按云端 agentModelSorts 过滤与排序，自动剔除已下线或非反重力客户端模型
+		for _, name := range selectableIDs {
+			info := entries[name]
+			if info.QuotaInfo == nil {
+				continue
 			}
-			if pct > 100 {
-				pct = 100
-			}
+			models = append(models, toModelQuota(name, info))
 		}
-		models = append(models, model.ModelQuota{
-			Name:        name,
-			DisplayName: strings.TrimSpace(info.DisplayName),
-			Percentage:  pct,
-			ResetTime:   strings.TrimSpace(info.QuotaInfo.ResetTime),
+	} else {
+		for name, info := range entries {
+			if info.QuotaInfo == nil || !isTrackedModel(name, info.DisplayName) {
+				continue
+			}
+			models = append(models, toModelQuota(name, info))
+		}
+		sort.Slice(models, func(i, j int) bool {
+			return models[i].Name < models[j].Name
 		})
 	}
 
@@ -250,10 +333,6 @@ func buildQuotaData(resp rawModelsResponse, tierID string, credits []model.Credi
 			}
 		}
 	}
-
-	sort.Slice(models, func(i, j int) bool {
-		return models[i].Name < models[j].Name
-	})
 
 	return model.QuotaData{
 		Models:           models,

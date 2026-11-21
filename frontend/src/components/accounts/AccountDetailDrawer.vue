@@ -230,7 +230,10 @@ async function handleSaveDetails() {
 
 async function handleQuickWakeup() {
   if (!props.account) return
-  const defaultModel = props.account.quota?.models?.[0]?.name || 'gemini-3-flash'
+  const defaultModel =
+    mergedModels.value[0]?.canonicalModelId ||
+    props.account.quota?.models?.[0]?.name ||
+    'gemini-3.8-flash-high'
   await wakeupStore.runSingleTest({
     accountId: props.account.id,
     model: defaultModel,

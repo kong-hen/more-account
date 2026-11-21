@@ -148,6 +148,7 @@ function isExcludedNonAntigravityModel(rawName: string, rawDisplay: string): boo
   const n = norm(rawName)
   const d = norm(rawDisplay)
   const excludedPrefixes = [
+    'gemini-2-5-pro',
     'gemini-3-1-flash-image',
     'gemini-3-1-flash-lite',
     'gemini-3-5-flash-lite',
@@ -260,7 +261,7 @@ export function mergeModelList(models: ModelQuota[]): MergedModelQuota[] {
     })
   }
 
-  result.sort((a, b) => a.displayName.localeCompare(b.displayName))
+  // 保留云端 agentModelSorts 下发的原始展示顺序，不再强行按字母重排
   return result
 }
 

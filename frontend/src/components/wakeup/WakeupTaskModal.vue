@@ -33,7 +33,7 @@ const crontab = ref('0 9 * * *')
 const customPrompt = ref('hi')
 const maxOutputTokens = ref(16)
 const selectedAccounts = ref<string[]>([])
-const selectedModels = ref<string[]>(['gemini-3-flash'])
+const selectedModels = ref<string[]>([])
 const error = ref('')
 
 const repeatModeOptions = [
@@ -58,17 +58,9 @@ const weekdayOptions = [
   { val: 0, label: '周日' },
 ]
 
-// 汇总账号池中已探测到的模型列表 + 常用保底模型，并合并同一模型的不同思考深度
+// 汇总账号池中已探测到的模型列表（仅当账号池尚无模型数据时补充常用保底项），并合并同一模型的不同思考深度
 const modelCandidates = computed<MergedModelQuota[]>(() => {
   const byName = new Map<string, ModelQuota>()
-  const defaults: ModelQuota[] = [
-    { name: 'gemini-3-flash', displayName: 'Gemini 3 Flash', percentage: 100 },
-    { name: 'gemini-3-pro-high', displayName: 'Gemini 3 Pro (High)', percentage: 100 },
-    { name: 'claude-sonnet-4-5', displayName: 'Claude Sonnet 4.5', percentage: 100 },
-  ]
-  for (const d of defaults) {
-    byName.set(d.name, d)
-  }
   for (const acc of appStore.accounts) {
     for (const m of acc.quota?.models ?? []) {
       if (m.name) {
@@ -77,6 +69,15 @@ const modelCandidates = computed<MergedModelQuota[]>(() => {
           byName.set(m.name, m)
         }
       }
+    }
+  }
+  if (byName.size === 0) {
+    const defaults: ModelQuota[] = [
+      { name: 'gemini-3.8-flash-high', displayName: 'Gemini 3.8 Flash (High)', percentage: 100 },
+      { name: 'claude-sonnet-4-5', displayName: 'Claude Sonnet 4.5', percentage: 100 },
+    ]
+    for (const d of defaults) {
+      byName.set(d.name, d)
     }
   }
   for (const sel of selectedModels.value) {
@@ -121,11 +122,13 @@ watch(
       crontab.value = task.schedule.crontab || '0 9 * * *'
       customPrompt.value = task.schedule.customPrompt || 'hi'
       maxOutputTokens.value = task.schedule.maxOutputTokens || 16
+      const fallbackModel = modelCandidates.value[0]?.canonicalModelId || 'gemini-3.8-flash-high'
       selectedAccounts.value = [...(task.schedule.selectedAccounts ?? [])]
       selectedModels.value = task.schedule.selectedModels?.length
         ? [...task.schedule.selectedModels]
-        : ['gemini-3-flash']
+        : [fallbackModel]
     } else {
+      const fallbackModel = modelCandidates.value[0]?.canonicalModelId || 'gemini-3.8-flash-high'
       name.value = ''
       enabled.value = true
       repeatMode.value = 'daily'
@@ -138,7 +141,7 @@ watch(
       customPrompt.value = 'hi'
       maxOutputTokens.value = 16
       selectedAccounts.value = appStore.currentAccountId ? [appStore.currentAccountId] : []
-      selectedModels.value = ['gemini-3-flash']
+      selectedModels.value = [fallbackModel]
     }
   },
 )

@@ -95,6 +95,12 @@ func TestClientFetchQuotaEndToEnd(t *testing.T) {
 							"resetTime":         "2026-11-21T16:30:00Z",
 						},
 					},
+					"gemini-2.5-pro": map[string]any{
+						"displayName": "Gemini 2.5 Pro",
+						"quotaInfo": map[string]any{
+							"remainingFraction": 1.0,
+						},
+					},
 					"gemini-3-flash": map[string]any{
 						"displayName": "Gemini 3 Flash",
 						"quotaInfo": map[string]any{
@@ -155,5 +161,52 @@ func TestClientFetchQuotaEndToEnd(t *testing.T) {
 	}
 	if len(res.Quota.Models) != 3 {
 		t.Fatalf("期望保留 3 个核心模型（含占位 ID 展示名匹配），实际 %d: %+v", len(res.Quota.Models), res.Quota.Models)
+	}
+}
+
+func TestBuildQuotaDataFollowsAgentModelSorts(t *testing.T) {
+	f1 := 0.9
+	f2 := 0.7
+	f3 := 1.0
+	resp := rawModelsResponse{
+		AgentModelSorts: []rawAgentModelSort{
+			{
+				DisplayName: "Recommended",
+				Groups: []rawAgentModelGroup{
+					{
+						ModelIDs: []string{
+							"gemini-4-neon-high",
+							"claude-sonnet-5-5-high",
+						},
+					},
+				},
+			},
+		},
+		Models: map[string]rawModelInfo{
+			"gemini-2.5-pro": {
+				DisplayName: "Gemini 2.5 Pro",
+				QuotaInfo:   &rawQuotaInfo{RemainingFraction: &f3},
+			},
+			"gemini-3-flash": {
+				DisplayName: "Gemini 3 Flash",
+				QuotaInfo:   &rawQuotaInfo{RemainingFraction: &f3},
+			},
+			"claude-sonnet-5-5-high": {
+				DisplayName: "Claude Sonnet 5.5 (High)",
+				QuotaInfo:   &rawQuotaInfo{RemainingFraction: &f2},
+			},
+			"gemini-4-neon-high": {
+				DisplayName: "Gemini 4 Neon (High)",
+				QuotaInfo:   &rawQuotaInfo{RemainingFraction: &f1},
+			},
+		},
+	}
+
+	got := buildQuotaData(resp, "g1-pro-tier", nil, "proj-1")
+	if len(got.Models) != 2 {
+		t.Fatalf("有 agentModelSorts 时应仅保留官方可选模型，实际 %d: %+v", len(got.Models), got.Models)
+	}
+	if got.Models[0].Name != "gemini-4-neon-high" || got.Models[1].Name != "claude-sonnet-5-5-high" {
+		t.Fatalf("应保持 agentModelSorts 顺序，实际: %+v", got.Models)
 	}
 }
