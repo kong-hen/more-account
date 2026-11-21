@@ -1,0 +1,226 @@
+<script setup lang="ts">
+// 紧凑数据表格视图：适合账号数量较多时高效率浏览、批量多选与快速切号。
+import { computed } from 'vue'
+import {
+  RefreshCw,
+  ArrowRightLeft,
+  AlertTriangle,
+  ShieldCheck,
+  Check,
+} from 'lucide-vue-next'
+import QuotaBar from '@/components/common/QuotaBar.vue'
+import { useAppStore } from '@/stores/appStore'
+import { maskEmail } from '@/utils/privacy'
+import {
+  formatResetCountdown,
+  getEarliestResetTime,
+  getMinQuotaPercentage,
+  getTierLabel,
+  isAccountAbnormal,
+  isAccountLowQuota,
+  summarizeModelGroups,
+} from '@/utils/quota'
+import type { Account } from '@/types/models'
+
+const props = defineProps<{
+  accounts: Account[]
+}>()
+
+const emit = defineEmits<{
+  (e: 'open-detail', account: Account): void
+  (e: 'toggle-select', accountId: string): void
+  (e: 'toggle-select-all'): void
+}>()
+
+const appStore = useAppStore()
+
+const allSelected = computed(
+  () =>
+    props.accounts.length > 0 &&
+    props.accounts.every((a) => appStore.selectedAccountIds.includes(a.id)),
+)
+</script>
+
+<template>
+  <div
+    class="rounded-2xl border overflow-hidden"
+    style="background-color: var(--bg-surface); border-color: var(--border-subtle)"
+  >
+    <div class="overflow-x-auto custom-scroll">
+      <table class="w-full text-left border-collapse">
+        <thead>
+          <tr
+            class="border-b text-[11.5px] font-medium"
+            style="border-color: var(--border-subtle); background-color: var(--bg-app); color: var(--text-muted)"
+          >
+            <th class="py-2.5 pl-4 pr-2 w-10">
+              <button
+                type="button"
+                aria-label="全选或取消全选"
+                class="w-4 h-4 rounded border flex items-center justify-center cursor-pointer"
+                :style="
+                  allSelected
+                    ? { backgroundColor: 'var(--accent)', borderColor: 'var(--accent)', color: '#fff' }
+                    : { borderColor: 'var(--border-strong)', backgroundColor: 'var(--bg-surface)' }
+                "
+                @click="emit('toggle-select-all')"
+              >
+                <Check v-if="allSelected" class="w-3 h-3" />
+              </button>
+            </th>
+            <th class="py-2.5 px-3">账号</th>
+            <th class="py-2.5 px-3">分组</th>
+            <th class="py-2.5 px-3">等级</th>
+            <th class="py-2.5 px-3 min-w-[200px]">核心配额</th>
+            <th class="py-2.5 px-3">最近重置</th>
+            <th class="py-2.5 px-3 text-right pr-4">操作</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y text-xs" style="border-color: var(--border-subtle)">
+          <tr
+            v-for="acc in accounts"
+            :key="acc.id"
+            class="cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+            :style="
+              appStore.activeDetailAccountId === acc.id
+                ? { backgroundColor: 'var(--accent-soft)' }
+                : {}
+            "
+            @click="emit('open-detail', acc)"
+          >
+            <td class="py-3 pl-4 pr-2" @click.stop>
+              <button
+                type="button"
+                aria-label="选择账号"
+                class="w-4 h-4 rounded border flex items-center justify-center cursor-pointer"
+                :style="
+                  appStore.selectedAccountIds.includes(acc.id)
+                    ? { backgroundColor: 'var(--accent)', borderColor: 'var(--accent)', color: '#fff' }
+                    : { borderColor: 'var(--border-strong)', backgroundColor: 'var(--bg-surface)' }
+                "
+                @click="emit('toggle-select', acc.id)"
+              >
+                <Check v-if="appStore.selectedAccountIds.includes(acc.id)" class="w-3 h-3" />
+              </button>
+            </td>
+
+            <td class="py-3 px-3">
+              <div class="flex items-center gap-2 min-w-0">
+                <span
+                  class="w-2 h-2 rounded-full shrink-0"
+                  :style="{
+                    backgroundColor:
+                      appStore.currentAccountId === acc.id
+                        ? 'var(--success)'
+                        : isAccountAbnormal(acc)
+                          ? 'var(--danger)'
+                          : 'transparent',
+                  }"
+                />
+                <div class="min-w-0">
+                  <div class="font-medium flex items-center gap-1.5" style="color: var(--text-primary)">
+                    <span class="truncate max-w-[220px]">
+                      {{ maskEmail(acc.email, appStore.settings.privacyMode) }}
+                    </span>
+                    <ShieldCheck
+                      v-if="acc.twoFactorSecret"
+                      class="w-3.5 h-3.5 shrink-0"
+                      style="color: var(--text-muted)"
+                      title="已配置 2FA 动态码"
+                    />
+                  </div>
+                  <div v-if="acc.notes" class="text-[11px] truncate max-w-[220px]" style="color: var(--text-muted)">
+                    {{ acc.notes }}
+                  </div>
+                </div>
+              </div>
+            </td>
+
+            <td class="py-3 px-3">
+              <span
+                v-if="acc.groupId && appStore.groupMap.get(acc.groupId)"
+                class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px]"
+                style="background-color: var(--bg-subtle); color: var(--text-secondary)"
+              >
+                <span
+                  class="w-1.5 h-1.5 rounded-full"
+                  :style="{ backgroundColor: appStore.groupMap.get(acc.groupId)?.color }"
+                />
+                {{ appStore.groupMap.get(acc.groupId)?.name }}
+              </span>
+              <span v-else class="text-[11px]" style="color: var(--text-muted)">未分组</span>
+            </td>
+
+            <td class="py-3 px-3">
+              <span
+                v-if="getTierLabel(acc) !== 'UNKNOWN'"
+                class="px-1.5 py-0.5 rounded text-[10.5px] font-semibold"
+                style="background-color: var(--bg-subtle); color: var(--text-secondary)"
+              >
+                {{ getTierLabel(acc) }}
+              </span>
+              <span v-else style="color: var(--text-muted)">—</span>
+            </td>
+
+            <td class="py-3 px-3">
+              <div v-if="isAccountAbnormal(acc)" class="inline-flex items-center gap-1 text-[11.5px] font-medium" style="color: var(--danger-text)">
+                <AlertTriangle class="w-3.5 h-3.5" />
+                <span>{{ acc.disabled ? '令牌失效' : '状态异常' }}</span>
+              </div>
+              <div v-else-if="summarizeModelGroups(acc).length > 0" class="flex items-center gap-2.5 max-w-[240px]">
+                <div class="flex-1">
+                  <QuotaBar :percentage="getMinQuotaPercentage(acc)" />
+                </div>
+                <span
+                  class="font-mono-num text-[11.5px] font-medium w-9 text-right"
+                  :style="{
+                    color: isAccountLowQuota(acc, appStore.settings.lowQuotaThreshold)
+                      ? 'var(--warning-text)'
+                      : 'var(--text-primary)',
+                  }"
+                >
+                  {{ getMinQuotaPercentage(acc) }}%
+                </span>
+              </div>
+              <span v-else class="text-[11px]" style="color: var(--text-muted)">未拉取</span>
+            </td>
+
+            <td class="py-3 px-3 font-mono-num text-[11.5px]" style="color: var(--text-muted)">
+              {{ formatResetCountdown(getEarliestResetTime(acc)) }}
+            </td>
+
+            <td class="py-3 pl-3 pr-4 text-right" @click.stop>
+              <div class="inline-flex items-center gap-1.5">
+                <button
+                  type="button"
+                  title="刷新配额"
+                  aria-label="刷新配额"
+                  :disabled="Boolean(appStore.refreshingIds[acc.id])"
+                  class="p-1.5 rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
+                  style="border-color: var(--border-subtle); color: var(--text-secondary); background-color: var(--bg-surface)"
+                  @click="appStore.refreshAccount(acc.id)"
+                >
+                  <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': Boolean(appStore.refreshingIds[acc.id]) }" />
+                </button>
+                <button
+                  type="button"
+                  :disabled="appStore.switchingId === acc.id"
+                  class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium cursor-pointer disabled:opacity-50"
+                  :style="
+                    appStore.currentAccountId === acc.id
+                      ? { backgroundColor: 'var(--success-soft)', color: 'var(--success-text)' }
+                      : { backgroundColor: 'var(--accent)', color: '#ffffff' }
+                  "
+                  @click="appStore.switchToAccount(acc.id)"
+                >
+                  <ArrowRightLeft class="w-3 h-3" />
+                  <span>{{ appStore.currentAccountId === acc.id ? '已激活' : '切换' }}</span>
+                </button>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</template>
