@@ -422,7 +422,7 @@ export const useAppStore = defineStore('app', () => {
 
       if (q) {
         const groupName = acc.groupId ? (groupMap.value.get(acc.groupId)?.name ?? '') : ''
-        const haystack = `${acc.email} ${acc.name ?? ''} ${acc.notes ?? ''} ${groupName}`.toLowerCase()
+        const haystack = `${acc.email} ${acc.loginAccount ?? ''} ${acc.name ?? ''} ${acc.notes ?? ''} ${groupName}`.toLowerCase()
         if (!haystack.includes(q)) return false
       }
 

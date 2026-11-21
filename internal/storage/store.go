@@ -274,6 +274,9 @@ func (s *Store) UpsertAccount(input model.Account) (model.Account, error) {
 			if input.Notes != "" {
 				existing.Notes = input.Notes
 			}
+			if strings.TrimSpace(input.LoginAccount) != "" {
+				existing.LoginAccount = strings.TrimSpace(input.LoginAccount)
+			}
 			if input.AccountPassword != "" {
 				existing.AccountPassword = input.AccountPassword
 			}
@@ -360,7 +363,7 @@ func (s *Store) SaveAccount(acc model.Account) (model.Account, error) {
 	return model.Account{}, fmt.Errorf("账号不存在: %s", acc.ID)
 }
 
-// UpdateAccountDetails 更新账号的备注、密码、2FA 密钥及所属分组。
+// UpdateAccountDetails 更新账号的备注、登录账号、密码、2FA 密钥及所属分组。
 func (s *Store) UpdateAccountDetails(accountID string, update model.AccountDetailsUpdate) (model.Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -368,6 +371,7 @@ func (s *Store) UpdateAccountDetails(accountID string, update model.AccountDetai
 	for i := range s.accounts {
 		if s.accounts[i].ID == accountID {
 			s.accounts[i].Notes = strings.TrimSpace(update.Notes)
+			s.accounts[i].LoginAccount = strings.TrimSpace(update.LoginAccount)
 			s.accounts[i].AccountPassword = update.AccountPassword
 			s.accounts[i].TwoFactorSecret = strings.TrimSpace(update.TwoFactorSecret)
 			s.accounts[i].GroupID = strings.TrimSpace(update.GroupID)

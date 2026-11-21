@@ -78,9 +78,10 @@ func TestStoreAccountsAndGroupsLifecycle(t *testing.T) {
 		t.Fatalf("更新令牌时不应丢失已有分组归属: got %q", acc1Updated.GroupID)
 	}
 
-	// 更新备注、密码与 2FA 密钥
+	// 更新备注、登录账号、密码与 2FA 密钥
 	updated, err := store.UpdateAccountDetails(acc1.ID, model.AccountDetailsUpdate{
 		Notes:           "团队主力号",
+		LoginAccount:    "alice.corp@example.com",
 		AccountPassword: "secret-password",
 		TwoFactorSecret: "JBSWY3DPEHPK3PXP",
 		GroupID:         group.ID,
@@ -88,7 +89,7 @@ func TestStoreAccountsAndGroupsLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("更新账号详情失败: %v", err)
 	}
-	if updated.Notes != "团队主力号" || updated.AccountPassword != "secret-password" || updated.TwoFactorSecret != "JBSWY3DPEHPK3PXP" {
+	if updated.Notes != "团队主力号" || updated.LoginAccount != "alice.corp@example.com" || updated.AccountPassword != "secret-password" || updated.TwoFactorSecret != "JBSWY3DPEHPK3PXP" {
 		t.Fatalf("账号详情字段未正确保存: %+v", updated)
 	}
 

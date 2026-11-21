@@ -16,6 +16,7 @@ func TestExportAccountsRespectsIncludeSecretsFlag(t *testing.T) {
 	acc, err := store.UpsertAccount(model.Account{
 		Email:           "alice@example.com",
 		Notes:           "测试备注",
+		LoginAccount:    "alice-login",
 		AccountPassword: "top-secret-password",
 		TwoFactorSecret: "JBSWY3DPEHPK3PXP",
 		Token: model.TokenData{
@@ -29,7 +30,7 @@ func TestExportAccountsRespectsIncludeSecretsFlag(t *testing.T) {
 
 	svc := NewService(store, nil, nil)
 
-	// 默认不含密码与 2FA 密钥
+	// 默认不含登录账号、密码与 2FA 密钥
 	rawNoSecret, err := svc.ExportJSON([]string{acc.ID}, false)
 	if err != nil {
 		t.Fatalf("导出失败: %v", err)
@@ -38,11 +39,11 @@ func TestExportAccountsRespectsIncludeSecretsFlag(t *testing.T) {
 	if err := json.Unmarshal([]byte(rawNoSecret), &list1); err != nil {
 		t.Fatalf("反序列化导出结果失败: %v", err)
 	}
-	if len(list1) != 1 || list1[0].RefreshToken != "rt-123" || list1[0].AccountPassword != "" || list1[0].TwoFactorSecret != "" {
-		t.Fatalf("不导出密钥时不应包含密码和 2FA: %+v", list1)
+	if len(list1) != 1 || list1[0].RefreshToken != "rt-123" || list1[0].LoginAccount != "" || list1[0].AccountPassword != "" || list1[0].TwoFactorSecret != "" {
+		t.Fatalf("不导出密钥时不应包含登录账号、密码和 2FA: %+v", list1)
 	}
 
-	// 勾选包含密码与 2FA 密钥
+	// 勾选包含登录账号、密码与 2FA 密钥
 	rawWithSecret, err := svc.ExportJSON([]string{acc.ID}, true)
 	if err != nil {
 		t.Fatalf("含密钥导出失败: %v", err)
@@ -51,7 +52,7 @@ func TestExportAccountsRespectsIncludeSecretsFlag(t *testing.T) {
 	if err := json.Unmarshal([]byte(rawWithSecret), &list2); err != nil {
 		t.Fatalf("反序列化导出结果失败: %v", err)
 	}
-	if list2[0].AccountPassword != "top-secret-password" || list2[0].TwoFactorSecret != "JBSWY3DPEHPK3PXP" {
-		t.Fatalf("含密钥导出应完整保留密码与 2FA: %+v", list2[0])
+	if list2[0].LoginAccount != "alice-login" || list2[0].AccountPassword != "top-secret-password" || list2[0].TwoFactorSecret != "JBSWY3DPEHPK3PXP" {
+		t.Fatalf("含密钥导出应完整保留登录账号、密码与 2FA: %+v", list2[0])
 	}
 }

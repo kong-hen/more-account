@@ -19,6 +19,14 @@ export function maskSecret(val: string, enabled: boolean): string {
   return '••••••••'
 }
 
+// 令牌默认脱敏显示：保留前后少量识别字符，隐藏核心密钥段。
+export function maskToken(token: string): string {
+  const trimmed = (token ?? '').trim()
+  if (!trimmed) return ''
+  if (trimmed.length <= 12) return '••••••••••••'
+  return `${trimmed.slice(0, 6)}••••••••••••${trimmed.slice(-4)}`
+}
+
 export async function copyToClipboard(text: string): Promise<boolean> {
   if (!text) return false
   try {

@@ -52,6 +52,7 @@ export interface Account {
   name?: string
   groupId?: string
   notes?: string
+  loginAccount?: string
   accountPassword?: string
   twoFactorSecret?: string
   token: TokenData
@@ -67,6 +68,7 @@ export interface Account {
 
 export interface AccountDetailsUpdate {
   notes: string
+  loginAccount: string
   accountPassword: string
   twoFactorSecret: string
   groupId: string

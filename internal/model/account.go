@@ -59,6 +59,7 @@ type Account struct {
 	Name            string          `json:"name,omitempty"`
 	GroupID         string          `json:"groupId,omitempty"`
 	Notes           string          `json:"notes,omitempty"`
+	LoginAccount    string          `json:"loginAccount,omitempty"`
 	AccountPassword string          `json:"accountPassword,omitempty"`
 	TwoFactorSecret string          `json:"twoFactorSecret,omitempty"`
 	Token           TokenData       `json:"token"`
@@ -72,9 +73,10 @@ type Account struct {
 	LastUsed        int64           `json:"lastUsed"`
 }
 
-// AccountDetailsUpdate 表示编辑账号备注、密码与 2FA 密钥的入参。
+// AccountDetailsUpdate 表示编辑账号备注、登录账号、登录密码、2FA 密钥与所属分组的入参。
 type AccountDetailsUpdate struct {
 	Notes           string `json:"notes"`
+	LoginAccount    string `json:"loginAccount"`
 	AccountPassword string `json:"accountPassword"`
 	TwoFactorSecret string `json:"twoFactorSecret"`
 	GroupID         string `json:"groupId"`

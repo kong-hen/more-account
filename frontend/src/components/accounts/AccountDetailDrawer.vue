@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 右侧悬浮账号详情抽屉（不挤压主工作区）：
-// 包含切号动作、刷新与立即唤醒测试、实时 2FA TOTP 30s 圆环动态码、账号密码、备注、所属分组与全量模型配额明细。
+// 包含切号动作、刷新与立即唤醒测试、实时 2FA TOTP 30s 圆环动态码、登录账号与密码分离编辑展示、Refresh Token 默认脱敏展示、备注、所属分组与全量模型配额明细。
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   X,
@@ -12,7 +12,9 @@ import {
   ArrowRightLeft,
   Zap,
   ShieldCheck,
+  User,
   KeyRound,
+  Key,
   Save,
   Download,
   Trash2,
@@ -25,7 +27,7 @@ import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
 import { api, extractErrorMessage } from '@/services/api'
-import { copyToClipboard, maskEmail } from '@/utils/privacy'
+import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
 import { formatDateTime, formatResetCountdown, getTierLabel, isAccountAbnormal } from '@/utils/quota'
 import type { Account, TotpCodeResult } from '@/types/models'
 
@@ -42,8 +44,9 @@ const emit = defineEmits<{
 const appStore = useAppStore()
 const wakeupStore = useWakeupStore()
 
-// 可编辑凭据与备注表单（明确不含辅助邮箱）
+// 可编辑凭据与备注表单（明确不含辅助邮箱；登录账号与登录密码分开填写及展示）
 const formGroupId = ref('')
+const formLoginAccount = ref('')
 const formNotes = ref('')
 const formPassword = ref('')
 const formTwoFactorSecret = ref('')
@@ -52,6 +55,7 @@ const detailsDirty = ref(false)
 
 const showPassword = ref(false)
 const showSecretInput = ref(false)
+const showRefreshToken = ref(false)
 const copiedField = ref('')
 
 // 实时 2FA TOTP 状态
@@ -68,6 +72,18 @@ const groupOptions = computed(() => [
   { value: '', label: '未分组' },
   ...appStore.groups.map((g) => ({ value: g.id, label: g.name })),
 ])
+
+const refreshTokenValue = computed(() => props.account?.token?.refreshToken?.trim() ?? '')
+const refreshTokenRevealed = computed(() => showRefreshToken.value && !appStore.settings.privacyMode)
+const displayedRefreshToken = computed(() => {
+  const rt = refreshTokenValue.value
+  if (!rt) return ''
+  return refreshTokenRevealed.value ? rt : maskToken(rt)
+})
+
+function getEffectiveLoginAccount(acc: Account): string {
+  return acc.loginAccount?.trim() || acc.email
+}
 
 const formattedTotpCode = computed(() => {
   const code = totpResult.value?.code ?? ''
@@ -90,12 +106,14 @@ function syncFormFromAccount(acc: Account | null) {
     return
   }
   formGroupId.value = acc.groupId ?? ''
+  formLoginAccount.value = getEffectiveLoginAccount(acc)
   formNotes.value = acc.notes ?? ''
   formPassword.value = acc.accountPassword ?? ''
   formTwoFactorSecret.value = acc.twoFactorSecret ?? ''
   detailsDirty.value = false
   showPassword.value = false
   showSecretInput.value = false
+  showRefreshToken.value = false
   void refreshTotp(acc.twoFactorSecret ?? '')
 }
 
@@ -107,10 +125,11 @@ watch(
   { immediate: true },
 )
 
-watch([formGroupId, formNotes, formPassword, formTwoFactorSecret], () => {
+watch([formGroupId, formLoginAccount, formNotes, formPassword, formTwoFactorSecret], () => {
   if (!props.account) return
   detailsDirty.value =
     formGroupId.value !== (props.account.groupId ?? '') ||
+    formLoginAccount.value.trim() !== getEffectiveLoginAccount(props.account) ||
     formNotes.value !== (props.account.notes ?? '') ||
     formPassword.value !== (props.account.accountPassword ?? '') ||
     formTwoFactorSecret.value !== (props.account.twoFactorSecret ?? '')
@@ -174,12 +193,19 @@ async function handleSaveDetails() {
   if (!props.account) return
   savingDetails.value = true
   try {
+    const trimmedLogin = formLoginAccount.value.trim()
+    // 若登录账号留空或与默认邮箱一致，后端存为空串以自动跟随邮箱
+    const loginAccountToSave =
+      trimmedLogin === '' || trimmedLogin === props.account.email ? '' : trimmedLogin
+
     const updated = await appStore.saveAccountDetails(props.account.id, {
       groupId: formGroupId.value,
+      loginAccount: loginAccountToSave,
       notes: formNotes.value,
       accountPassword: formPassword.value,
       twoFactorSecret: formTwoFactorSecret.value,
     })
+    formLoginAccount.value = getEffectiveLoginAccount(updated)
     detailsDirty.value = false
     void refreshTotp(updated.twoFactorSecret ?? '')
   } catch (err) {
@@ -467,13 +493,58 @@ async function openValidationUrl(url: string) {
           />
         </div>
 
-        <!-- 账号密码 -->
+        <!-- 登录账号（与登录密码分开填写与展示） -->
+        <div>
+          <div class="flex items-center justify-between gap-2 mb-1">
+            <label for="detail-login-account-input" class="block text-[11.5px]" style="color: var(--text-muted)">
+              登录账号
+            </label>
+            <span
+              v-if="!account.loginAccount"
+              class="text-[10.5px] truncate"
+              style="color: var(--text-muted)"
+            >
+              默认同邮箱，可自定义
+            </span>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <div class="relative flex-1 min-w-0">
+              <User
+                class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                style="color: var(--text-muted)"
+              />
+              <input
+                id="detail-login-account-input"
+                v-model="formLoginAccount"
+                :type="appStore.settings.privacyMode ? 'password' : 'text'"
+                autocomplete="off"
+                placeholder="填写登录账号（默认使用当前邮箱）"
+                class="w-full pl-8 pr-2.5 py-1.5 text-xs rounded-lg border font-mono-num"
+                style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
+              />
+            </div>
+            <button
+              type="button"
+              :disabled="!formLoginAccount.trim()"
+              title="复制登录账号"
+              aria-label="复制登录账号"
+              class="p-1.5 rounded-lg border shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-40"
+              style="border-color: var(--border-strong); color: var(--text-secondary)"
+              @click="handleCopy('loginAccount', formLoginAccount.trim() || account.email, '登录账号')"
+            >
+              <Check v-if="copiedField === 'loginAccount'" class="w-3.5 h-3.5" style="color: var(--success)" />
+              <Copy v-else class="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        <!-- 登录密码（独立填写与脱敏展示） -->
         <div>
           <label for="detail-password-input" class="block text-[11.5px] mb-1" style="color: var(--text-muted)">
-            账号密码
+            登录密码
           </label>
           <div class="flex items-center gap-1.5">
-            <div class="relative flex-1">
+            <div class="relative flex-1 min-w-0">
               <KeyRound
                 class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
                 style="color: var(--text-muted)"
@@ -482,29 +553,32 @@ async function openValidationUrl(url: string) {
                 id="detail-password-input"
                 v-model="formPassword"
                 :type="showPassword && !appStore.settings.privacyMode ? 'text' : 'password'"
+                autocomplete="off"
                 placeholder="可选，记录登录密码"
                 class="w-full pl-8 pr-8 py-1.5 text-xs rounded-lg border font-mono-num"
                 style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
               />
               <button
                 type="button"
+                :disabled="appStore.settings.privacyMode"
+                :title="appStore.settings.privacyMode ? '全局隐私模式已开启' : showPassword ? '隐藏密码' : '显示密码'"
                 aria-label="切换密码显示"
-                class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 cursor-pointer"
+                class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                 style="color: var(--text-muted)"
                 @click="showPassword = !showPassword"
               >
-                <EyeOff v-if="showPassword" class="w-3.5 h-3.5" />
+                <EyeOff v-if="showPassword && !appStore.settings.privacyMode" class="w-3.5 h-3.5" />
                 <Eye v-else class="w-3.5 h-3.5" />
               </button>
             </div>
             <button
               type="button"
               :disabled="!formPassword"
-              title="复制密码"
-              aria-label="复制密码"
-              class="p-1.5 rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-40"
+              title="复制登录密码"
+              aria-label="复制登录密码"
+              class="p-1.5 rounded-lg border shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-40"
               style="border-color: var(--border-strong); color: var(--text-secondary)"
-              @click="handleCopy('password', formPassword, '账号密码')"
+              @click="handleCopy('password', formPassword, '登录密码')"
             >
               <Check v-if="copiedField === 'password'" class="w-3.5 h-3.5" style="color: var(--success)" />
               <Copy v-else class="w-3.5 h-3.5" />
@@ -528,12 +602,14 @@ async function openValidationUrl(url: string) {
             />
             <button
               type="button"
+              :disabled="appStore.settings.privacyMode"
+              :title="appStore.settings.privacyMode ? '全局隐私模式已开启' : showSecretInput ? '隐藏密钥' : '显示密钥'"
               aria-label="切换密钥显示"
-              class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 cursor-pointer"
+              class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               style="color: var(--text-muted)"
               @click="showSecretInput = !showSecretInput"
             >
-              <EyeOff v-if="showSecretInput" class="w-3.5 h-3.5" />
+              <EyeOff v-if="showSecretInput && !appStore.settings.privacyMode" class="w-3.5 h-3.5" />
               <Eye v-else class="w-3.5 h-3.5" />
             </button>
           </div>
@@ -552,6 +628,78 @@ async function openValidationUrl(url: string) {
             class="w-full p-2.5 text-xs rounded-lg border resize-none custom-scroll"
             style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
           />
+        </div>
+      </section>
+
+      <!-- OAuth Refresh Token 展示区（默认脱敏，支持显隐切换与一键复制） -->
+      <section
+        class="p-3.5 rounded-xl border space-y-2"
+        style="border-color: var(--border-subtle); background-color: var(--bg-app)"
+      >
+        <div class="flex items-center justify-between gap-2">
+          <div class="flex items-center gap-1.5 min-w-0">
+            <Key class="w-3.5 h-3.5 shrink-0" style="color: var(--accent)" />
+            <h3 class="text-xs font-semibold truncate" style="color: var(--text-primary)">Refresh Token</h3>
+            <span
+              class="px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0"
+              style="background-color: var(--bg-subtle); color: var(--text-muted)"
+            >
+              {{ refreshTokenRevealed ? '明文' : '已脱敏' }}
+            </span>
+          </div>
+
+          <div class="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              :disabled="!refreshTokenValue || appStore.settings.privacyMode"
+              :title="
+                appStore.settings.privacyMode
+                  ? '全局隐私模式已开启'
+                  : refreshTokenRevealed
+                    ? '隐藏 Refresh Token'
+                    : '显示完整 Refresh Token'
+              "
+              aria-label="切换 Refresh Token 脱敏状态"
+              class="p-1.5 rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+              style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-secondary)"
+              @click="showRefreshToken = !showRefreshToken"
+            >
+              <EyeOff v-if="refreshTokenRevealed" class="w-3.5 h-3.5" />
+              <Eye v-else class="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              :disabled="!refreshTokenValue"
+              title="复制完整 Refresh Token"
+              aria-label="复制完整 Refresh Token"
+              class="p-1.5 rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-40"
+              style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-secondary)"
+              @click="handleCopy('refreshToken', refreshTokenValue, ' Refresh Token')"
+            >
+              <Check v-if="copiedField === 'refreshToken'" class="w-3.5 h-3.5" style="color: var(--success)" />
+              <Copy v-else class="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        <div
+          v-if="refreshTokenValue"
+          class="px-2.5 py-2 rounded-lg border text-[11.5px] font-mono-num leading-relaxed"
+          :class="
+            refreshTokenRevealed
+              ? 'break-all select-all max-h-24 overflow-y-auto custom-scroll'
+              : 'truncate select-none'
+          "
+          style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
+        >
+          {{ displayedRefreshToken }}
+        </div>
+        <div
+          v-else
+          class="px-2.5 py-2 rounded-lg border text-xs"
+          style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-muted)"
+        >
+          暂无 Refresh Token
         </div>
       </section>
 

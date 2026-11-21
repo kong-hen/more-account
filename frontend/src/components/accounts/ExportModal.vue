@@ -90,7 +90,7 @@ async function handleSaveFile() {
         <div class="text-xs">
           <div class="font-medium flex items-center gap-1.5" style="color: var(--text-primary)">
             <ShieldAlert class="w-3.5 h-3.5" style="color: var(--warning)" />
-            附带导出账号密码与 2FA 密钥
+            附带导出登录账号、密码与 2FA 密钥
           </div>
           <p class="mt-0.5 text-[11px]" style="color: var(--text-muted)">
             默认仅导出邮箱、Refresh Token、所属分组与备注；勾选后请妥善保管导出文件。

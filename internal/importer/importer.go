@@ -20,6 +20,7 @@ type ExportAccountItem struct {
 	RefreshToken    string `json:"refresh_token"`
 	GroupName       string `json:"group_name,omitempty"`
 	Notes           string `json:"notes,omitempty"`
+	LoginAccount    string `json:"login_account,omitempty"`
 	AccountPassword string `json:"account_password,omitempty"`
 	TwoFactorSecret string `json:"two_factor_secret,omitempty"`
 }
@@ -94,6 +95,7 @@ func (s *Service) AddByRefreshToken(ctx context.Context, refreshToken string, gr
 	}
 	if meta != nil {
 		candidate.Notes = strings.TrimSpace(meta.Notes)
+		candidate.LoginAccount = strings.TrimSpace(meta.LoginAccount)
 		candidate.AccountPassword = meta.AccountPassword
 		candidate.TwoFactorSecret = strings.TrimSpace(meta.TwoFactorSecret)
 		if strings.TrimSpace(meta.GroupID) != "" {
@@ -257,6 +259,7 @@ func (s *Service) ImportJSON(ctx context.Context, jsonContent string, defaultGro
 
 		meta := &model.AccountDetailsUpdate{
 			Notes:           pickString(item, "notes", "note"),
+			LoginAccount:    pickString(item, "login_account", "loginAccount", "account_username", "username"),
 			AccountPassword: pickString(item, "account_password", "accountPassword"),
 			TwoFactorSecret: pickString(item, "two_factor_secret", "twoFactorSecret"),
 			GroupID:         targetGroupID,
@@ -312,6 +315,7 @@ func (s *Service) ExportJSON(accountIDs []string, includeSecrets bool) (string, 
 			Notes:        acc.Notes,
 		}
 		if includeSecrets {
+			item.LoginAccount = acc.LoginAccount
 			item.AccountPassword = acc.AccountPassword
 			item.TwoFactorSecret = acc.TwoFactorSecret
 		}

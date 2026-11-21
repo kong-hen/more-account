@@ -240,7 +240,7 @@ func (a *App) SaveExportToFile(accountIDs []string, includeSecrets bool) (string
 	return path, nil
 }
 
-// UpdateAccountDetails 更新账号的备注、密码、2FA 密钥和所属分组。
+// UpdateAccountDetails 更新账号的备注、登录账号、登录密码、2FA 密钥和所属分组。
 func (a *App) UpdateAccountDetails(accountID string, update model.AccountDetailsUpdate) (model.Account, error) {
 	if strings.TrimSpace(update.TwoFactorSecret) != "" {
 		normalized, err := totp.NormalizeSecret(update.TwoFactorSecret)
