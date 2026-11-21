@@ -15,14 +15,21 @@ import (
 	"more-account/internal/model"
 )
 
+func setupTestOAuthEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_ID", "test-client-id.apps.googleusercontent.com")
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET", "test-client-secret-placeholder")
+}
+
 func TestBuildAuthURLContainsRequiredScopes(t *testing.T) {
+	setupTestOAuthEnv(t)
 	raw := BuildAuthURL("http://127.0.0.1:12345/oauth-callback", "state-xyz")
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		t.Fatalf("解析授权 URL 失败: %v", err)
 	}
 	q := parsed.Query()
-	if q.Get("client_id") != DefaultClientID {
+	if q.Get("client_id") != "test-client-id.apps.googleusercontent.com" {
 		t.Fatalf("client_id 不匹配: %s", q.Get("client_id"))
 	}
 	if q.Get("state") != "state-xyz" {
@@ -30,6 +37,23 @@ func TestBuildAuthURLContainsRequiredScopes(t *testing.T) {
 	}
 	if !strings.Contains(q.Get("scope"), "https://www.googleapis.com/auth/aicode") {
 		t.Fatalf("scope 缺少 aicode: %s", q.Get("scope"))
+	}
+}
+
+func TestResolveCredentialsPriority(t *testing.T) {
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_ID", "env-id")
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET", "env-sec")
+
+	// 自定义参数优先于环境变量
+	id, sec := ResolveCredentials("custom-id", "custom-sec")
+	if id != "custom-id" || sec != "custom-sec" {
+		t.Fatalf("自定义凭据优先级异常: (%q, %q)", id, sec)
+	}
+
+	// 未传自定义参数时使用环境变量
+	id2, sec2 := ResolveCredentials("", "")
+	if id2 != "env-id" || sec2 != "env-sec" {
+		t.Fatalf("环境变量凭据解析异常: (%q, %q)", id2, sec2)
 	}
 }
 
@@ -81,6 +105,7 @@ func TestEnsureFreshTokenSkipsWhenNotExpiring(t *testing.T) {
 }
 
 func TestLoginManagerManualCallbackSubmission(t *testing.T) {
+	setupTestOAuthEnv(t)
 	mgr := NewLoginManager()
 	session, err := mgr.StartSession()
 	if err != nil {
@@ -105,6 +130,7 @@ func TestLoginManagerManualCallbackSubmission(t *testing.T) {
 }
 
 func TestLoginManagerRejectsMissingAndMismatchedStateWithoutKillingSession(t *testing.T) {
+	setupTestOAuthEnv(t)
 	mgr := NewLoginManager()
 	session, err := mgr.StartSession()
 	if err != nil {
@@ -156,6 +182,7 @@ func TestLoginManagerRejectsMissingAndMismatchedStateWithoutKillingSession(t *te
 }
 
 func TestPKCEGenerationAndExchangeCode(t *testing.T) {
+	setupTestOAuthEnv(t)
 	mgr := NewLoginManager()
 	session, err := mgr.StartSession()
 	if err != nil {
@@ -200,6 +227,7 @@ func TestPKCEGenerationAndExchangeCode(t *testing.T) {
 }
 
 func TestLoginManagerWaitForStateDoesNotCancelNewerSession(t *testing.T) {
+	setupTestOAuthEnv(t)
 	mgr := NewLoginManager()
 	defer mgr.Cancel()
 

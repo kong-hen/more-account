@@ -1,7 +1,19 @@
 <script setup lang="ts">
 // 全局应用设置弹窗：运行目标、切号重启策略、低配额筛选阈值、手动浅暗色切换与本机路径配置。
 import { computed, ref, watch } from 'vue'
-import { FolderOpen, CheckCircle2, AlertCircle, Sun, Moon, Loader2, Wifi } from 'lucide-vue-next'
+import {
+  FolderOpen,
+  CheckCircle2,
+  AlertCircle,
+  Sun,
+  Moon,
+  Loader2,
+  Wifi,
+  RefreshCw,
+  ArrowUpCircle,
+  Eye,
+  EyeOff,
+} from 'lucide-vue-next'
 import BaseModal from '@/components/common/BaseModal.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
@@ -23,6 +35,7 @@ const form = ref<AppSettings>({ ...appStore.settings })
 const saving = ref(false)
 const testingProxy = ref(false)
 const proxyTestResult = ref<{ ok: boolean; text: string } | null>(null)
+const showOAuthSecret = ref(false)
 
 watch(
   () => props.open,
@@ -30,9 +43,22 @@ watch(
     if (isOpen) {
       form.value = { ...appStore.settings }
       proxyTestResult.value = null
+      showOAuthSecret.value = false
     }
   },
 )
+
+const isOAuthReady = computed(() =>
+  Boolean(
+    appStore.hasBuiltInOAuth ||
+      ((form.value.oauthClientId ?? '').trim() && (form.value.oauthClientSecret ?? '').trim()),
+  ),
+)
+
+async function handleManualCheckUpdate() {
+  const repoInput = (form.value.githubRepo ?? '').trim()
+  await appStore.checkForUpdates(false, repoInput)
+}
 
 const baseAutoRefreshOptions = [
   { value: '-1', label: '关闭自动刷新' },
@@ -151,6 +177,10 @@ async function handleSave() {
       ideAppPath: (form.value.ideAppPath ?? '').trim(),
       tokenUsageDataDir: (form.value.tokenUsageDataDir ?? '').trim(),
       proxyUrl: (form.value.proxyUrl ?? '').trim(),
+      githubRepo: (form.value.githubRepo ?? '').trim(),
+      autoCheckUpdate: Boolean(form.value.autoCheckUpdate),
+      oauthClientId: (form.value.oauthClientId ?? '').trim(),
+      oauthClientSecret: (form.value.oauthClientSecret ?? '').trim(),
     }
 
     await appStore.updateSettings(payload)
@@ -383,6 +413,85 @@ async function handleSave() {
         </div>
       </section>
 
+      <!-- 版本与 GitHub 更新检测 -->
+      <section
+        class="p-3.5 rounded-xl border space-y-3"
+        style="border-color: var(--border-subtle); background-color: var(--bg-app)"
+      >
+        <div class="flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-xs font-semibold" style="color: var(--text-primary)">版本与更新检测</span>
+              <span
+                class="text-[11px] font-mono-num px-1.5 py-0.5 rounded border"
+                style="background-color: var(--bg-surface); border-color: var(--border-subtle); color: var(--text-secondary)"
+              >
+                当前 v{{ appStore.appVersion }}
+              </span>
+              <button
+                v-if="appStore.updateInfo?.hasUpdate"
+                type="button"
+                class="inline-flex items-center gap-1 text-[11px] font-mono-num font-medium px-2 py-0.5 rounded cursor-pointer"
+                style="background-color: var(--accent-soft); color: var(--accent)"
+                @click="appStore.updateModalOpen = true"
+              >
+                <ArrowUpCircle class="w-3 h-3" aria-hidden="true" />
+                <span>发现 v{{ appStore.updateInfo.latestVersion }}</span>
+              </button>
+            </div>
+            <p id="github-repo-hint" class="mt-0.5 text-[11px]" style="color: var(--text-muted)">
+              从指定 GitHub 仓库的 Releases 检测最新发行版与跨平台安装包
+            </p>
+          </div>
+
+          <button
+            type="button"
+            :disabled="appStore.checkingUpdate"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border cursor-pointer shrink-0 transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+            style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
+            @click="handleManualCheckUpdate"
+          >
+            <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': appStore.checkingUpdate }" aria-hidden="true" />
+            <span>{{ appStore.checkingUpdate ? '检查中...' : '检查更新' }}</span>
+          </button>
+        </div>
+
+        <div class="space-y-2.5 pt-2 border-t" style="border-color: var(--border-subtle)">
+          <div>
+            <label for="github-repo-input" class="block text-xs font-medium mb-1" style="color: var(--text-secondary)">
+              GitHub 更新仓库（格式 owner/repo，留空使用默认仓库）
+            </label>
+            <input
+              id="github-repo-input"
+              v-model="form.githubRepo"
+              name="githubRepo"
+              type="text"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="none"
+              spellcheck="false"
+              aria-describedby="github-repo-hint"
+              :placeholder="appStore.defaultGitHubRepo || 'owner/more-account'"
+              class="w-full px-3 py-1.5 text-xs rounded-lg border font-mono-num"
+              style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
+            />
+          </div>
+
+          <div class="flex items-center gap-2">
+            <input
+              id="auto-check-update"
+              v-model="form.autoCheckUpdate"
+              name="autoCheckUpdate"
+              type="checkbox"
+              class="rounded accent-[var(--accent)]"
+            />
+            <label for="auto-check-update" class="text-xs cursor-pointer" style="color: var(--text-primary)">
+              启动应用时自动静默检查 GitHub 新版本
+            </label>
+          </div>
+        </div>
+      </section>
+
       <!-- 可选路径配置 -->
       <section class="space-y-3 pt-1">
         <div>
@@ -437,6 +546,81 @@ async function handleSave() {
           </div>
         </div>
       </section>
+
+      <!-- 高级：自定义 Google OAuth 客户端凭据（严守源码零密钥规范，仅保存在本机 0600 配置文件） -->
+      <details
+        class="rounded-xl border px-3.5 py-2.5"
+        style="border-color: var(--border-subtle); background-color: var(--bg-app)"
+      >
+        <summary class="flex items-center justify-between gap-2 text-xs font-medium cursor-pointer select-none" style="color: var(--text-secondary)">
+          <span>高级：Google OAuth 客户端凭据（可选覆盖）</span>
+          <span
+            class="text-[10.5px] px-1.5 py-0.5 rounded"
+            :style="
+              isOAuthReady
+                ? { backgroundColor: 'var(--success-soft)', color: 'var(--success-text)' }
+                : { backgroundColor: 'var(--warning-soft)', color: 'var(--warning-text)' }
+            "
+          >
+            {{ isOAuthReady ? '凭据已就绪' : '待配置' }}
+          </span>
+        </summary>
+        <div class="mt-3 pt-2.5 border-t space-y-2.5" style="border-color: var(--border-subtle)">
+          <p id="oauth-cred-hint" class="text-[11px]" style="color: var(--text-muted)">
+            仅以 0600 权限保存在本机独立配置中，不会进入代码仓库。若构建时或环境变量已注入默认凭据，此处可留空。
+          </p>
+          <div>
+            <label for="oauth-client-id-input" class="block text-xs font-medium mb-1" style="color: var(--text-secondary)">
+              OAuth Client ID
+            </label>
+            <input
+              id="oauth-client-id-input"
+              v-model="form.oauthClientId"
+              name="oauthClientId"
+              type="text"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="none"
+              spellcheck="false"
+              aria-describedby="oauth-cred-hint"
+              placeholder="留空则使用构建/环境默认凭据"
+              class="w-full px-3 py-1.5 text-xs rounded-lg border font-mono-num"
+              style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
+            />
+          </div>
+          <div>
+            <label for="oauth-client-secret-input" class="block text-xs font-medium mb-1" style="color: var(--text-secondary)">
+              OAuth Client Secret
+            </label>
+            <div class="flex gap-2">
+              <input
+                id="oauth-client-secret-input"
+                v-model="form.oauthClientSecret"
+                name="oauthClientSecret"
+                :type="showOAuthSecret ? 'text' : 'password'"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="none"
+                spellcheck="false"
+                placeholder="留空则使用构建/环境默认凭据"
+                class="flex-1 px-3 py-1.5 text-xs rounded-lg border font-mono-num"
+                style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
+              />
+              <button
+                type="button"
+                :aria-pressed="showOAuthSecret"
+                :aria-label="showOAuthSecret ? '隐藏 OAuth Client Secret' : '显示 OAuth Client Secret'"
+                class="inline-flex items-center justify-center px-2.5 py-1.5 rounded-lg border cursor-pointer transition-colors hover:bg-[var(--bg-hover)] min-w-[34px]"
+                style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-secondary)"
+                @click="showOAuthSecret = !showOAuthSecret"
+              >
+                <EyeOff v-if="showOAuthSecret" class="w-3.5 h-3.5" aria-hidden="true" />
+                <Eye v-else class="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </details>
 
       <!-- 数据存储位置 -->
       <section

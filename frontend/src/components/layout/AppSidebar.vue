@@ -18,6 +18,7 @@ import {
   Inbox,
   Radar,
   Download,
+  ArrowUpCircle,
 } from 'lucide-vue-next'
 import { useAppStore } from '@/stores/appStore'
 import { maskEmail } from '@/utils/privacy'
@@ -63,6 +64,14 @@ function runtimeTargetLabel(target: string): string {
 const isExternalUnmanaged = computed(() =>
   Boolean(!appStore.currentAccount && appStore.activeDetection?.hasCredential && !appStore.activeDetection.managed),
 )
+
+function handleVersionBadgeClick() {
+  if (appStore.updateInfo?.hasUpdate) {
+    appStore.updateModalOpen = true
+    return
+  }
+  void appStore.checkForUpdates(false)
+}
 </script>
 
 <template>
@@ -79,11 +88,27 @@ const isExternalUnmanaged = computed(() =>
         height="28"
         class="w-7 h-7 rounded-[7px] shrink-0 pointer-events-none"
       />
-      <div class="min-w-0">
-        <div class="text-[13.5px] font-semibold leading-tight tracking-tight truncate" style="color: var(--text-primary)">
-          More Account
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-1.5 min-w-0">
+          <span class="text-[13.5px] font-semibold leading-tight tracking-tight truncate" style="color: var(--text-primary)">
+            More Account
+          </span>
+          <button
+            type="button"
+            :disabled="appStore.checkingUpdate"
+            :title="appStore.updateInfo?.hasUpdate ? `发现新版本 v${appStore.updateInfo.latestVersion}，点击查看` : '点击检查 GitHub 最新版本'"
+            class="wails-no-drag shrink-0 px-1.5 py-0.5 rounded text-[10px] font-mono-num font-medium cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-60"
+            :style="
+              appStore.updateInfo?.hasUpdate
+                ? { backgroundColor: 'var(--accent-soft)', color: 'var(--accent)' }
+                : { backgroundColor: 'var(--bg-subtle)', color: 'var(--text-muted)' }
+            "
+            @click="handleVersionBadgeClick"
+          >
+            v{{ appStore.appVersion }}
+          </button>
         </div>
-        <div class="text-[11px] leading-tight truncate" style="color: var(--text-muted)">
+        <div class="text-[11px] leading-tight truncate mt-0.5" style="color: var(--text-muted)">
           Antigravity 账号管理
         </div>
       </div>
@@ -229,6 +254,21 @@ const isExternalUnmanaged = computed(() =>
 
     <!-- 底部当前激活账号胶囊（支持自动探测其他程序切号与手动立即探测） + 快捷工具行 -->
     <div class="shrink-0 p-3 border-t space-y-2.5" style="border-color: var(--border-subtle)">
+      <!-- 检测到新版本时的醒目提示横幅 -->
+      <button
+        v-if="appStore.updateInfo?.hasUpdate"
+        type="button"
+        class="w-full px-2.5 py-2 rounded-xl border flex items-center justify-between gap-2 text-xs font-medium cursor-pointer transition-colors"
+        style="background-color: var(--accent-soft); border-color: var(--accent-border); color: var(--accent)"
+        @click="appStore.updateModalOpen = true"
+      >
+        <span class="flex items-center gap-1.5 min-w-0">
+          <ArrowUpCircle class="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+          <span class="truncate font-mono-num">发现新版本 v{{ appStore.updateInfo.latestVersion }}</span>
+        </span>
+        <span class="text-[11px] font-semibold shrink-0">查看</span>
+      </button>
+
       <div
         class="w-full p-2.5 rounded-xl border transition-colors"
         :style="

@@ -5,6 +5,7 @@ more-account
 MoreAccount
 *.app/
 *.exe
+*.syso
 
 # 前端依赖与构建缓存（保留 dist/.gitkeep 供全新克隆直接执行 go test）
 frontend/node_modules/
@@ -12,6 +13,25 @@ frontend/dist/*
 !frontend/dist/.gitkeep
 frontend/wailsjs/
 frontend/package.json.md5
+
+# 本地环境变量、私密凭据与导出数据（严禁上传任何密钥与隐私信息）
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+oauth.local.json
+accounts.json
+groups.json
+settings.json
+switch_history.json
+wakeup_state.json
+wakeup_history.json
+token_usage_cache.json
+*-export-*.json
+*-token-usage-*.csv
 
 # 系统与编辑器临时文件
 .DS_Store

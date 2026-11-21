@@ -106,6 +106,31 @@ export interface AppSettings {
   ideAppPath?: string
   tokenUsageDataDir?: string
   proxyUrl?: string
+  githubRepo?: string
+  autoCheckUpdate: boolean
+  oauthClientId?: string
+  oauthClientSecret?: string
+}
+
+export interface ReleaseAsset {
+  name: string
+  downloadUrl: string
+  size: number
+}
+
+export interface UpdateCheckResult {
+  currentVersion: string
+  latestVersion: string
+  hasUpdate: boolean
+  noReleaseYet?: boolean
+  repo: string
+  releaseName?: string
+  releaseNotes?: string
+  releaseUrl: string
+  publishedAt?: string
+  recommendedAsset?: ReleaseAsset | null
+  assets?: ReleaseAsset[]
+  checkedAt: number
 }
 
 export interface ActiveDetectionResult {
@@ -135,6 +160,9 @@ export interface BootstrapState {
   settings: AppSettings
   clientInfo: ClientInstallInfo
   dataDir: string
+  appVersion: string
+  defaultGitHubRepo: string
+  hasBuiltInOAuth: boolean
 }
 
 export interface RefreshStats {

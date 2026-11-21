@@ -13,6 +13,7 @@ import (
 
 	"more-account/internal/model"
 	"more-account/internal/netutil"
+	"more-account/internal/updater"
 )
 
 const (
@@ -105,9 +106,14 @@ func (s *Store) loadAll() error {
 		return err
 	} else if exists {
 		settings = normalizeSettings(settings)
-		// 启动自检：若磁盘手工修改了非法代理地址，自动回退为空以免阻塞启动
+		// 启动自检：若磁盘手工修改了非法代理地址或非法仓库路径，自动回退为空以免阻塞启动
 		if _, pErr := netutil.ValidateProxyURL(settings.ProxyURL); pErr != nil {
 			settings.ProxyURL = ""
+		}
+		if normRepo, rErr := updater.NormalizeGitHubRepo(settings.GitHubRepo); rErr != nil {
+			settings.GitHubRepo = ""
+		} else {
+			settings.GitHubRepo = normRepo
 		}
 	}
 	s.settings = settings
@@ -198,6 +204,9 @@ func normalizeSettings(in model.AppSettings) model.AppSettings {
 	in.IdeAppPath = strings.TrimSpace(in.IdeAppPath)
 	in.TokenUsageDataDir = strings.TrimSpace(in.TokenUsageDataDir)
 	in.ProxyURL = strings.TrimSpace(in.ProxyURL)
+	in.GitHubRepo = strings.TrimSpace(in.GitHubRepo)
+	in.OAuthClientID = strings.TrimSpace(in.OAuthClientID)
+	in.OAuthClientSecret = strings.TrimSpace(in.OAuthClientSecret)
 	return in
 }
 
@@ -864,12 +873,17 @@ func (s *Store) GetSettings() model.AppSettings {
 	return s.settings
 }
 
-// SaveSettings 保存全局设置（并在落盘前校验代理地址合法性）。
+// SaveSettings 保存全局设置（并在落盘前校验代理地址与 GitHub 仓库路径合法性）。
 func (s *Store) SaveSettings(next model.AppSettings) (model.AppSettings, error) {
 	normalized := normalizeSettings(next)
 	if _, err := netutil.ValidateProxyURL(normalized.ProxyURL); err != nil {
 		return model.AppSettings{}, err
 	}
+	normRepo, err := updater.NormalizeGitHubRepo(normalized.GitHubRepo)
+	if err != nil {
+		return model.AppSettings{}, err
+	}
+	normalized.GitHubRepo = normRepo
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

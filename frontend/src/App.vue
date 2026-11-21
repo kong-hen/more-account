@@ -11,6 +11,7 @@ import AddAccountModal from '@/components/accounts/AddAccountModal.vue'
 import GroupModal from '@/components/accounts/GroupModal.vue'
 import ExportModal from '@/components/accounts/ExportModal.vue'
 import SettingsModal from '@/components/settings/SettingsModal.vue'
+import UpdateModal from '@/components/common/UpdateModal.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ToastContainer from '@/components/common/ToastContainer.vue'
 import { useAppStore } from '@/stores/appStore'
@@ -179,6 +180,8 @@ async function confirmDeleteGroup() {
     />
 
     <SettingsModal :open="settingsModalOpen" @close="settingsModalOpen = false" />
+
+    <UpdateModal :open="appStore.updateModalOpen" @close="appStore.updateModalOpen = false" />
 
     <ConfirmDialog
       :open="Boolean(deleteAccountConfirm)"

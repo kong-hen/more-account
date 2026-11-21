@@ -22,6 +22,7 @@ import type {
   RuntimeTarget,
   SwitchHistoryItem,
   ThemeMode,
+  UpdateCheckResult,
 } from '@/types/models'
 
 interface ToastItem {
@@ -44,6 +45,12 @@ export const useAppStore = defineStore('app', () => {
   const groups = ref<AccountGroup[]>([])
   const switchHistory = ref<SwitchHistoryItem[]>([])
   const dataDir = ref('')
+  const appVersion = ref('1.0.0')
+  const defaultGitHubRepo = ref('kong-hen/more-account')
+  const hasBuiltInOAuth = ref(false)
+  const updateInfo = ref<UpdateCheckResult | null>(null)
+  const checkingUpdate = ref(false)
+  const updateModalOpen = ref(false)
   const clientInfo = ref<ClientInstallInfo>({
     desktopPath: '',
     idePath: '',
@@ -61,6 +68,7 @@ export const useAppStore = defineStore('app', () => {
     lowQuotaThreshold: 20,
     autoRefreshMinutes: 5,
     inactiveAutoRefreshMinutes: 60,
+    autoCheckUpdate: true,
   })
 
   // 账号工作台筛选与视图状态
@@ -206,6 +214,13 @@ export const useAppStore = defineStore('app', () => {
       }
       clientInfo.value = state.clientInfo ?? clientInfo.value
       dataDir.value = state.dataDir ?? ''
+      if (state.appVersion) {
+        appVersion.value = state.appVersion
+      }
+      if (typeof state.defaultGitHubRepo === 'string') {
+        defaultGitHubRepo.value = state.defaultGitHubRepo
+      }
+      hasBuiltInOAuth.value = Boolean(state.hasBuiltInOAuth)
       applyTheme(settings.value.theme)
 
       // 注册后端事件推送（手动批量进度 + 后台自动刷新状态与完成通知）
@@ -301,6 +316,14 @@ export const useAppStore = defineStore('app', () => {
       // 启动就绪后立即触发一次本机当前账号探测与配额到期检查
       void detectActiveAccount(true)
       void api.triggerAutoRefreshIfDue().catch(() => {})
+
+      // 启动后延迟 2.5 秒静默检查 GitHub 最新版本（若仓库尚未公开或网络受限则静默跳过不弹窗报错）
+      if (settings.value.autoCheckUpdate && (settings.value.githubRepo || defaultGitHubRepo.value)) {
+        const updateTimer = window.setTimeout(() => {
+          void checkForUpdates(true)
+        }, 2_500)
+        cleanups.push(() => window.clearTimeout(updateTimer))
+      }
     } catch (err) {
       notify(`加载应用数据失败：${extractErrorMessage(err)}`, 'error', 5000)
     } finally {
@@ -363,6 +386,36 @@ export const useAppStore = defineStore('app', () => {
       applyTheme(previous.theme)
       notify(`保存设置失败：${extractErrorMessage(err)}`, 'error')
       throw err
+    }
+  }
+
+  async function checkForUpdates(silent = false, repoOverride = ''): Promise<UpdateCheckResult | null> {
+    if (!isWailsRuntime() || checkingUpdate.value) return null
+    checkingUpdate.value = true
+    try {
+      const res = await api.checkForUpdates(repoOverride)
+      updateInfo.value = res
+      if (res.hasUpdate) {
+        if (!silent) {
+          updateModalOpen.value = true
+        } else {
+          notify(`发现新版本 v${res.latestVersion}，可在左侧边栏点击查看并升级`, 'info', 5200)
+        }
+      } else if (!silent) {
+        if (res.noReleaseYet) {
+          notify(`仓库 ${res.repo} 暂未发布任何 Release 版本`, 'info', 4200)
+        } else {
+          notify(`当前已是最新版本 (v${res.currentVersion})`, 'success')
+        }
+      }
+      return res
+    } catch (err) {
+      if (!silent) {
+        notify(`检查更新失败：${extractErrorMessage(err)}`, 'warning', 5000)
+      }
+      return null
+    } finally {
+      checkingUpdate.value = false
     }
   }
 
@@ -826,6 +879,12 @@ export const useAppStore = defineStore('app', () => {
     groupCounts,
     switchHistory,
     dataDir,
+    appVersion,
+    defaultGitHubRepo,
+    hasBuiltInOAuth,
+    updateInfo,
+    checkingUpdate,
+    updateModalOpen,
     clientInfo,
     settings,
     selectedGroupFilter,
@@ -865,6 +924,7 @@ export const useAppStore = defineStore('app', () => {
     disposeEvents,
     reloadAccounts,
     updateSettings,
+    checkForUpdates,
     toggleTheme,
     togglePrivacyMode,
     refreshAccount,

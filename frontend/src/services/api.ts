@@ -17,6 +17,7 @@ import type {
   TokenUsageBundle,
   TokenUsageQuery,
   TotpCodeResult,
+  UpdateCheckResult,
   WakeupHistoryItem,
   WakeupState,
   WakeupTestRequest,
@@ -24,6 +25,8 @@ import type {
 
 interface WailsAppBridge {
   GetBootstrapState(): Promise<BootstrapState>
+  GetAppVersion(): Promise<string>
+  CheckForUpdates(repoOverride: string): Promise<UpdateCheckResult>
   SaveSettings(settings: AppSettings): Promise<AppSettings>
   TestProxy(rawProxyURL: string): Promise<number>
   DetectInstalledClients(): Promise<ClientInstallInfo>
@@ -120,6 +123,8 @@ export function extractErrorMessage(err: unknown): string {
 
 export const api = {
   getBootstrapState: () => getBridge().GetBootstrapState(),
+  getAppVersion: () => getBridge().GetAppVersion(),
+  checkForUpdates: (repoOverride = '') => getBridge().CheckForUpdates(repoOverride),
   saveSettings: (settings: AppSettings) => getBridge().SaveSettings(settings),
   testProxy: (rawProxyURL: string) => getBridge().TestProxy(rawProxyURL),
   detectInstalledClients: () => getBridge().DetectInstalledClients(),

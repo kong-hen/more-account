@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 
 	"more-account/internal/model"
+	"more-account/internal/updater"
 )
 
 func TestAppBootstrapAndCoreBindings(t *testing.T) {
@@ -134,6 +138,8 @@ func TestReorderAccountsAndCancelWakeupTestBindings(t *testing.T) {
 
 func TestPrepareOAuthLoginAndDynamicGroupUpdate(t *testing.T) {
 	t.Setenv("MORE_ACCOUNT_DATA_DIR", t.TempDir())
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_ID", "test-client-id.apps.googleusercontent.com")
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET", "test-client-secret-placeholder")
 	app := NewApp()
 	defer app.CancelOAuthLogin()
 
@@ -313,5 +319,84 @@ func TestProxySettingsValidationAndCSVExportFormat(t *testing.T) {
 	}
 	if !strings.Contains(csvOut, "'=CMD") {
 		t.Fatalf("期望对公式起始字符添加单引号前缀，实际: %s", csvOut)
+	}
+}
+
+func TestCheckForUpdatesAndRepoValidation(t *testing.T) {
+	t.Setenv("MORE_ACCOUNT_DATA_DIR", t.TempDir())
+	app := NewApp()
+
+	boot := app.GetBootstrapState()
+	if boot.AppVersion == "" || app.GetAppVersion() != boot.AppVersion {
+		t.Fatalf("期望返回有效客户端版本号，实际 boot=%q get=%q", boot.AppVersion, app.GetAppVersion())
+	}
+	if !boot.Settings.AutoCheckUpdate {
+		t.Fatal("默认设置应当开启启动自动检查更新 (AutoCheckUpdate=true)")
+	}
+
+	// 非法 GitHub 仓库输入应当在保存设置时被拦截
+	if _, err := app.SaveSettings(model.AppSettings{
+		Theme:             "light",
+		RuntimeTarget:     "desktop",
+		LowQuotaThreshold: 20,
+		GitHubRepo:        "https://gitlab.com/someone/repo",
+	}); err == nil {
+		t.Fatal("保存非 GitHub 域名仓库应当报错")
+	}
+
+	// 完整 GitHub URL 应当自动规范化为 owner/repo
+	saved, err := app.SaveSettings(model.AppSettings{
+		Theme:             "light",
+		RuntimeTarget:     "desktop",
+		LowQuotaThreshold: 20,
+		GitHubRepo:        "https://github.com/kong-hen/more-account.git",
+		AutoCheckUpdate:   true,
+	})
+	if err != nil || saved.GitHubRepo != "kong-hen/more-account" {
+		t.Fatalf("保存合法 GitHub 仓库链接应规范化为 kong-hen/more-account，实际 saved=%+v err=%v", saved, err)
+	}
+
+	// 模拟 GitHub Release API 验证 CheckForUpdates 端到端链路
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/kong-hen/more-account/releases/latest" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"tag_name":     "v2.0.0",
+				"name":         "v2.0.0 重大更新",
+				"body":         "1. 支持 GitHub Release 自动检测更新",
+				"html_url":     "https://github.com/kong-hen/more-account/releases/tag/v2.0.0",
+				"published_at": "2026-11-22T00:00:00Z",
+				"assets": []map[string]any{
+					{
+						"name":                 "MoreAccount-macOS-universal.zip",
+						"browser_download_url": "https://github.com/kong-hen/more-account/releases/download/v2.0.0/MoreAccount-macOS-universal.zip",
+						"size":                 14000000,
+					},
+					{
+						"name":                 "MoreAccount-windows-amd64.zip",
+						"browser_download_url": "https://github.com/kong-hen/more-account/releases/download/v2.0.0/MoreAccount-windows-amd64.zip",
+						"size":                 7500000,
+					},
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	origAPI, origWeb := updater.GitHubAPIBaseURL, updater.GitHubWebBaseURL
+	updater.GitHubAPIBaseURL = srv.URL
+	updater.GitHubWebBaseURL = srv.URL
+	defer func() {
+		updater.GitHubAPIBaseURL = origAPI
+		updater.GitHubWebBaseURL = origWeb
+	}()
+
+	checkRes, err := app.CheckForUpdates("")
+	if err != nil {
+		t.Fatalf("CheckForUpdates 调用失败: %v", err)
+	}
+	if !checkRes.HasUpdate || checkRes.LatestVersion != "2.0.0" || checkRes.Repo != "kong-hen/more-account" {
+		t.Fatalf("CheckForUpdates 结果不符合预期: %+v", checkRes)
 	}
 }

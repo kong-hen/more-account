@@ -119,6 +119,19 @@ body,
   font-variant-numeric: tabular-nums;
 }
 
+/* 屏幕阅读器无障碍隐藏工具类（保留在无障碍树中供 role="status" 播报，不影响视觉排版） */
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
 /* Wails macOS 隐式标题栏拖拽区域 */
 .wails-drag {
   --wails-draggable: drag;

@@ -61,13 +61,23 @@ func (a *activeSession) close() {
 
 // LoginManager 管理单活的本地 OAuth 回调服务，并支持手动粘贴回调 URL 兜底。
 type LoginManager struct {
-	mu      sync.Mutex
-	current *activeSession
+	mu                  sync.Mutex
+	current             *activeSession
+	CredentialsProvider func() (clientID, clientSecret string)
 }
 
 // NewLoginManager 创建登录会话管理器。
 func NewLoginManager() *LoginManager {
 	return &LoginManager{}
+}
+
+func (m *LoginManager) resolveClientID() string {
+	var customID, customSecret string
+	if m.CredentialsProvider != nil {
+		customID, customSecret = m.CredentialsProvider()
+	}
+	id, _ := ResolveCredentials(customID, customSecret)
+	return id
 }
 
 func randomState() string {
@@ -80,6 +90,11 @@ func randomState() string {
 
 // StartSession 启动本地临时回调服务并返回授权页链接。
 func (m *LoginManager) StartSession() (LoginSession, error) {
+	clientID := strings.TrimSpace(m.resolveClientID())
+	if clientID == "" {
+		return LoginSession{}, fmt.Errorf("尚未配置 Google OAuth Client ID，请先在「设置」或本地 .env.local 中配置")
+	}
+
 	m.Cancel()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -147,7 +162,7 @@ func (m *LoginManager) StartSession() (LoginSession, error) {
 	}()
 
 	return LoginSession{
-		AuthURL:      BuildAuthURLWithPKCE(redirectURI, state, challenge),
+		AuthURL:      BuildAuthURLWithClientAndPKCE(clientID, redirectURI, state, challenge),
 		RedirectURI:  redirectURI,
 		State:        state,
 		CodeVerifier: verifier,

@@ -26,17 +26,21 @@ import (
 	"more-account/internal/switcher"
 	"more-account/internal/tokenusage"
 	"more-account/internal/totp"
+	"more-account/internal/updater"
 	"more-account/internal/wakeup"
 )
 
 // BootstrapState 包含前端首屏初始化所需的全部快照数据。
 type BootstrapState struct {
-	Accounts         []model.Account            `json:"accounts"`
-	CurrentAccountID string                     `json:"currentAccountId"`
-	Groups           []model.AccountGroup       `json:"groups"`
-	Settings         model.AppSettings          `json:"settings"`
-	ClientInfo       switcher.ClientInstallInfo `json:"clientInfo"`
-	DataDir          string                     `json:"dataDir"`
+	Accounts          []model.Account            `json:"accounts"`
+	CurrentAccountID  string                     `json:"currentAccountId"`
+	Groups            []model.AccountGroup       `json:"groups"`
+	Settings          model.AppSettings          `json:"settings"`
+	ClientInfo        switcher.ClientInstallInfo `json:"clientInfo"`
+	DataDir           string                     `json:"dataDir"`
+	AppVersion        string                     `json:"appVersion"`
+	DefaultGitHubRepo string                     `json:"defaultGitHubRepo"`
+	HasBuiltInOAuth   bool                       `json:"hasBuiltInOAuth"`
 }
 
 // App 是 Wails 桌面应用的后端绑定总入口，仅负责参数协调与事件桥接。
@@ -68,7 +72,15 @@ func NewApp() *App {
 	if trErr != nil {
 		netTr, _ = netutil.NewDynamicTransport("")
 	}
+	credsProvider := func() (string, string) {
+		st := store.GetSettings()
+		return st.OAuthClientID, st.OAuthClientSecret
+	}
 	oauthClient := oauth.NewClient()
+	oauthClient.CredentialsProvider = credsProvider
+	oauthMgr := oauth.NewLoginManager()
+	oauthMgr.CredentialsProvider = credsProvider
+
 	quotaClient := quota.NewClient()
 	if netTr != nil {
 		oauthClient.HTTPClient = &http.Client{Timeout: 15 * time.Second, Transport: netTr}
@@ -85,7 +97,7 @@ func NewApp() *App {
 		store:           store,
 		netTransport:    netTr,
 		oauthClient:     oauthClient,
-		oauthManager:    oauth.NewLoginManager(),
+		oauthManager:    oauthMgr,
 		quotaService:    quotaSvc,
 		switcherService: switchSvc,
 		importerService: importSvc,
@@ -182,14 +194,40 @@ func (a *App) emitEvent(name string, data ...any) {
 // GetBootstrapState 返回首屏渲染所需全部数据。
 func (a *App) GetBootstrapState() *BootstrapState {
 	settings := a.store.GetSettings()
+	defaultRepo, _ := updater.ResolveEffectiveRepo("", "")
 	return &BootstrapState{
-		Accounts:         a.store.ListAccounts(),
-		CurrentAccountID: a.store.GetCurrentAccountID(),
-		Groups:           a.store.ListGroups(),
-		Settings:         settings,
-		ClientInfo:       switcher.DetectInstalledClients(settings.DesktopAppPath, settings.IdeAppPath),
-		DataDir:          a.store.DataDir(),
+		Accounts:          a.store.ListAccounts(),
+		CurrentAccountID:  a.store.GetCurrentAccountID(),
+		Groups:            a.store.ListGroups(),
+		Settings:          settings,
+		ClientInfo:        switcher.DetectInstalledClients(settings.DesktopAppPath, settings.IdeAppPath),
+		DataDir:           a.store.DataDir(),
+		AppVersion:        updater.AppVersion,
+		DefaultGitHubRepo: defaultRepo,
+		HasBuiltInOAuth:   oauth.HasBuiltInCredentials(),
 	}
+}
+
+// GetAppVersion 返回当前客户端版本号。
+func (a *App) GetAppVersion() string {
+	return updater.AppVersion
+}
+
+// CheckForUpdates 检查 GitHub 最新发行版（自动复用用户配置的 HTTP / SOCKS5 代理）。
+func (a *App) CheckForUpdates(repoOverride string) (*updater.UpdateCheckResult, error) {
+	settings := a.store.GetSettings()
+	targetRepo, err := updater.ResolveEffectiveRepo(repoOverride, settings.GitHubRepo)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(a.baseCtx(), 18*time.Second)
+	defer cancel()
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	if a.netTransport != nil {
+		client.Transport = a.netTransport
+	}
+	return updater.CheckLatestRelease(ctx, client, targetRepo, updater.AppVersion)
 }
 
 // SaveSettings 保存全局设置，热更新网络代理、同步原生窗口背景色并通知后台服务立即应用新配置。

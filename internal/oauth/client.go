@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,26 +12,137 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"more-account/internal/model"
 )
 
+var (
+	// DefaultClientID 与 DefaultClientSecret 默认留空（严禁在源码仓库硬编码任何私密凭据与密钥）。
+	// 支持通过以下任一方式注入：
+	// 1) 应用「设置」界面保存至本机 ~/.more-account/settings.json（0600 权限）
+	// 2) 环境变量 MORE_ACCOUNT_OAUTH_CLIENT_ID / MORE_ACCOUNT_OAUTH_CLIENT_SECRET
+	// 3) 编译期 -ldflags "-X more-account/internal/oauth.DefaultClientID=... -X more-account/internal/oauth.DefaultClientSecret=..."
+	// 4) 本地未纳入版本控制的 .env.local 文件
+	DefaultClientID     = ""
+	DefaultClientSecret = ""
+)
+
 const (
-	// DefaultClientID 与 DefaultClientSecret 对齐 Antigravity 官方客户端 OAuth 参数。
-	DefaultClientID          = \"\"
-	DefaultClientSecret      = \"\"
-	DefaultTokenURL          = "https://oauth2.googleapis.com/token"
-	DefaultUserInfoURL       = "https://www.googleapis.com/oauth2/v2/userinfo"
-	DefaultAuthURL           = "https://accounts.google.com/o/oauth2/v2/auth"
-	DefaultOAuthClientKey    = "antigravity_enterprise"
-	NativeOAuthUserAgent     = "vscode/1.X.X (Antigravity/4.3.0)"
-	TokenRefreshSkewSeconds  = 900
+	DefaultTokenURL         = "https://oauth2.googleapis.com/token"
+	DefaultUserInfoURL      = "https://www.googleapis.com/oauth2/v2/userinfo"
+	DefaultAuthURL          = "https://accounts.google.com/o/oauth2/v2/auth"
+	DefaultOAuthClientKey   = "antigravity_enterprise"
+	NativeOAuthUserAgent    = "vscode/1.X.X (Antigravity/4.3.0)"
+	TokenRefreshSkewSeconds = 900
 )
 
 // ErrInvalidGrant 表示 Google 返回 invalid_grant（Refresh Token 已被撤销或失效）。
 var ErrInvalidGrant = errors.New("invalid_grant")
+
+var (
+	dotEnvOnce   sync.Once
+	dotEnvID     string
+	dotEnvSecret string
+)
+
+func loadDotEnvLocal() (string, string) {
+	dotEnvOnce.Do(func() {
+		candidates := []string{".env.local"}
+		if exePath, err := os.Executable(); err == nil && exePath != "" {
+			exeDir := filepath.Dir(exePath)
+			candidates = append(candidates,
+				filepath.Join(exeDir, ".env.local"),
+				filepath.Join(exeDir, "..", "..", "..", ".env.local"),
+			)
+		}
+		for _, p := range candidates {
+			id, sec := parseDotEnvFile(p)
+			if dotEnvID == "" && id != "" {
+				dotEnvID = id
+			}
+			if dotEnvSecret == "" && sec != "" {
+				dotEnvSecret = sec
+			}
+			if dotEnvID != "" && dotEnvSecret != "" {
+				break
+			}
+		}
+	})
+	return dotEnvID, dotEnvSecret
+}
+
+func parseDotEnvFile(path string) (string, string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", ""
+	}
+	defer f.Close()
+
+	var id, sec string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		val = strings.Trim(val, `"'`)
+		switch key {
+		case "MORE_ACCOUNT_OAUTH_CLIENT_ID":
+			id = val
+		case "MORE_ACCOUNT_OAUTH_CLIENT_SECRET":
+			sec = val
+		}
+	}
+	return id, sec
+}
+
+// ResolveCredentials 按优先级解析 OAuth 客户端凭据：自定义参数 > 环境变量 > 编译期注入 > 本地 .env.local。
+func ResolveCredentials(customID, customSecret string) (clientID, clientSecret string) {
+	localID, localSec := loadDotEnvLocal()
+
+	for _, candidate := range []string{
+		customID,
+		os.Getenv("MORE_ACCOUNT_OAUTH_CLIENT_ID"),
+		DefaultClientID,
+		localID,
+	} {
+		if s := strings.TrimSpace(candidate); s != "" {
+			clientID = s
+			break
+		}
+	}
+
+	for _, candidate := range []string{
+		customSecret,
+		os.Getenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET"),
+		DefaultClientSecret,
+		localSec,
+	} {
+		if s := strings.TrimSpace(candidate); s != "" {
+			clientSecret = s
+			break
+		}
+	}
+	return clientID, clientSecret
+}
+
+// HasBuiltInCredentials 判断运行环境（环境变量、编译期 ldflags 或本地 .env.local）是否已具备默认 OAuth 凭据。
+func HasBuiltInCredentials() bool {
+	id, sec := ResolveCredentials("", "")
+	return id != "" && sec != ""
+}
 
 // TokenResponse 对应 Google OAuth2 Token 端点的响应体。
 type TokenResponse struct {
@@ -65,11 +177,14 @@ func (u *UserInfo) DisplayName() string {
 	return strings.Join(parts, " ")
 }
 
-// Client 封装 Google OAuth2 HTTP 调用，支持测试时替换端点。
+// Client 封装 Google OAuth2 HTTP 调用，支持动态凭据提供器与测试端点替换。
 type Client struct {
-	HTTPClient  *http.Client
-	TokenURL    string
-	UserInfoURL string
+	HTTPClient          *http.Client
+	TokenURL            string
+	UserInfoURL         string
+	ClientID            string
+	ClientSecret        string
+	CredentialsProvider func() (clientID, clientSecret string)
 }
 
 // NewClient 创建默认 OAuth 客户端。
@@ -102,6 +217,20 @@ func (c *Client) userInfoURL() string {
 	return DefaultUserInfoURL
 }
 
+func (c *Client) resolveCredentials() (string, string) {
+	customID, customSecret := c.ClientID, c.ClientSecret
+	if c.CredentialsProvider != nil {
+		pid, psec := c.CredentialsProvider()
+		if strings.TrimSpace(pid) != "" {
+			customID = pid
+		}
+		if strings.TrimSpace(psec) != "" {
+			customSecret = psec
+		}
+	}
+	return ResolveCredentials(customID, customSecret)
+}
+
 // GeneratePKCE 生成符合 RFC 7636 的 S256 PKCE code_verifier 与 code_challenge。
 func GeneratePKCE() (verifier, challenge string) {
 	var raw [32]byte
@@ -123,6 +252,15 @@ func BuildAuthURL(redirectURI, state string) string {
 
 // BuildAuthURLWithPKCE 生成带可选 S256 PKCE 参数的 Google OAuth2 授权页地址。
 func BuildAuthURLWithPKCE(redirectURI, state, codeChallenge string) string {
+	clientID, _ := ResolveCredentials("", "")
+	return BuildAuthURLWithClientAndPKCE(clientID, redirectURI, state, codeChallenge)
+}
+
+// BuildAuthURLWithClientAndPKCE 使用指定 ClientID 与可选 S256 PKCE 参数生成 Google OAuth2 授权页地址。
+func BuildAuthURLWithClientAndPKCE(clientID, redirectURI, state, codeChallenge string) string {
+	if strings.TrimSpace(clientID) == "" {
+		clientID, _ = ResolveCredentials("", "")
+	}
 	scopes := strings.Join([]string{
 		"openid",
 		"https://www.googleapis.com/auth/cloud-platform",
@@ -134,7 +272,7 @@ func BuildAuthURLWithPKCE(redirectURI, state, codeChallenge string) string {
 	}, " ")
 
 	params := url.Values{}
-	params.Set("client_id", DefaultClientID)
+	params.Set("client_id", strings.TrimSpace(clientID))
 	params.Set("redirect_uri", redirectURI)
 	params.Set("response_type", "code")
 	params.Set("scope", scopes)
@@ -154,9 +292,14 @@ func BuildAuthURLWithPKCE(redirectURI, state, codeChallenge string) string {
 
 // ExchangeCode 使用授权码（及可选 PKCE code_verifier）向 Google 换取 Access Token 和 Refresh Token。
 func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI string, codeVerifier ...string) (*TokenResponse, error) {
+	clientID, clientSecret := c.resolveCredentials()
+	if c.tokenURL() == DefaultTokenURL && (clientID == "" || clientSecret == "") {
+		return nil, fmt.Errorf("尚未配置 Google OAuth 客户端凭据（Client ID / Secret），请在「设置」或本地 .env.local 中配置")
+	}
+
 	form := url.Values{}
-	form.Set("client_id", DefaultClientID)
-	form.Set("client_secret", DefaultClientSecret)
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
 	form.Set("code", strings.TrimSpace(code))
 	form.Set("redirect_uri", redirectURI)
 	form.Set("grant_type", "authorization_code")
@@ -200,9 +343,14 @@ func (c *Client) RefreshAccessToken(ctx context.Context, refreshToken string) (*
 		return nil, fmt.Errorf("refresh_token 不能为空")
 	}
 
+	clientID, clientSecret := c.resolveCredentials()
+	if c.tokenURL() == DefaultTokenURL && (clientID == "" || clientSecret == "") {
+		return nil, fmt.Errorf("尚未配置 Google OAuth 客户端凭据（Client ID / Secret），请在「设置」或本地 .env.local 中配置")
+	}
+
 	form := url.Values{}
-	form.Set("client_id", DefaultClientID)
-	form.Set("client_secret", DefaultClientSecret)
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
 	form.Set("refresh_token", rt)
 	form.Set("grant_type", "refresh_token")
 
