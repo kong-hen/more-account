@@ -9,7 +9,6 @@ import {
   isAccountAbnormal,
   isAccountLowQuota,
   isAccountValidationRequired,
-  pickBestSwitchCandidate,
 } from '@/utils/quota'
 import type {
   Account,
@@ -120,7 +119,7 @@ export const useAppStore = defineStore('app', () => {
       if (lastCurrentHealthAlertKey !== key) {
         lastCurrentHealthAlertKey = key
         notify(
-          `当前账号 ${maskEmail(cur.email, settings.value.privacyMode)} 需完成网页验证，可点击「网页验证」或使用「智能切号」`,
+          `当前账号 ${maskEmail(cur.email, settings.value.privacyMode)} 需完成网页验证，可点击「网页验证」或切换其他备用账号`,
           'warning',
           5200,
         )
@@ -133,7 +132,7 @@ export const useAppStore = defineStore('app', () => {
       if (lastCurrentHealthAlertKey !== key) {
         lastCurrentHealthAlertKey = key
         notify(
-          `当前账号 ${maskEmail(cur.email, settings.value.privacyMode)} 剩余额度较低（${minPct}%），可点击「智能切号」切换备用账号`,
+          `当前账号 ${maskEmail(cur.email, settings.value.privacyMode)} 剩余额度较低（${minPct}%），可切换其他备用账号`,
           'warning',
           4800,
         )
@@ -510,29 +509,6 @@ export const useAppStore = defineStore('app', () => {
     } finally {
       switchingId.value = null
     }
-  }
-
-  // 智能挑选当前最优配额的可用账号并执行一键切换（若当前正在浏览某个具体分组，优先在组内挑选，无可用时自动回退全量池）
-  async function smartSwitchAccount() {
-    if (switchingId.value) return
-    let candidate: Account | null = null
-    if (selectedGroupFilter.value !== 'all' && selectedGroupFilter.value !== 'ungrouped') {
-      const inGroup = accounts.value.filter((a) => a.groupId === selectedGroupFilter.value)
-      candidate = pickBestSwitchCandidate(inGroup, currentAccountId.value, nowMs.value)
-    } else if (selectedGroupFilter.value === 'ungrouped') {
-      const inUngrouped = accounts.value.filter(
-        (a) => !a.groupId || !groupMap.value.has(a.groupId),
-      )
-      candidate = pickBestSwitchCandidate(inUngrouped, currentAccountId.value, nowMs.value)
-    }
-    if (!candidate) {
-      candidate = pickBestSwitchCandidate(accounts.value, currentAccountId.value, nowMs.value)
-    }
-    if (!candidate) {
-      notify('暂无其他健康且有可用额度的备用账号可供切换', 'warning', 3800)
-      return
-    }
-    await switchToAccount(candidate.id)
   }
 
   async function saveAccountDetails(accountId: string, update: AccountDetailsUpdate) {
@@ -932,7 +908,6 @@ export const useAppStore = defineStore('app', () => {
     detectActiveAccount,
     importLocalActiveAccount,
     switchToAccount,
-    smartSwitchAccount,
     saveAccountDetails,
     assignAccountsToGroup,
     deleteAccountIds,

@@ -19,6 +19,7 @@ import {
   getAccountValidationUrl,
   getEarliestResetTime,
   getQuotaTone,
+  getTierBadgeClass,
   getTierLabel,
   isAccountAbnormal,
   isAccountValidationRequired,
@@ -249,8 +250,8 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
             <td class="py-3 px-2.5 whitespace-nowrap">
               <span
                 v-if="row.tier !== 'UNKNOWN'"
-                class="px-1.5 py-0.5 rounded text-[10.5px] font-semibold"
-                style="background-color: var(--bg-subtle); color: var(--text-secondary)"
+                class="tier-badge"
+                :class="getTierBadgeClass(row.tier)"
               >
                 {{ row.tier }}
               </span>

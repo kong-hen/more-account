@@ -682,58 +682,10 @@ export function getTierLabel(account: Account): 'ULTRA' | 'PRO' | 'FREE' | 'UNKN
   return 'UNKNOWN'
 }
 
-function tierPriorityWeight(account: Account): number {
-  switch (getTierLabel(account)) {
-    case 'ULTRA':
-      return 12
-    case 'PRO':
-      return 8
-    case 'FREE':
-      return 0
-    default:
-      return 2
-  }
-}
-
-// 智能挑选最佳切换目标账号：排除当前使用中、异常/失效/需网页验证及已耗尽（0%）账号，
-// 优先推荐余量充足、高订阅等级（ULTRA / PRO）且重置窗口更早到期的可用账号。
-export function pickBestSwitchCandidate(
-  accounts: Account[],
-  currentAccountId: string,
-  nowMs = Date.now(),
-): Account | null {
-  const candidates = accounts.filter((acc) => {
-    if (acc.id === currentAccountId) return false
-    if (isAccountAbnormal(acc)) return false
-    const minPct = getMinQuotaPercentage(acc, nowMs)
-    // minPct === 0 表示已有模型或窗口耗尽；minPct === -1 表示尚未拉取但账号状态正常，可作为次优兜底
-    if (minPct === 0) return false
-    return true
-  })
-
-  if (candidates.length === 0) return null
-
-  candidates.sort((a, b) => {
-    const pctA = getMinQuotaPercentage(a, nowMs)
-    const pctB = getMinQuotaPercentage(b, nowMs)
-    const knownA = pctA > 0 ? 1 : 0
-    const knownB = pctB > 0 ? 1 : 0
-    if (knownA !== knownB) return knownB - knownA
-
-    if (pctA > 0 && pctB > 0) {
-      const scoreA = pctA + tierPriorityWeight(a)
-      const scoreB = pctB + tierPriorityWeight(b)
-      if (scoreA !== scoreB) return scoreB - scoreA
-      if (pctA !== pctB) return pctB - pctA
-
-      const resetA = getEarliestResetTime(a, nowMs)
-      const resetB = getEarliestResetTime(b, nowMs)
-      if (resetA && resetB && resetA !== resetB) {
-        return isEarlierISO(resetA, resetB) ? -1 : 1
-      }
-    }
-    return a.sortOrder - b.sortOrder
-  })
-
-  return candidates[0] ?? null
+// 返回与 cockpit-tools 一致的订阅套餐徽章语义修饰类名。
+export function getTierBadgeClass(tier: 'ULTRA' | 'PRO' | 'FREE' | 'UNKNOWN'): string {
+  if (tier === 'ULTRA') return 'tier-badge--ultra'
+  if (tier === 'PRO') return 'tier-badge--pro'
+  if (tier === 'FREE') return 'tier-badge--free'
+  return ''
 }

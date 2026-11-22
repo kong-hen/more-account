@@ -22,10 +22,10 @@ func main() {
 
 	err := wails.Run(&options.App{
 		Title:     "More Account",
-		Width:     1320,
-		Height:    840,
-		MinWidth:  1024,
-		MinHeight: 660,
+		Width:     1160,
+		Height:    800,
+		MinWidth:  980,
+		MinHeight: 640,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},

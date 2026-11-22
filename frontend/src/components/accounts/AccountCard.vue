@@ -23,6 +23,7 @@ import {
   getAccountValidationUrl,
   getEarliestResetTime,
   getQuotaTone,
+  getTierBadgeClass,
   getTierLabel,
   isAccountAbnormal,
   isAccountLowQuota,
@@ -104,7 +105,7 @@ async function handleCopyValidationUrl() {
 <template>
   <article
     :draggable="Boolean(reorderable)"
-    class="account-card group p-3 rounded-xl cursor-pointer"
+    class="account-card group p-3.5 rounded-xl cursor-pointer"
     :class="[
       isCurrent ? 'account-card--current' : '',
       activeDetail ? 'account-card--active' : '',
@@ -119,14 +120,14 @@ async function handleCopyValidationUrl() {
     <!-- 当前正在使用账号的顶部翠绿细指示条 -->
     <div
       v-if="isCurrent"
-      class="absolute inset-x-0 top-0 h-[2.5px] pointer-events-none"
+      class="absolute inset-x-0 top-0 h-[3px] pointer-events-none"
       style="background: linear-gradient(90deg, var(--success), #34d399)"
     />
 
-    <!-- 轨道 1：卡片头部（邮箱标题顶格左对齐 + 右侧精巧状态徽章 + 备注 + 元数据/勾选行） -->
+    <!-- 轨道 1：卡片头部（邮箱标题顶格左对齐 + 右侧状态与套餐徽章 + 备注 + 元数据/勾选行） -->
     <header class="space-y-1.5 min-w-0 self-start">
-      <div class="flex items-center justify-between gap-1.5 min-w-0">
-        <h3 class="min-w-0 flex-1 flex items-center text-[0.8125rem] font-semibold leading-snug">
+      <div class="flex items-center justify-between gap-2 min-w-0">
+        <h3 class="min-w-0 flex-1 flex items-center text-sm font-semibold leading-snug">
           <button
             type="button"
             class="account-card__primary text-left min-w-0 flex-1 truncate cursor-pointer"
@@ -138,11 +139,11 @@ async function handleCopyValidationUrl() {
           </button>
         </h3>
 
-        <!-- 右上角紧凑状态徽章：使用中脉冲标 + 订阅等级 -->
-        <div class="flex items-center gap-1 shrink-0">
+        <!-- 右上角状态与套餐徽章：使用中脉冲标 + cockpit-tools 风格订阅等级 -->
+        <div class="flex items-center gap-1.5 shrink-0">
           <span
             v-if="isCurrent"
-            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[0.625rem] leading-none font-semibold tracking-wide shrink-0"
+            class="inline-flex items-center gap-1 px-2 py-[3px] rounded-full text-[0.625rem] leading-none font-semibold tracking-wide shrink-0"
             style="background-color: var(--success); color: #ffffff"
             title="本机当前正在使用此账号"
           >
@@ -155,38 +156,30 @@ async function handleCopyValidationUrl() {
 
           <span
             v-if="tier !== 'UNKNOWN'"
-            class="px-1.5 py-0.5 rounded border text-[0.625rem] leading-none font-semibold tracking-wide shrink-0"
-            :style="
-              tier === 'ULTRA'
-                ? { backgroundColor: 'var(--accent-soft)', color: 'var(--accent)', borderColor: 'transparent' }
-                : tier === 'PRO'
-                  ? isCurrent
-                    ? { backgroundColor: 'var(--bg-surface)', color: 'var(--success-text)', borderColor: 'rgba(16, 185, 129, 0.35)' }
-                    : { backgroundColor: 'var(--success-soft)', color: 'var(--success-text)', borderColor: 'transparent' }
-                  : { backgroundColor: 'var(--bg-subtle)', color: 'var(--text-secondary)', borderColor: 'transparent' }
-            "
+            class="tier-badge shrink-0"
+            :class="getTierBadgeClass(tier)"
           >
             {{ tier }}
           </span>
         </div>
       </div>
 
-      <!-- 备注（可选，低调单行） -->
+      <!-- 备注（可选，清晰单行） -->
       <p
         v-if="account.notes"
-        class="text-[0.6875rem] leading-snug truncate"
+        class="text-xs leading-snug truncate"
         style="color: var(--text-muted)"
         :title="account.notes"
       >
         {{ account.notes }}
       </p>
 
-      <!-- 元数据行：左侧分组 / 状态 / 凭据小标，右侧紧贴放置拖拽手柄与多选复选框（零缩进占位） -->
-      <div class="flex items-center justify-between gap-1.5 min-w-0">
-        <div class="flex items-center flex-wrap gap-1 min-w-0">
+      <!-- 元数据行：左侧分组 / 状态 / 凭据小标，右侧紧贴放置拖拽手柄与多选复选框 -->
+      <div class="flex items-center justify-between gap-2 min-w-0">
+        <div class="flex items-center flex-wrap gap-1.5 min-w-0">
           <span
             v-if="groupInfo"
-            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[0.65625rem] leading-none font-medium"
+            class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[0.6875rem] leading-none font-medium"
             :style="
               isCurrent
                 ? { backgroundColor: 'var(--bg-surface)', color: 'var(--text-secondary)', borderColor: 'var(--border-subtle)' }
@@ -194,11 +187,11 @@ async function handleCopyValidationUrl() {
             "
           >
             <span class="w-1.5 h-1.5 rounded-full shrink-0" :style="{ backgroundColor: groupInfo.color }" />
-            <span class="truncate max-w-[6.5rem]">{{ groupInfo.name }}</span>
+            <span class="truncate max-w-[7.5rem]">{{ groupInfo.name }}</span>
           </span>
           <span
             v-else
-            class="inline-flex items-center px-1.5 py-0.5 rounded-md border text-[0.65625rem] leading-none"
+            class="inline-flex items-center px-2 py-0.5 rounded-md border text-[0.6875rem] leading-none"
             :style="
               isCurrent
                 ? { backgroundColor: 'var(--bg-surface)', color: 'var(--text-muted)', borderColor: 'var(--border-subtle)' }
@@ -210,15 +203,15 @@ async function handleCopyValidationUrl() {
 
           <span
             v-if="abnormal"
-            class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[0.65625rem] leading-none font-medium"
+            class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[0.6875rem] leading-none font-medium"
             style="background-color: var(--danger-soft); color: var(--danger-text)"
           >
-            <AlertTriangle class="w-2.5 h-2.5 shrink-0" />
+            <AlertTriangle class="w-3 h-3 shrink-0" />
             <span>{{ account.disabled ? '令牌失效' : validationRequired ? '需验证' : '异常' }}</span>
           </span>
           <span
             v-else-if="lowQuota"
-            class="inline-flex items-center px-1.5 py-0.5 rounded-md text-[0.65625rem] leading-none font-medium"
+            class="inline-flex items-center px-2 py-0.5 rounded-md text-[0.6875rem] leading-none font-medium"
             style="background-color: var(--warning-soft); color: var(--warning-text)"
           >
             低配额
@@ -226,12 +219,12 @@ async function handleCopyValidationUrl() {
 
           <span
             v-if="hasCredentials"
-            class="inline-flex items-center p-0.5 rounded text-[0.65625rem]"
+            class="inline-flex items-center p-0.5 rounded text-[0.6875rem]"
             style="color: var(--text-muted)"
             title="已保存密码或 2FA 密钥"
           >
-            <ShieldCheck v-if="account.twoFactorSecret" class="w-3 h-3" />
-            <KeyRound v-else class="w-3 h-3" />
+            <ShieldCheck v-if="account.twoFactorSecret" class="w-3.5 h-3.5" />
+            <KeyRound v-else class="w-3.5 h-3.5" />
           </span>
         </div>
 
@@ -244,14 +237,14 @@ async function handleCopyValidationUrl() {
             class="account-card__interactive p-0.5 rounded cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-75 hover:!opacity-100 transition-opacity"
             style="color: var(--text-muted)"
           >
-            <GripVertical class="w-3 h-3" />
+            <GripVertical class="w-3.5 h-3.5" />
           </span>
 
           <button
             type="button"
             :aria-label="selected ? '取消选中' : '选中账号'"
             :aria-pressed="selected"
-            class="w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 cursor-pointer transition-opacity"
+            class="w-4 h-4 rounded border flex items-center justify-center shrink-0 cursor-pointer transition-opacity"
             :class="
               selected || hasAnySelection
                 ? 'opacity-100'
@@ -264,7 +257,7 @@ async function handleCopyValidationUrl() {
             "
             @click="emit('toggle-select', account.id)"
           >
-            <Check v-if="selected" class="w-2.5 h-2.5" />
+            <Check v-if="selected" class="w-3 h-3" />
           </button>
         </div>
       </div>
@@ -304,31 +297,31 @@ async function handleCopyValidationUrl() {
         </div>
       </div>
 
-      <!-- 聚合配额面板：用单一柔和底板 + 细分割线取代卡中套卡，精巧展示模型名称与纤细额度进度条 -->
+      <!-- 聚合配额面板：单一柔和底板 + 细分割线，保持精致小巧的模型名与纤细额度进度条 -->
       <template v-if="quotaCategories.length > 0 || !validationUrl">
         <div
           v-if="quotaCategories.length > 0"
-          class="rounded-lg border px-2 py-1 divide-y divide-[var(--border-hairline)]"
+          class="rounded-lg border px-2.5 py-1.5 divide-y divide-[var(--border-hairline)]"
           style="background-color: var(--bg-app); border-color: var(--border-hairline)"
         >
           <div
             v-for="cat in quotaCategories"
             :key="cat.key"
-            class="py-1 first:pt-0.5 last:pb-0.5 space-y-[3px]"
+            class="py-1.5 first:pt-0.5 last:pb-0.5 space-y-1"
           >
             <!-- 双窗口：5 小时与周额度左右并列，中间以细竖线明确视觉分组 -->
             <template v-if="cat.fiveHour">
               <div
-                class="text-[0.625rem] font-medium leading-tight truncate"
+                class="text-[0.65625rem] font-medium leading-tight truncate"
                 style="color: var(--text-secondary)"
               >
                 {{ cat.label }}
               </div>
               <div class="account-card__quota-split grid grid-cols-2">
-                <div class="space-y-[3px] min-w-0 pr-1.5">
-                  <div class="flex items-baseline justify-between gap-1 text-[0.625rem] leading-none">
+                <div class="space-y-1 min-w-0 pr-2">
+                  <div class="flex items-baseline justify-between gap-1 text-[0.65625rem] leading-none">
                     <span class="inline-flex items-baseline gap-1 min-w-0">
-                      <span class="text-[0.5625rem] font-medium shrink-0" style="color: var(--text-muted)">
+                      <span class="text-[0.59375rem] font-medium shrink-0" style="color: var(--text-muted)">
                         5h
                       </span>
                       <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.fiveHour.percentage)">
@@ -337,7 +330,7 @@ async function handleCopyValidationUrl() {
                     </span>
                     <span
                       v-if="cat.fiveHour.resetTime"
-                      class="account-card__quota-reset text-[0.5625rem] font-mono-num truncate"
+                      class="account-card__quota-reset text-[0.59375rem] font-mono-num truncate"
                       style="color: var(--text-muted)"
                       :title="`5小时额度重置：${formatResetCountdown(cat.fiveHour.resetTime, appStore.nowMs)}`"
                     >
@@ -347,11 +340,11 @@ async function handleCopyValidationUrl() {
                   <QuotaBar :percentage="cat.fiveHour.percentage" height="h-[3px]" />
                 </div>
 
-                <div class="space-y-[3px] min-w-0 pl-1.5 border-l" style="border-color: var(--border-hairline)">
+                <div class="space-y-1 min-w-0 pl-2 border-l" style="border-color: var(--border-hairline)">
                   <template v-if="cat.weekly">
-                    <div class="flex items-baseline justify-between gap-1 text-[0.625rem] leading-none">
+                    <div class="flex items-baseline justify-between gap-1 text-[0.65625rem] leading-none">
                       <span class="inline-flex items-baseline gap-1 min-w-0">
-                        <span class="text-[0.5625rem] font-medium shrink-0" style="color: var(--text-muted)">
+                        <span class="text-[0.59375rem] font-medium shrink-0" style="color: var(--text-muted)">
                           周
                         </span>
                         <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.weekly.percentage)">
@@ -360,7 +353,7 @@ async function handleCopyValidationUrl() {
                       </span>
                       <span
                         v-if="cat.weekly.resetTime"
-                        class="account-card__quota-reset text-[0.5625rem] font-mono-num truncate"
+                        class="account-card__quota-reset text-[0.59375rem] font-mono-num truncate"
                         style="color: var(--text-muted)"
                         :title="`周额度重置：${formatResetCountdown(cat.weekly.resetTime, appStore.nowMs)}`"
                       >
@@ -370,9 +363,9 @@ async function handleCopyValidationUrl() {
                     <QuotaBar :percentage="cat.weekly.percentage" height="h-[3px]" />
                   </template>
                   <template v-else>
-                    <div class="flex items-baseline justify-between gap-1 text-[0.625rem] leading-none">
+                    <div class="flex items-baseline justify-between gap-1 text-[0.65625rem] leading-none">
                       <span class="inline-flex items-baseline gap-1 min-w-0">
-                        <span class="text-[0.5625rem] font-medium shrink-0" style="color: var(--text-muted)">
+                        <span class="text-[0.59375rem] font-medium shrink-0" style="color: var(--text-muted)">
                           周
                         </span>
                         <span class="font-mono-num font-medium" style="color: var(--text-muted)">
@@ -392,15 +385,15 @@ async function handleCopyValidationUrl() {
 
             <!-- 单窗口：仅有周额度 -->
             <template v-else-if="cat.weekly">
-              <div class="flex items-baseline justify-between gap-1.5 text-[0.625rem] leading-tight">
+              <div class="flex items-baseline justify-between gap-1.5 text-[0.65625rem] leading-tight">
                 <span class="inline-flex items-baseline gap-1 min-w-0">
                   <span class="font-medium truncate" style="color: var(--text-secondary)">{{ cat.label }}</span>
-                  <span class="text-[0.5625rem] font-medium shrink-0" style="color: var(--text-muted)">周</span>
+                  <span class="text-[0.59375rem] font-medium shrink-0" style="color: var(--text-muted)">周</span>
                 </span>
                 <span class="inline-flex items-baseline gap-1.5 shrink-0 font-mono-num">
                   <span
                     v-if="cat.weekly.resetTime"
-                    class="account-card__quota-reset text-[0.5625rem]"
+                    class="account-card__quota-reset text-[0.59375rem]"
                     style="color: var(--text-muted)"
                   >
                     {{ formatResetCountdown(cat.weekly.resetTime, appStore.nowMs) }}
@@ -417,7 +410,7 @@ async function handleCopyValidationUrl() {
 
         <div
           v-else-if="abnormal"
-          class="py-2 px-2.5 rounded-lg text-[0.6875rem] leading-relaxed line-clamp-2 overflow-clip"
+          class="py-2.5 px-3 rounded-lg text-xs leading-relaxed line-clamp-2 overflow-clip"
           style="background-color: var(--danger-soft); color: var(--danger-text)"
         >
           {{ account.quotaError?.message || account.disabledReason || '账号访问受限，点击查看详情' }}
@@ -425,7 +418,7 @@ async function handleCopyValidationUrl() {
 
         <div
           v-else
-          class="py-2.5 px-2.5 rounded-lg border text-[0.6875rem] text-center"
+          class="py-3 px-3 rounded-lg border text-xs text-center"
           style="background-color: var(--bg-app); border-color: var(--border-hairline); color: var(--text-muted)"
         >
           尚未拉取配额，点击刷新获取
@@ -433,42 +426,42 @@ async function handleCopyValidationUrl() {
       </template>
     </div>
 
-    <!-- 轨道 3：底部精巧操作栏 -->
+    <!-- 轨道 3：底部操作栏 -->
     <footer
-      class="pt-2 border-t flex items-center justify-between gap-1.5 min-w-0 self-end"
+      class="pt-2.5 border-t flex items-center justify-between gap-2 min-w-0 self-end"
       style="border-color: var(--border-subtle)"
     >
       <span
-        class="inline-flex items-center gap-1 text-[0.6875rem] leading-none tabular-nums truncate min-w-0"
+        class="inline-flex items-center gap-1 text-xs leading-none tabular-nums truncate min-w-0"
         style="color: var(--text-muted)"
       >
-        <Clock class="w-3 h-3 shrink-0" />
+        <Clock class="w-3.5 h-3.5 shrink-0" />
         <span class="truncate">
           {{ earliestReset ? `重置 ${formatResetCountdown(earliestReset, appStore.nowMs)}` : '暂无重置时间' }}
         </span>
       </span>
 
-      <div class="flex items-center gap-1 shrink-0">
+      <div class="flex items-center gap-1.5 shrink-0">
         <button
           type="button"
           title="刷新配额"
           aria-label="刷新配额"
           :disabled="isRefreshing"
-          class="p-1 rounded-md border shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+          class="p-1.5 rounded-lg border shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
           style="border-color: var(--border-subtle); color: var(--text-secondary); background-color: var(--bg-surface)"
           @click="appStore.refreshAccount(account.id)"
         >
-          <RefreshCw class="w-3 h-3" :class="{ 'animate-spin': isRefreshing }" />
+          <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': isRefreshing }" />
         </button>
 
         <button
           type="button"
           :disabled="isSwitching"
-          class="inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[0.6875rem] leading-none font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs leading-none font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
           :class="isCurrent ? 'account-card__switch-btn--current' : 'account-card__switch-btn'"
           @click="appStore.switchToAccount(account.id)"
         >
-          <ArrowRightLeft class="w-3 h-3 shrink-0" />
+          <ArrowRightLeft class="w-3.5 h-3.5 shrink-0" />
           <span>{{ isSwitching ? '切换中...' : isCurrent ? '重新应用' : '一键切换' }}</span>
         </button>
       </div>

@@ -22,7 +22,7 @@ import {
 } from 'lucide-vue-next'
 import { useAppStore } from '@/stores/appStore'
 import { maskEmail } from '@/utils/privacy'
-import { getTierLabel } from '@/utils/quota'
+import { getTierBadgeClass, getTierLabel } from '@/utils/quota'
 import type { AccountGroup, AppSection } from '@/types/models'
 
 const appStore = useAppStore()
@@ -358,8 +358,8 @@ function handleVersionBadgeClick() {
           </span>
           <span
             v-if="getTierLabel(appStore.currentAccount) !== 'UNKNOWN'"
-            class="text-[0.6875rem] leading-none font-semibold px-1.5 py-1 rounded shrink-0"
-            style="background-color: var(--accent-soft); color: var(--accent)"
+            class="tier-badge shrink-0"
+            :class="getTierBadgeClass(getTierLabel(appStore.currentAccount))"
           >
             {{ getTierLabel(appStore.currentAccount) }}
           </span>

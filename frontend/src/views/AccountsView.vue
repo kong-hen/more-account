@@ -17,7 +17,6 @@ import {
   AlertTriangle,
   BatteryLow,
   Globe,
-  Sparkles,
 } from 'lucide-vue-next'
 import AccountCard from '@/components/accounts/AccountCard.vue'
 import AccountTable from '@/components/accounts/AccountTable.vue'
@@ -409,20 +408,6 @@ const refreshButtonTooltip = computed(() => {
                 : '刷新'
             }}
           </span>
-        </button>
-
-        <!-- 智能切号：自动挑选余量最高且状态健康的备用账号一键切换 -->
-        <button
-          v-if="appStore.accounts.length >= 2"
-          type="button"
-          :disabled="Boolean(appStore.switchingId)"
-          title="自动挑选状态正常且可用配额最高的备用账号并一键切换"
-          class="min-h-8 inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
-          style="border-color: var(--accent-border); background-color: var(--accent-soft); color: var(--accent)"
-          @click="appStore.smartSwitchAccount"
-        >
-          <Sparkles class="w-3.5 h-3.5" />
-          <span>智能切号</span>
         </button>
 
         <!-- 添加账号主按钮 -->

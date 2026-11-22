@@ -40,6 +40,19 @@
 
   --scrollbar-thumb: #94a3b8;
   --scrollbar-track: transparent;
+
+  /* 订阅套餐徽章语义令牌（参考 cockpit-tools 视觉规范） */
+  --plan-ultra-bg: linear-gradient(135deg, #f97316, #f59e0b);
+  --plan-ultra-color: #3f1d00;
+  --plan-ultra-border: rgba(249, 115, 22, 0.42);
+
+  --plan-pro-bg: linear-gradient(135deg, #1d4ed8, #0ea5a5);
+  --plan-pro-color: #ffffff;
+  --plan-pro-border: rgba(255, 255, 255, 0.25);
+
+  --plan-free-bg: rgba(148, 163, 184, 0.2);
+  --plan-free-color: var(--text-secondary);
+  --plan-free-border: rgba(148, 163, 184, 0.35);
 }
 
 :root[data-theme="dark"] {
@@ -281,11 +294,47 @@ body,
     display: flex;
   }
 
+  /* ─── 统一订阅套餐徽章（参考 cockpit-tools 的 ULTRA 琥珀金 / PRO 蓝青渐变 / FREE 雾灰胶囊） ─── */
+  .tier-badge {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.1875rem 0.4375rem;
+    border-radius: 9999px;
+    border: 1px solid transparent;
+    font-size: 0.625rem;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: clip;
+  }
+
+  .tier-badge--ultra {
+    background: var(--plan-ultra-bg);
+    color: var(--plan-ultra-color);
+    border-color: var(--plan-ultra-border);
+  }
+
+  .tier-badge--pro {
+    background: var(--plan-pro-bg);
+    color: var(--plan-pro-color);
+    border-color: var(--plan-pro-border);
+  }
+
+  .tier-badge--free {
+    background: var(--plan-free-bg);
+    color: var(--plan-free-color);
+    border-color: var(--plan-free-border);
+  }
+
   /* ─── 账号卡片网格与精密子网格卡片（基于 subgrid 对齐同行区域 + 容器查询自适应宽度） ─── */
   .account-card-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
-    gap: 0.75rem;
+    grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
+    gap: 0.875rem;
   }
 
   .account-card {
@@ -295,7 +344,7 @@ body,
     /* 同级回退：若运行环境不支持 subgrid 则自动回退至三段独立行轨 */
     grid-template-rows: auto 1fr auto;
     grid-template-rows: subgrid;
-    row-gap: 0.5rem;
+    row-gap: 0.625rem;
     overflow: clip;
     background: var(--bg-surface);
     border: 1px solid var(--border-subtle);

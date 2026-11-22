@@ -34,6 +34,7 @@ import {
   formatResetCountdown,
   getAccountValidationUrl,
   getQuotaTone,
+  getTierBadgeClass,
   getTierLabel,
   isAccountAbnormal,
   isAccountValidationRequired,
@@ -389,8 +390,8 @@ async function openValidationUrl(url: string) {
         <div class="mt-1.5 flex items-center flex-wrap gap-1.5">
           <span
             v-if="tier !== 'UNKNOWN'"
-            class="px-1.5 py-0.5 rounded text-[10.5px] font-semibold"
-            style="background-color: var(--accent-soft); color: var(--accent)"
+            class="tier-badge"
+            :class="getTierBadgeClass(tier)"
           >
             {{ tier }}
           </span>
