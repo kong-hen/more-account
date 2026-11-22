@@ -76,7 +76,7 @@ async function handleClear() {
       style="border-color: var(--border-subtle); background-color: var(--bg-app)"
     >
       <div class="wails-no-drag flex items-center gap-2.5 min-w-0">
-        <h1 class="text-base font-semibold tracking-tight whitespace-nowrap" style="color: var(--text-primary)">
+        <h1 class="text-[1.0625rem] font-semibold tracking-tight whitespace-nowrap" style="color: var(--text-primary)">
           切号历史
         </h1>
         <span

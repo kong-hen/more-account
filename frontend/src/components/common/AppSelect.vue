@@ -46,7 +46,7 @@ function onChange(e: Event) {
     class="app-select-wrap relative items-center rounded-lg"
     :class="[
       block ? 'flex w-full' : 'inline-flex',
-      size === 'sm' ? 'h-7' : 'h-8',
+      size === 'sm' ? 'min-h-7' : 'min-h-8',
       disabled ? 'opacity-50 pointer-events-none' : '',
     ]"
   >
@@ -55,7 +55,7 @@ function onChange(e: Event) {
       :aria-label="ariaLabel"
       :value="modelValue"
       :disabled="disabled"
-      class="app-select-native w-full h-full pl-2.5 pr-7 text-xs font-medium cursor-pointer truncate"
+      class="app-select-native w-full py-1.5 pl-2.5 pr-7 text-xs font-medium cursor-pointer truncate"
       style="color: var(--text-primary)"
       @change="onChange"
     >

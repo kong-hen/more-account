@@ -141,7 +141,7 @@ async function copyHistoryUrl(itemId: string, url: string) {
       style="border-color: var(--border-subtle); background-color: var(--bg-app)"
     >
       <div class="wails-no-drag flex items-center gap-2.5 min-w-0">
-        <h1 class="text-base font-semibold tracking-tight whitespace-nowrap shrink-0" style="color: var(--text-primary)">
+        <h1 class="text-[1.0625rem] font-semibold tracking-tight whitespace-nowrap shrink-0" style="color: var(--text-primary)">
           定时唤醒
         </h1>
 

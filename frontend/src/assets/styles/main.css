@@ -106,6 +106,7 @@ body,
   background-color: var(--bg-app);
   color: var(--text-primary);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -147,6 +148,11 @@ body,
 .custom-scroll {
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  overscroll-behavior: contain;
+}
+
+.scroll-gutter-stable {
+  scrollbar-gutter: stable;
 }
 
 @supports not (scrollbar-color: auto) {
@@ -273,6 +279,122 @@ body,
 
   .toast-popover-host[popover]:is(:popover-open, .\:popover-open) {
     display: flex;
+  }
+
+  /* ─── 账号卡片网格与精密子网格卡片（基于 subgrid 对齐同行区域 + 容器查询自适应宽度） ─── */
+  .account-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+    gap: 0.75rem;
+  }
+
+  .account-card {
+    position: relative;
+    grid-row: span 3;
+    display: grid;
+    /* 同级回退：若运行环境不支持 subgrid 则自动回退至三段独立行轨 */
+    grid-template-rows: auto 1fr auto;
+    grid-template-rows: subgrid;
+    row-gap: 0.5rem;
+    overflow: clip;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-card);
+    transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease, opacity 150ms ease;
+  }
+
+  /* 将尺寸容器放在配额主体层而非 subgrid 卡片本身，避免 containment 禁用 subgrid */
+  .account-card__body {
+    container: account-card-body / inline-size;
+  }
+
+  .account-card:hover {
+    border-color: var(--border-strong);
+    box-shadow: 0 4px 12px -4px rgba(15, 23, 42, 0.08);
+  }
+
+  :root[data-theme="dark"] .account-card:hover {
+    box-shadow: 0 6px 16px -4px rgba(0, 0, 0, 0.36);
+  }
+
+  .account-card--current {
+    background: linear-gradient(180deg, var(--success-soft) 0%, var(--bg-surface) 28%);
+    border-color: var(--success);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--success) 35%, transparent), 0 4px 12px -4px rgba(16, 185, 129, 0.16);
+  }
+
+  .account-card--current:hover {
+    border-color: var(--success);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--success) 55%, transparent), 0 6px 16px -4px rgba(16, 185, 129, 0.22);
+  }
+
+  .account-card--active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), var(--shadow-card);
+  }
+
+  .account-card--active:hover {
+    border-color: var(--accent);
+  }
+
+  .account-card--dragover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent), var(--shadow-elevated);
+  }
+
+  /* 整卡点击热区通过标题原生按钮 ::after 拉伸实现，独立交互控件自动提升层级不互相遮挡 */
+  .account-card .account-card__primary::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+  }
+
+  .account-card .account-card__primary:focus-visible {
+    outline: none;
+  }
+
+  .account-card :is(a, button:not(.account-card__primary), input, .account-card__interactive) {
+    position: relative;
+    z-index: 1;
+  }
+
+  :root:not([data-focus-source="pointer"]) .account-card:has(.account-card__primary:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* 卡片底部切号按钮：默认柔和克制、悬停高亮实心，避免满屏强饱和蓝块喧宾夺主 */
+  .account-card__switch-btn {
+    background-color: var(--accent-soft);
+    color: var(--accent);
+    border-color: var(--accent-border);
+    transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+  }
+
+  .account-card__switch-btn:hover:not(:disabled) {
+    background-color: var(--accent);
+    color: #ffffff;
+    border-color: var(--accent);
+  }
+
+  .account-card__switch-btn--current {
+    background-color: var(--success-soft);
+    color: var(--success-text);
+    border-color: color-mix(in srgb, var(--success) 42%, transparent);
+    transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+  }
+
+  .account-card__switch-btn--current:hover:not(:disabled) {
+    background-color: var(--success);
+    color: #ffffff;
+    border-color: var(--success);
+  }
+
+  /* 容器查询：当单卡配额区可用宽度收窄至 192px 以下时自动隐藏次要倒计时，防止挤压重叠 */
+  @container account-card-body (inline-size < 192px) {
+    .account-card__quota-reset {
+      display: none;
+    }
   }
 }
 

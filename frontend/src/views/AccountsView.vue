@@ -194,7 +194,7 @@ const refreshButtonTooltip = computed(() => {
       style="border-color: var(--border-subtle); background-color: var(--bg-app)"
     >
       <div class="wails-no-drag flex items-center gap-2 min-w-0 shrink">
-        <h1 class="text-base font-semibold tracking-tight truncate" style="color: var(--text-primary)">
+        <h1 class="text-[1.0625rem] font-semibold tracking-tight truncate" style="color: var(--text-primary)">
           {{ currentGroupTitle }}
         </h1>
         <span
@@ -207,7 +207,7 @@ const refreshButtonTooltip = computed(() => {
 
       <div class="wails-no-drag flex-1 min-w-0 flex items-center justify-end gap-1.5">
         <!-- 弹性搜索框：宽屏展开至 208px，窄屏平滑收缩以保证整条顶栏不换行移位 -->
-        <div class="relative flex-1 min-w-[120px] max-w-[208px]">
+        <div class="relative flex-1 min-w-[104px] max-w-[208px]">
           <Search
             class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
             style="color: var(--text-muted)"
@@ -216,7 +216,7 @@ const refreshButtonTooltip = computed(() => {
             v-model="appStore.searchQuery"
             type="search"
             placeholder="搜索邮箱、备注或分组..."
-            class="w-full h-8 pl-8 pr-2.5 text-xs rounded-lg border"
+            class="w-full min-h-8 py-1.5 pl-8 pr-2.5 text-xs rounded-lg border"
             style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
           />
         </div>
@@ -225,7 +225,7 @@ const refreshButtonTooltip = computed(() => {
         <div ref="filterWrapRef" class="relative shrink-0">
           <button
             type="button"
-            class="h-8 inline-flex items-center gap-1.5 px-2.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+            class="min-h-8 inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
             :style="
               appStore.activeFilterCount > 0
                 ? { borderColor: 'var(--accent)', backgroundColor: 'var(--accent-soft)', color: 'var(--accent)' }
@@ -237,7 +237,7 @@ const refreshButtonTooltip = computed(() => {
             <span>筛选</span>
             <span
               v-if="appStore.activeFilterCount > 0"
-              class="px-1.5 py-0.5 rounded-full text-[10.5px] font-semibold text-white tabular-nums"
+              class="px-1.5 py-0.5 rounded-full text-[0.65625rem] leading-none font-semibold text-white tabular-nums"
               style="background-color: var(--accent)"
             >
               {{ appStore.activeFilterCount }}
@@ -353,13 +353,13 @@ const refreshButtonTooltip = computed(() => {
           aria-label="排序方式"
           :model-value="appStore.sortBy"
           :options="sortOptions"
-          class="w-[114px] shrink-0"
+          class="w-[112px] shrink-0"
           @update:model-value="setSort"
         />
 
         <!-- 视图切换：卡片 / 表格 -->
         <div
-          class="h-8 inline-flex items-center p-0.5 rounded-lg border shrink-0"
+          class="min-h-8 inline-flex items-center p-0.5 rounded-lg border shrink-0"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface)"
         >
           <button
@@ -397,7 +397,7 @@ const refreshButtonTooltip = computed(() => {
           type="button"
           :disabled="appStore.refreshingAll || appStore.accounts.length === 0"
           :title="refreshButtonTooltip"
-          class="h-8 inline-flex items-center gap-1.5 px-2.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+          class="min-h-8 inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
           style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-primary)"
           @click="appStore.refreshAllAccounts"
         >
@@ -417,7 +417,7 @@ const refreshButtonTooltip = computed(() => {
           type="button"
           :disabled="Boolean(appStore.switchingId)"
           title="自动挑选状态正常且可用配额最高的备用账号并一键切换"
-          class="h-8 inline-flex items-center gap-1.5 px-2.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+          class="min-h-8 inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
           style="border-color: var(--accent-border); background-color: var(--accent-soft); color: var(--accent)"
           @click="appStore.smartSwitchAccount"
         >
@@ -428,7 +428,7 @@ const refreshButtonTooltip = computed(() => {
         <!-- 添加账号主按钮 -->
         <button
           type="button"
-          class="h-8 inline-flex items-center gap-1.5 px-3 text-xs font-medium rounded-lg text-white whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+          class="min-h-8 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-white whitespace-nowrap shrink-0 cursor-pointer transition-colors"
           style="background-color: var(--accent)"
           @click="emit('open-add')"
         >
@@ -579,7 +579,7 @@ const refreshButtonTooltip = computed(() => {
     </div>
 
     <!-- 主内容滚动区 -->
-    <div class="flex-1 min-h-0 overflow-y-auto custom-scroll p-5">
+    <div class="flex-1 min-h-0 overflow-y-auto custom-scroll scroll-gutter-stable p-4">
       <!-- 空状态 -->
       <div
         v-if="appStore.filteredAccounts.length === 0"
@@ -628,10 +628,10 @@ const refreshButtonTooltip = computed(() => {
         </div>
       </div>
 
-      <!-- 卡片网格视图：基于容器自然宽度的自适应网格，不受悬浮详情抽屉影响 -->
+      <!-- 卡片网格视图：基于容器自然宽度的精密自适应网格（4 列常规 / 3 列窄窗），并通过 subgrid 对齐同行卡片区域 -->
       <div
         v-else-if="appStore.viewMode === 'cards'"
-        class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]"
+        class="account-card-grid"
       >
         <AccountCard
           v-for="acc in appStore.filteredAccounts"
