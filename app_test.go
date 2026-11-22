@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -420,5 +421,60 @@ func TestCheckForUpdatesAndRepoValidation(t *testing.T) {
 	}
 	if !checkRes.HasUpdate || checkRes.LatestVersion != "2.0.0" || checkRes.Repo != "kong-hen/more-account" {
 		t.Fatalf("CheckForUpdates 结果不符合预期: %+v", checkRes)
+	}
+}
+
+func TestAppCloseBehaviorDecisionAndPlatformBootstrap(t *testing.T) {
+	t.Setenv("MORE_ACCOUNT_DATA_DIR", t.TempDir())
+	app := NewApp()
+
+	boot := app.GetBootstrapState()
+	if boot.Platform != runtime.GOOS {
+		t.Fatalf("期望 BootstrapState.Platform=%q，实际 %q", runtime.GOOS, boot.Platform)
+	}
+	if boot.Settings.CloseBehavior != model.CloseBehaviorBackground {
+		t.Fatalf("期望默认 CloseBehavior=%q，实际 %q", model.CloseBehaviorBackground, boot.Settings.CloseBehavior)
+	}
+	if boot.Settings.MacStatusBarMode != model.MacStatusBarIconQuota {
+		t.Fatalf("期望默认 MacStatusBarMode=%q，实际 %q", model.MacStatusBarIconQuota, boot.Settings.MacStatusBarMode)
+	}
+
+	cases := []struct {
+		name          string
+		goos          string
+		closeBehavior string
+		quitting      bool
+		wantPrevent   bool
+	}{
+		{name: "Windows默认后台拦截", goos: "windows", closeBehavior: model.CloseBehaviorBackground, quitting: false, wantPrevent: true},
+		{name: "Windows直接退出放行", goos: "windows", closeBehavior: model.CloseBehaviorQuit, quitting: false, wantPrevent: false},
+		{name: "Windows主动退出放行", goos: "windows", closeBehavior: model.CloseBehaviorBackground, quitting: true, wantPrevent: false},
+		{name: "macOS走OnBeforeClose始终放行真正退出", goos: "darwin", closeBehavior: model.CloseBehaviorBackground, quitting: false, wantPrevent: false},
+		{name: "macOS直接退出放行", goos: "darwin", closeBehavior: model.CloseBehaviorQuit, quitting: false, wantPrevent: false},
+	}
+	for _, tc := range cases {
+		if got := shouldPreventCloseOnPlatform(tc.goos, tc.closeBehavior, tc.quitting); got != tc.wantPrevent {
+			t.Fatalf("%s: 期望 prevent=%v，实际 %v", tc.name, tc.wantPrevent, got)
+		}
+	}
+
+	// 验证状态栏快照可从 App 状态即时生成并响应设置切换
+	snapDefault := app.buildStatusBarSnapshot()
+	if !snapDefault.Visible {
+		t.Fatal("默认 icon_quota 模式下状态栏快照应可见")
+	}
+
+	_, err := app.SaveSettings(model.AppSettings{
+		Theme:            "light",
+		RuntimeTarget:    "desktop",
+		CloseBehavior:    model.CloseBehaviorQuit,
+		MacStatusBarMode: model.MacStatusBarOff,
+	})
+	if err != nil {
+		t.Fatalf("保存设置失败: %v", err)
+	}
+	snapOff := app.buildStatusBarSnapshot()
+	if snapOff.Visible {
+		t.Fatal("切换为 off 模式后状态栏快照应不可见")
 	}
 }

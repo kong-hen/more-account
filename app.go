@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -20,6 +22,7 @@ import (
 	"more-account/internal/netutil"
 	"more-account/internal/oauth"
 	"more-account/internal/quota"
+	"more-account/internal/statusbar"
 	"more-account/internal/storage"
 	"more-account/internal/switcher"
 	"more-account/internal/tokenusage"
@@ -39,6 +42,7 @@ type BootstrapState struct {
 	AppVersion        string                     `json:"appVersion"`
 	DefaultGitHubRepo string                     `json:"defaultGitHubRepo"`
 	HasBuiltInOAuth   bool                       `json:"hasBuiltInOAuth"`
+	Platform          string                     `json:"platform"`
 }
 
 // App 是 Wails 桌面应用的后端绑定总入口，仅负责参数协调与事件桥接。
@@ -47,6 +51,12 @@ type App struct {
 	ctx                context.Context
 	oauthGroupMu       sync.RWMutex
 	oauthTargetGroupID string
+	quitting           atomic.Bool
+	statusRefreshing   atomic.Bool
+	statusSwitching    atomic.Bool
+	statusErrMu        sync.RWMutex
+	statusLastError    string
+	statusBar          statusbar.Controller
 	store              *storage.Store
 	netTransport       *netutil.DynamicTransport
 	oauthClient        *oauth.Client
@@ -110,6 +120,7 @@ func NewApp() *App {
 		},
 		func(count int) {
 			app.emitEvent("quota:updated", map[string]any{"count": count})
+			app.syncStatusBar()
 		},
 	)
 
@@ -123,6 +134,7 @@ func NewApp() *App {
 			if res.Changed && res.Managed && app.autoRefresher != nil {
 				app.autoRefresher.TriggerCheck()
 			}
+			app.syncStatusBar()
 		},
 	)
 
@@ -131,15 +143,27 @@ func NewApp() *App {
 		if app.activeDetector != nil {
 			app.activeDetector.SyncAfterInternalSwitch(acc)
 		}
+		app.syncStatusBar()
 	})
 
 	app.wakeupService = wakeup.NewService(store, oauthClient, quotaSvc, func() {
 		app.emitEvent("wakeup:updated", nil)
 		app.emitEvent("quota:updated", nil)
+		app.syncStatusBar()
 	})
 	if netTr != nil {
 		app.wakeupService.SetTransport(netTr)
 	}
+
+	app.statusBar = statusbar.NewController(statusbar.Callbacks{
+		BuildSnapshot:    app.buildStatusBarSnapshot,
+		OnShowWindow:     app.ShowMainWindow,
+		OnSwitchAccount:  app.switchAccountFromStatusBar,
+		OnRefreshCurrent: app.refreshCurrentFromStatusBar,
+		OnRefreshAll:     app.refreshAllFromStatusBar,
+		OnTogglePrivacy:  app.togglePrivacyFromStatusBar,
+		OnQuit:           app.QuitApp,
+	})
 	return app
 }
 
@@ -148,17 +172,198 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.ctxMu.Unlock()
 
-	a.syncWindowBackground(a.store.GetSettings().Theme)
+	settings := a.store.GetSettings()
+	a.syncWindowBackground(settings.Theme)
+	if a.statusBar != nil {
+		a.statusBar.Start(settings.CloseBehavior != model.CloseBehaviorQuit)
+		a.syncStatusBar()
+	}
 	a.wakeupService.Start(ctx)
 	a.activeDetector.Start(ctx)
 	a.autoRefresher.Start(ctx)
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	if a.statusBar != nil {
+		a.statusBar.Stop()
+	}
 	a.oauthManager.Cancel()
 	a.activeDetector.Stop()
 	a.autoRefresher.Stop()
 	a.wakeupService.Stop()
+}
+
+// shouldPreventCloseOnPlatform 判定 Wails OnBeforeClose 回调是否应拦截退出并改为隐藏窗口。
+// macOS 的窗口红叉与 Cmd+W 由原生层精准处理，进入 OnBeforeClose 的均为明确退出意图（如 Cmd+Q / Dock 退出 / 状态栏退出），始终放行。
+func shouldPreventCloseOnPlatform(goos, closeBehavior string, quitting bool) bool {
+	if goos == "darwin" {
+		return false
+	}
+	if quitting {
+		return false
+	}
+	return closeBehavior != model.CloseBehaviorQuit
+}
+
+func (a *App) beforeClose(ctx context.Context) bool {
+	if shouldPreventCloseOnPlatform(runtime.GOOS, a.store.GetSettings().CloseBehavior, a.quitting.Load()) {
+		wailsRuntime.WindowHide(ctx)
+		return true
+	}
+	return false
+}
+
+// ShowMainWindow 恢复并前置显示主窗口，同时触发静默账号探测与到期配额刷新。
+func (a *App) ShowMainWindow() {
+	a.setStatusBarError("")
+	if ctx := a.getCtx(); ctx != nil {
+		wailsRuntime.WindowUnminimise(ctx)
+		wailsRuntime.WindowShow(ctx)
+		wailsRuntime.Show(ctx)
+	}
+	a.TriggerActiveDetect()
+	a.TriggerAutoRefreshIfDue()
+	a.syncStatusBar()
+}
+
+// HandleCloseWindowShortcut 响应 macOS Cmd+W 快捷键：按设置隐藏主窗口或直接退出程序。
+func (a *App) HandleCloseWindowShortcut() {
+	if a.store.GetSettings().CloseBehavior != model.CloseBehaviorQuit {
+		if ctx := a.getCtx(); ctx != nil {
+			wailsRuntime.WindowHide(ctx)
+		}
+		return
+	}
+	a.QuitApp()
+}
+
+// QuitApp 主动彻底退出应用程序（绕过后台常驻关闭拦截）。
+func (a *App) QuitApp() {
+	a.quitting.Store(true)
+	if ctx := a.getCtx(); ctx != nil {
+		wailsRuntime.Quit(ctx)
+	}
+}
+
+func (a *App) setStatusBarError(msg string) {
+	a.statusErrMu.Lock()
+	a.statusLastError = strings.TrimSpace(msg)
+	a.statusErrMu.Unlock()
+}
+
+func (a *App) getStatusBarError() string {
+	a.statusErrMu.RLock()
+	defer a.statusErrMu.RUnlock()
+	return a.statusLastError
+}
+
+func (a *App) buildStatusBarSnapshot() statusbar.Snapshot {
+	return statusbar.BuildSnapshot(statusbar.BuildInput{
+		Accounts:         a.store.ListAccounts(),
+		CurrentAccountID: a.store.GetCurrentAccountID(),
+		Settings:         a.store.GetSettings(),
+		Refreshing:       a.statusRefreshing.Load(),
+		Switching:        a.statusSwitching.Load(),
+		LastError:        a.getStatusBarError(),
+		Now:              time.Now(),
+	})
+}
+
+func (a *App) syncStatusBar() {
+	if a.statusBar == nil {
+		return
+	}
+	a.statusBar.Update(a.buildStatusBarSnapshot())
+}
+
+func (a *App) switchAccountFromStatusBar(accountID string) {
+	if !a.statusSwitching.CompareAndSwap(false, true) {
+		return
+	}
+	a.setStatusBarError("")
+	a.syncStatusBar()
+	defer func() {
+		a.statusSwitching.Store(false)
+		a.syncStatusBar()
+	}()
+
+	settings := a.store.GetSettings()
+	outcome, err := a.SwitchAccount(switcher.SwitchRequest{
+		AccountID:    accountID,
+		TargetClient: settings.RuntimeTarget,
+		Launch:       settings.LaunchOnSwitch,
+	})
+	if err != nil {
+		a.setStatusBarError(err.Error())
+		a.emitEvent("statusbar:error", map[string]any{"message": "状态栏切号失败：" + err.Error()})
+		return
+	}
+	targetEmail := ""
+	if outcome != nil {
+		targetEmail = outcome.Account.Email
+	}
+	a.emitEvent("account:switched", map[string]any{
+		"accountId": accountID,
+		"email":     targetEmail,
+	})
+	a.emitEvent("quota:updated", nil)
+}
+
+func (a *App) refreshCurrentFromStatusBar() {
+	curID := a.store.GetCurrentAccountID()
+	if curID == "" {
+		return
+	}
+	if !a.statusRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+	a.setStatusBarError("")
+	a.syncStatusBar()
+	defer func() {
+		a.statusRefreshing.Store(false)
+		a.syncStatusBar()
+	}()
+
+	if _, err := a.RefreshAccountQuota(curID); err != nil {
+		a.setStatusBarError(err.Error())
+		a.emitEvent("statusbar:error", map[string]any{"message": "刷新当前账号配额失败：" + err.Error()})
+		return
+	}
+	a.emitEvent("quota:updated", nil)
+}
+
+func (a *App) refreshAllFromStatusBar() {
+	if len(a.store.ListAccounts()) == 0 {
+		return
+	}
+	if !a.statusRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+	a.setStatusBarError("")
+	a.syncStatusBar()
+	defer func() {
+		a.statusRefreshing.Store(false)
+		a.syncStatusBar()
+	}()
+
+	if _, err := a.RefreshAllQuotas(); err != nil {
+		a.setStatusBarError(err.Error())
+		a.emitEvent("statusbar:error", map[string]any{"message": "刷新全部账号配额失败：" + err.Error()})
+		return
+	}
+	a.emitEvent("quota:updated", nil)
+}
+
+func (a *App) togglePrivacyFromStatusBar() {
+	settings := a.store.GetSettings()
+	settings.PrivacyMode = !settings.PrivacyMode
+	saved, err := a.SaveSettings(settings)
+	if err != nil {
+		a.setStatusBarError(err.Error())
+		a.syncStatusBar()
+		return
+	}
+	a.emitEvent("settings:updated", saved)
 }
 
 func (a *App) getCtx() context.Context {
@@ -203,6 +408,7 @@ func (a *App) GetBootstrapState() *BootstrapState {
 		AppVersion:        updater.AppVersion,
 		DefaultGitHubRepo: defaultRepo,
 		HasBuiltInOAuth:   oauth.HasBuiltInCredentials(),
+		Platform:          runtime.GOOS,
 	}
 }
 
@@ -236,6 +442,10 @@ func (a *App) SaveSettings(settings model.AppSettings) (model.AppSettings, error
 			_ = a.netTransport.SetProxy(saved.ProxyURL)
 		}
 		a.syncWindowBackground(saved.Theme)
+		if a.statusBar != nil {
+			a.statusBar.SetCloseToBackground(saved.CloseBehavior != model.CloseBehaviorQuit)
+		}
+		a.syncStatusBar()
 		if a.activeDetector != nil {
 			a.activeDetector.TriggerCheck()
 		}
@@ -268,6 +478,9 @@ func (a *App) DetectActiveAccount() switcher.ActiveDetectionResult {
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 15*time.Second)
 	defer cancel()
 	res := a.activeDetector.DetectOnceSilent(ctx)
+	if res.Changed {
+		a.syncStatusBar()
+	}
 	if res.Changed && res.Managed && a.autoRefresher != nil {
 		a.autoRefresher.TriggerCheck()
 	}
@@ -357,6 +570,7 @@ func (a *App) ImportRefreshTokens(rawInput, groupID string) (*importer.BatchImpo
 	defer cancel()
 	res, err := a.importerService.ImportRefreshTokens(ctx, rawInput, groupID)
 	if err == nil {
+		a.syncStatusBar()
 		if a.activeDetector != nil {
 			a.activeDetector.TriggerCheck()
 		}
@@ -373,6 +587,7 @@ func (a *App) ImportFromLocal(groupID string) (model.Account, error) {
 	defer cancel()
 	acc, err := a.importerService.ImportFromLocal(ctx, groupID)
 	if err == nil {
+		a.syncStatusBar()
 		if a.activeDetector != nil {
 			a.activeDetector.SyncAfterInternalSwitch(acc)
 		}
@@ -427,18 +642,27 @@ func (a *App) UpdateAccountDetails(accountID string, update model.AccountDetails
 		}
 		update.TwoFactorSecret = normalized
 	}
-	return a.store.UpdateAccountDetails(accountID, update)
+	acc, err := a.store.UpdateAccountDetails(accountID, update)
+	if err == nil {
+		a.syncStatusBar()
+	}
+	return acc, err
 }
 
 // UpdateAccountGroup 单个或批量修改账号所属分组。
 func (a *App) UpdateAccountGroup(accountIDs []string, groupID string) error {
-	return a.store.UpdateAccountGroup(accountIDs, groupID)
+	err := a.store.UpdateAccountGroup(accountIDs, groupID)
+	if err == nil {
+		a.syncStatusBar()
+	}
+	return err
 }
 
 // DeleteAccounts 删除单个或多个账号（同时级联清理唤醒任务中的失效引用）。
 func (a *App) DeleteAccounts(accountIDs []string) error {
 	err := a.store.DeleteAccounts(accountIDs)
 	if err == nil {
+		a.syncStatusBar()
 		if a.activeDetector != nil {
 			a.activeDetector.TriggerCheck()
 		}
@@ -452,7 +676,11 @@ func (a *App) DeleteAccounts(accountIDs []string) error {
 
 // ReorderAccounts 按指定顺序重排账号列表。
 func (a *App) ReorderAccounts(orderedIDs []string) error {
-	return a.store.ReorderAccounts(orderedIDs)
+	err := a.store.ReorderAccounts(orderedIDs)
+	if err == nil {
+		a.syncStatusBar()
+	}
+	return err
 }
 
 // GenerateTOTP 根据密钥实时计算 2FA 验证码与剩余倒计时秒数。
@@ -543,6 +771,7 @@ func (a *App) beginOAuthSession(groupID string, openBrowser bool) (oauth.LoginSe
 		if a.autoRefresher != nil {
 			a.autoRefresher.TriggerCheck()
 		}
+		a.syncStatusBar()
 		a.emitEvent("oauth:completed", map[string]any{"account": acc})
 	}(sess.State, sess.RedirectURI, sess.CodeVerifier)
 
@@ -575,19 +804,23 @@ func (a *App) CancelOAuthLogin() {
 func (a *App) RefreshAccountQuota(accountID string) (model.Account, error) {
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 40*time.Second)
 	defer cancel()
-	return a.quotaService.RefreshAccount(ctx, accountID)
+	acc, err := a.quotaService.RefreshAccount(ctx, accountID)
+	a.syncStatusBar()
+	return acc, err
 }
 
 // RefreshAllQuotas 并发刷新全部账号配额，并实时发送 quota:progress 进度事件。
 func (a *App) RefreshAllQuotas() (*model.RefreshStats, error) {
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 3*time.Minute)
 	defer cancel()
-	return a.quotaService.RefreshAll(ctx, 4, func(done, total int) {
+	stats, err := a.quotaService.RefreshAll(ctx, 4, func(done, total int) {
 		a.emitEvent("quota:progress", map[string]any{
 			"done":  done,
 			"total": total,
 		})
 	})
+	a.syncStatusBar()
+	return stats, err
 }
 
 // ─── 账号切换与切号历史 ───────────────────────────────────────
@@ -600,6 +833,7 @@ func (a *App) SwitchAccount(req switcher.SwitchRequest) (*switcher.SwitchOutcome
 	if err == nil && res != nil && a.autoRefresher != nil {
 		a.autoRefresher.TriggerCheck()
 	}
+	a.syncStatusBar()
 	return res, err
 }
 
