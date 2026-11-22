@@ -398,10 +398,125 @@ func TestStoreSettingsCloseBehaviorAndStatusBarMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("保存非法枚举测试失败: %v", err)
 	}
-	if normalized.CloseBehavior != model.CloseBehaviorBackground {
-		t.Fatalf("非法 closeBehavior 应回退为 %q，实际 %q", model.CloseBehaviorBackground, normalized.CloseBehavior)
+	if normalized.CloseBehavior != model.DefaultCloseBehavior() {
+		t.Fatalf("非法 closeBehavior 应回退为当前平台默认值 %q，实际 %q", model.DefaultCloseBehavior(), normalized.CloseBehavior)
 	}
 	if normalized.MacStatusBarMode != model.MacStatusBarIconQuota {
 		t.Fatalf("非法 macStatusBarMode 应回退为 %q，实际 %q", model.MacStatusBarIconQuota, normalized.MacStatusBarMode)
+	}
+}
+
+func TestCrossPlatformDefaultCloseBehaviorAndExplicitPreservation(t *testing.T) {
+	if got := model.DefaultCloseBehaviorForOS("darwin"); got != model.CloseBehaviorBackground {
+		t.Fatalf("macOS 默认关闭行为应为 background，实际 %q", got)
+	}
+	if got := model.DefaultCloseBehaviorForOS("windows"); got != model.CloseBehaviorQuit {
+		t.Fatalf("Windows 默认关闭行为应为 quit，实际 %q", got)
+	}
+	if got := model.DefaultCloseBehaviorForOS("linux"); got != model.CloseBehaviorQuit {
+		t.Fatalf("Linux 默认关闭行为应为 quit，实际 %q", got)
+	}
+
+	// Windows/Linux 缺省与非法值应归为 quit，但用户老配置显式写明的 background 必须保留
+	winDefault := normalizeSettingsForOS(model.AppSettings{CloseBehavior: ""}, "windows")
+	if winDefault.CloseBehavior != model.CloseBehaviorQuit {
+		t.Fatalf("Windows 缺省 closeBehavior 应归一化为 quit，实际 %q", winDefault.CloseBehavior)
+	}
+	winInvalid := normalizeSettingsForOS(model.AppSettings{CloseBehavior: "unknown"}, "windows")
+	if winInvalid.CloseBehavior != model.CloseBehaviorQuit {
+		t.Fatalf("Windows 非法 closeBehavior 应归一化为 quit，实际 %q", winInvalid.CloseBehavior)
+	}
+	winExplicit := normalizeSettingsForOS(model.AppSettings{CloseBehavior: model.CloseBehaviorBackground}, "windows")
+	if winExplicit.CloseBehavior != model.CloseBehaviorBackground {
+		t.Fatalf("Windows 显式配置的 background 应当保留，实际 %q", winExplicit.CloseBehavior)
+	}
+
+	// macOS 缺省归为 background，显式配置的 quit 必须保留
+	macDefault := normalizeSettingsForOS(model.AppSettings{CloseBehavior: ""}, "darwin")
+	if macDefault.CloseBehavior != model.CloseBehaviorBackground {
+		t.Fatalf("macOS 缺省 closeBehavior 应归一化为 background，实际 %q", macDefault.CloseBehavior)
+	}
+	macExplicit := normalizeSettingsForOS(model.AppSettings{CloseBehavior: model.CloseBehaviorQuit}, "darwin")
+	if macExplicit.CloseBehavior != model.CloseBehaviorQuit {
+		t.Fatalf("macOS 显式配置的 quit 应当保留，实际 %q", macExplicit.CloseBehavior)
+	}
+}
+
+func TestStoreCorruptJSONRecoveryAndClearHistoryWritesEmptyArray(t *testing.T) {
+	dir := t.TempDir()
+	// 模拟核心 accounts.json 与非核心 settings.json / switch_history.json 同时损坏
+	if err := os.WriteFile(filepath.Join(dir, "accounts.json"), []byte("{corrupt-accounts"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"theme":"dark", invalid`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "switch_history.json"), []byte("[broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("损坏 JSON 文件不应阻塞 Store 启动，实际返回错误: %v", err)
+	}
+	warnings := store.StartupWarnings()
+	if len(warnings) != 3 {
+		t.Fatalf("期望记录 3 条损坏恢复启动告警，实际 %d: %v", len(warnings), warnings)
+	}
+	hasCriticalAccountWarn := false
+	for _, w := range warnings {
+		if strings.Contains(w, "accounts.json") && strings.Contains(w, "corrupt-") {
+			hasCriticalAccountWarn = true
+		}
+	}
+	if !hasCriticalAccountWarn {
+		t.Fatalf("启动告警应包含核心 accounts.json 备份恢复提示，实际: %v", warnings)
+	}
+	if store.GetSettings().Theme != "light" {
+		t.Fatalf("损坏的 settings.json 应完整回退默认浅色主题，实际 %q", store.GetSettings().Theme)
+	}
+
+	// 验证原损坏文件均已隔离备份为 *.corrupt-*
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptBackups := 0
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".corrupt-") {
+			corruptBackups++
+		}
+	}
+	if corruptBackups != 3 {
+		t.Fatalf("期望生成 3 个 .corrupt- 备份文件，实际 %d", corruptBackups)
+	}
+
+	// 验证 ClearSwitchHistory 与 ClearWakeupHistory 落盘为 [] 而非 null
+	if err := store.AppendSwitchHistory(model.SwitchHistoryItem{TargetEmail: "a@example.com", Success: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearSwitchHistory(); err != nil {
+		t.Fatal(err)
+	}
+	swRaw, err := os.ReadFile(filepath.Join(dir, "switch_history.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(swRaw)) != "[]" {
+		t.Fatalf("ClearSwitchHistory 应落盘空数组 []，实际 %q", strings.TrimSpace(string(swRaw)))
+	}
+
+	if err := store.AppendWakeupHistory(model.WakeupHistoryItem{AccountEmail: "a@example.com", Success: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearWakeupHistory(); err != nil {
+		t.Fatal(err)
+	}
+	wkRaw, err := os.ReadFile(filepath.Join(dir, "wakeup_history.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(wkRaw)) != "[]" {
+		t.Fatalf("ClearWakeupHistory 应落盘空数组 []，实际 %q", strings.TrimSpace(string(wkRaw)))
 	}
 }

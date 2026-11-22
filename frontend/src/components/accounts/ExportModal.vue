@@ -23,6 +23,8 @@ const revealInPrivacy = ref(false)
 const loading = ref(false)
 const copied = ref(false)
 const savingFile = ref(false)
+let previewSeq = 0
+let skipNextOptionWatch = false
 
 const previewText = computed(() => {
   if (!jsonText.value) return ''
@@ -60,13 +62,20 @@ const previewText = computed(() => {
 })
 
 async function loadPreview() {
+  const seq = ++previewSeq
   loading.value = true
   try {
-    jsonText.value = await api.exportAccounts(props.accountIds, includeSecrets.value)
+    const result = await api.exportAccounts(props.accountIds, includeSecrets.value)
+    // 丢弃乱序返回或弹窗已关闭后的过期响应，避免展示或复制与当前勾选项不符的内容
+    if (seq !== previewSeq || !props.open) return
+    jsonText.value = result
   } catch (err) {
+    if (seq !== previewSeq || !props.open) return
     appStore.notify(`生成导出数据失败：${extractErrorMessage(err)}`, 'error')
   } finally {
-    loading.value = false
+    if (seq === previewSeq) {
+      loading.value = false
+    }
   }
 }
 
@@ -74,12 +83,18 @@ watch(
   () => props.open,
   (isOpen) => {
     if (isOpen) {
-      // 每次打开导出弹窗均重置为默认不包含密码与 2FA 密钥，并在隐私模式下默认隐藏预览明文
-      includeSecrets.value = false
+      // 每次打开导出弹窗均重置为默认不包含密码与 2FA 密钥，并在隐私模式下默认隐藏预览明文；
+      // 若之前曾勾选 includeSecrets，抑制本次重置引发的二次重复加载。
+      if (includeSecrets.value) {
+        skipNextOptionWatch = true
+        includeSecrets.value = false
+      }
       revealInPrivacy.value = false
       copied.value = false
       void loadPreview()
     } else {
+      previewSeq++
+      loading.value = false
       jsonText.value = ''
     }
   },
@@ -88,6 +103,10 @@ watch(
 watch(
   () => [includeSecrets.value, props.accountIds.join(',')] as const,
   () => {
+    if (skipNextOptionWatch) {
+      skipNextOptionWatch = false
+      return
+    }
     if (props.open) {
       void loadPreview()
     }
@@ -196,7 +215,7 @@ async function handleSaveFile() {
       </button>
       <button
         type="button"
-        :disabled="savingFile || loading"
+        :disabled="savingFile || loading || !jsonText"
         class="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-lg text-white cursor-pointer disabled:opacity-60"
         style="background-color: var(--accent)"
         @click="handleSaveFile"

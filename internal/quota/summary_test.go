@@ -148,3 +148,56 @@ func TestIsAccountAbnormalCountdownAndMaskEmail(t *testing.T) {
 		t.Fatalf("期望 no***，实际 %q", got)
 	}
 }
+
+func TestExportedClassifiersAndFreeMinQuotaAlignment(t *testing.T) {
+	// 1. 验证导出的跨模块配额桶与模型家族归类函数
+	bucketCases := map[string]string{
+		"3p-5h":                    "claude-gpt",
+		"3p-weekly":                "claude-gpt",
+		"gemini-5h":                "gemini-flash",
+		"gemini-weekly":            "gemini-flash",
+		"gemini-argon-wtu-weekly":  "gemini-argon",
+		"gemini-carbon-wtu-weekly": "gemini-carbon",
+		"unknown-bucket":           "",
+	}
+	for bid, want := range bucketCases {
+		if got := ClassifySummaryBucket(bid); got != want {
+			t.Fatalf("ClassifySummaryBucket(%q) = %q，期望 %q", bid, got, want)
+		}
+	}
+	if got := ClassifyModelCategory("MODEL_PLACEHOLDER_M525", "Gemini 4 Hydrogen (Low)"); got != "gemini-flash" {
+		t.Fatalf("占位模型 Hydrogen 应归入 gemini-flash，实际 %q", got)
+	}
+	if got := ClassifyModelCategory("claude-sonnet-4-6-thinking", "Claude Sonnet 4.6"); got != "claude-gpt" {
+		t.Fatalf("Claude 模型应归入 claude-gpt，实际 %q", got)
+	}
+
+	// 2. 验证 FREE 账号隐藏 5h 仅展示周额度（90%）时，MinQuotaPercentage 与展示分类保持一致（不被 models 中的 10% 拉低）
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	freeAcc := model.Account{
+		Email: "free-align@example.com",
+		Quota: &model.QuotaData{
+			SubscriptionTier: "FREE",
+			SummaryBuckets: []model.QuotaBucket{
+				{BucketID: "3p-5h", Percentage: 10, ResetTime: now.Add(2 * time.Hour).Format(time.RFC3339)},
+				{BucketID: "3p-weekly", Percentage: 90, ResetTime: now.Add(5 * 24 * time.Hour).Format(time.RFC3339)},
+			},
+			Models: []model.ModelQuota{
+				{Name: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6", Percentage: 10},
+			},
+		},
+	}
+	if got := MinQuotaPercentage(freeAcc, now); got != 90 {
+		t.Fatalf("FREE 账号已由周额度权威展示时，MinQuotaPercentage 应为 90，实际 %d", got)
+	}
+
+	// 3. 若存在未被任何展示分类覆盖的孤立未知模型，仍应参与最低值计算
+	freeAcc.Quota.Models = append(freeAcc.Quota.Models, model.ModelQuota{
+		Name:        "custom-orphan-model",
+		DisplayName: "Custom Orphan",
+		Percentage:  15,
+	})
+	if got := MinQuotaPercentage(freeAcc, now); got != 15 {
+		t.Fatalf("未归类的孤立模型（15%%）仍应参与最低值计算，实际 %d", got)
+	}
+}

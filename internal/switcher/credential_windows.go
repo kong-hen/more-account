@@ -5,6 +5,7 @@ package switcher
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"syscall"
 	"unicode/utf16"
@@ -68,6 +69,11 @@ func writeOSSystemCredential(payloadJSON string) error {
 	}
 
 	r1, _, callErr := procCredWrite.Call(uintptr(unsafe.Pointer(&cred)), 0)
+	// 显式保活传入 Win32 CredWriteW 的 Go 指针及缓冲区，避免 GC 在 syscall 期间回收或移动引用对象
+	runtime.KeepAlive(targetPtr)
+	runtime.KeepAlive(userPtr)
+	runtime.KeepAlive(blob)
+	runtime.KeepAlive(&cred)
 	if r1 == 0 {
 		return fmt.Errorf("写入 Windows 凭据管理器失败: %w", callErr)
 	}
@@ -87,6 +93,9 @@ func readOSSystemCredential() (string, error) {
 		0,
 		uintptr(unsafe.Pointer(&credPtr)),
 	)
+	// 显式保活输入目标名与输出指针地址，满足 Go unsafe.Pointer 规则
+	runtime.KeepAlive(targetPtr)
+	runtime.KeepAlive(&credPtr)
 	if r1 == 0 {
 		if errors.Is(callErr, winErrorNotFound) {
 			return "", nil
@@ -96,6 +105,7 @@ func readOSSystemCredential() (string, error) {
 	defer func() {
 		if credPtr != nil {
 			_, _, _ = procCredFree.Call(uintptr(unsafe.Pointer(credPtr)))
+			runtime.KeepAlive(credPtr)
 		}
 	}()
 

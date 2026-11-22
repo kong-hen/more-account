@@ -329,7 +329,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
                 </button>
                 <button
                   type="button"
-                  :disabled="appStore.switchingId === row.account.id"
+                  :disabled="Boolean(appStore.switchingId)"
                   class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                   :style="
                     appStore.currentAccountId === row.account.id
@@ -339,7 +339,7 @@ function categoryTooltip(cat: QuotaCategorySummary): string {
                   @click="appStore.switchToAccount(row.account.id)"
                 >
                   <ArrowRightLeft class="w-3 h-3 shrink-0" />
-                  <span>{{ appStore.currentAccountId === row.account.id ? '当前' : '切换' }}</span>
+                  <span>{{ appStore.switchingId === row.account.id ? '切换中...' : appStore.currentAccountId === row.account.id ? '当前' : '切换' }}</span>
                 </button>
               </div>
             </td>

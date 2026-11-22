@@ -189,5 +189,15 @@ func (s *Service) RefreshAll(ctx context.Context, concurrency int, onProgress fu
 	}
 
 	wg.Wait()
+
+	// 若上下文超时或被取消，把未开始处理的剩余账号显式计入失败并向上返回错误，避免前端误报「全部已更新」。
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		unprocessed := total - (stats.Success + stats.Failed)
+		if unprocessed > 0 {
+			stats.Failed += unprocessed
+			stats.Errors = append(stats.Errors, fmt.Sprintf("刷新超时或被取消，另有 %d 个账号未完成刷新: %v", unprocessed, ctxErr))
+		}
+		return stats, fmt.Errorf("批量刷新未完整完成（成功 %d，失败 %d，共 %d）: %w", stats.Success, stats.Failed, stats.Total, ctxErr)
+	}
 	return stats, nil
 }

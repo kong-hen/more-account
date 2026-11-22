@@ -60,6 +60,11 @@ const isOAuthReady = computed(() =>
 )
 
 async function handleManualCheckUpdate() {
+  const draftProxy = (form.value.proxyUrl ?? '').trim()
+  const savedProxy = (appStore.settings.proxyUrl ?? '').trim()
+  if (draftProxy !== savedProxy) {
+    appStore.notify('当前修改的网络代理尚未保存，本次检查更新将使用已保存的网络配置', 'info', 3600)
+  }
   const repoInput = (form.value.githubRepo ?? '').trim()
   await appStore.checkForUpdates(false, repoInput)
 }
@@ -108,6 +113,21 @@ function setInactiveAutoRefreshMinutes(val: string) {
 }
 
 const isMacOS = computed(() => appStore.platform === 'darwin')
+const isWindows = computed(() => appStore.platform === 'windows')
+
+const desktopPathPlaceholder = computed(() => {
+  if (appStore.clientInfo.desktopPath) return appStore.clientInfo.desktopPath
+  if (isMacOS.value) return '/Applications/Antigravity.app'
+  if (isWindows.value) return 'C:\\Users\\<用户>\\AppData\\Local\\Programs\\Antigravity\\Antigravity.exe'
+  return '/usr/bin/antigravity'
+})
+
+const idePathPlaceholder = computed(() => {
+  if (appStore.clientInfo.idePath) return appStore.clientInfo.idePath
+  if (isMacOS.value) return '/Applications/Antigravity IDE.app'
+  if (isWindows.value) return 'C:\\Users\\<用户>\\AppData\\Local\\Programs\\Antigravity IDE\\Antigravity IDE.exe'
+  return '/usr/bin/antigravity-ide'
+})
 
 const macStatusBarOptions: Array<{ value: MacStatusBarMode; label: string; desc: string }> = [
   {
@@ -127,11 +147,15 @@ const macStatusBarOptions: Array<{ value: MacStatusBarMode; label: string; desc:
   },
 ]
 
-const runtimeOptions: Array<{ value: RuntimeTarget; label: string; desc: string }> = [
+const runtimeOptions = computed<Array<{ value: RuntimeTarget; label: string; desc: string }>>(() => [
   {
     value: 'desktop',
     label: 'Antigravity 桌面版 (2.0)',
-    desc: '写入系统凭据库（Keychain）与 ~/.gemini 回退文件，支持自动重启。',
+    desc: isMacOS.value
+      ? '写入系统凭据库（Keychain）与 ~/.gemini 回退文件，支持自动重启。'
+      : isWindows.value
+        ? '写入 Windows 凭据管理器与 ~/.gemini 回退文件，支持自动重启。'
+        : '写入系统密钥环（secret-tool）与 ~/.gemini 回退文件，支持自动重启。',
   },
   {
     value: 'ide',
@@ -143,7 +167,7 @@ const runtimeOptions: Array<{ value: RuntimeTarget; label: string; desc: string 
     label: 'Antigravity CLI (agy)',
     desc: '同步写入系统凭据与 ~/.gemini/antigravity-cli 凭据，不重启桌面端。',
   },
-]
+])
 
 async function pickUsageDir() {
   try {
@@ -185,6 +209,14 @@ async function handleTestProxy() {
 }
 
 async function handleSave() {
+  const oauthClientId = (form.value.oauthClientId ?? '').trim()
+  const oauthClientSecret = (form.value.oauthClientSecret ?? '').trim()
+  // 校验自定义 Google OAuth Client ID 与 Secret 必须成对填写或同时留空，避免单边错配导致授权失败
+  if ((oauthClientId && !oauthClientSecret) || (!oauthClientId && oauthClientSecret)) {
+    appStore.notify('自定义 Google OAuth Client ID 与 Client Secret 必须同时填写或同时留空', 'warning', 4500)
+    return
+  }
+
   saving.value = true
   try {
     const prevUsageDir = (appStore.settings.tokenUsageDataDir ?? '').trim()
@@ -194,10 +226,14 @@ async function handleSave() {
         ? Math.round(parsedThreshold)
         : 20
 
+    const defaultCloseBehavior = isMacOS.value ? 'background' : 'quit'
     const payload: AppSettings = {
       ...form.value,
       lowQuotaThreshold: cleanThreshold,
-      closeBehavior: form.value.closeBehavior === 'quit' ? 'quit' : 'background',
+      closeBehavior:
+        form.value.closeBehavior === 'quit' || form.value.closeBehavior === 'background'
+          ? form.value.closeBehavior
+          : defaultCloseBehavior,
       macStatusBarMode:
         form.value.macStatusBarMode === 'icon_only' || form.value.macStatusBarMode === 'off'
           ? form.value.macStatusBarMode
@@ -208,8 +244,8 @@ async function handleSave() {
       proxyUrl: (form.value.proxyUrl ?? '').trim(),
       githubRepo: (form.value.githubRepo ?? '').trim(),
       autoCheckUpdate: Boolean(form.value.autoCheckUpdate),
-      oauthClientId: (form.value.oauthClientId ?? '').trim(),
-      oauthClientSecret: (form.value.oauthClientSecret ?? '').trim(),
+      oauthClientId,
+      oauthClientSecret,
     }
 
     await appStore.updateSettings(payload)
@@ -290,7 +326,7 @@ async function handleSave() {
             {{
               isMacOS
                 ? '点击关闭按钮或按 ⌘W 时仅隐藏页面，程序继续在后台运行；可通过顶部状态栏或 Dock 图标重新打开，按 ⌘Q 彻底退出'
-                : '点击关闭按钮时隐藏窗口并在后台继续运行（定时刷新与唤醒不受影响），再次打开桌面图标即可恢复窗口'
+                : '当前平台默认点击关闭按钮直接退出程序；若开启「隐藏到后台运行」，定时刷新与唤醒不受影响，再次打开应用图标即可恢复窗口'
             }}
           </div>
         </div>
@@ -313,7 +349,9 @@ async function handleSave() {
             />
             <div>
               <div class="text-xs font-semibold" style="color: var(--text-primary)">隐藏到后台运行</div>
-              <div class="text-[11px] mt-0.5" style="color: var(--text-muted)">关闭页面不退出（默认）</div>
+              <div class="text-[11px] mt-0.5" style="color: var(--text-muted)">
+                {{ isMacOS ? '关闭页面不退出（默认）' : '关闭窗口保留后台（再次打开图标恢复）' }}
+              </div>
             </div>
           </button>
 
@@ -334,7 +372,9 @@ async function handleSave() {
             />
             <div>
               <div class="text-xs font-semibold" style="color: var(--text-primary)">直接退出程序</div>
-              <div class="text-[11px] mt-0.5" style="color: var(--text-muted)">点击关闭即结束后台任务</div>
+              <div class="text-[11px] mt-0.5" style="color: var(--text-muted)">
+                {{ isMacOS ? '点击关闭即结束后台任务' : '点击关闭即退出程序（默认）' }}
+              </div>
             </div>
           </button>
         </div>
@@ -475,7 +515,7 @@ async function handleSave() {
               v-model.number="form.lowQuotaThreshold"
               type="number"
               min="1"
-              max="99"
+              max="100"
               class="w-20 px-2.5 py-1 text-xs rounded-lg border tabular-nums"
               style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
             />
@@ -616,7 +656,7 @@ async function handleSave() {
             id="desktop-path"
             v-model="form.desktopAppPath"
             type="text"
-            :placeholder="appStore.clientInfo.desktopPath || '/Applications/Antigravity.app'"
+            :placeholder="desktopPathPlaceholder"
             class="w-full px-3 py-1.5 text-xs rounded-lg border"
             style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
           />
@@ -630,7 +670,7 @@ async function handleSave() {
             id="ide-path"
             v-model="form.ideAppPath"
             type="text"
-            :placeholder="appStore.clientInfo.idePath || '/Applications/Antigravity IDE.app'"
+            :placeholder="idePathPlaceholder"
             class="w-full px-3 py-1.5 text-xs rounded-lg border"
             style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
           />
@@ -772,7 +812,8 @@ async function handleSave() {
       </button>
       <button
         type="button"
-        class="px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+        :disabled="saving"
+        class="px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
         style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
         @click="emit('close')"
       >

@@ -259,3 +259,94 @@ func TestActiveDetectorPreservesCurrentOnOAuthNetworkFailureAndSilentMode(t *tes
 		t.Fatalf("DetectOnceSilent 不应触发 onChange 回调，实际 notifyCount=%d", notifyCount)
 	}
 }
+
+func TestActiveDetectorTOCTOURaceBlockedAndRotatedRTSynced(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("初始化 store 失败: %v", err)
+	}
+	accA, err := store.UpsertAccount(model.Account{
+		Email:          "old@gmail.com",
+		Disabled:       true,
+		DisabledReason: "invalid_grant: old token revoked",
+		Token:          model.TokenData{RefreshToken: "rt-old-revoked"},
+		QuotaError:     &model.QuotaErrorInfo{Reason: "INVALID_GRANT", Message: "revoked"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accB, err := store.UpsertAccount(model.Account{
+		Email: "new@gmail.com",
+		Token: model.TokenData{RefreshToken: "rt-new-b"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetCurrentAccountID(accA.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 场景 1：第一段 TOCTOU 窗口——readLocal 耗时期间发生内部切号至 accB，滞后返回的旧凭据 accA 不得回退覆盖 store 或误发通知
+	notifyCount := 0
+	var detector *ActiveDetector
+	detector = NewActiveDetector(store, nil, nil, func(res ActiveDetectionResult) {
+		notifyCount++
+	})
+	detector.readLocal = func(target string) (*SystemCredential, string, error) {
+		_ = store.SetCurrentAccountID(accB.ID)
+		detector.SyncAfterInternalSwitch(accB)
+		return &SystemCredential{RefreshToken: "rt-old-revoked", Email: accA.Email}, "keychain", nil
+	}
+	res := detector.DetectOnce(context.Background())
+	if store.GetCurrentAccountID() != accB.ID {
+		t.Fatalf("readLocal 期间内部切号后，store.CurrentAccountID 必须保持 accB(%s)，实际 %q", accB.ID, store.GetCurrentAccountID())
+	}
+	if notifyCount != 0 || res.MatchedAccountID != accB.ID {
+		t.Fatalf("过时探测结果必须被丢弃且不得误报通知: notifyCount=%d res=%+v", notifyCount, res)
+	}
+
+	// 场景 2：第二段 TOCTOU 窗口——matchAccount 联网请求 UserInfo 期间发生内部切号，仍必须丢弃过时结果
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 模拟 OAuth 请求耗时期间内部切号至 accB
+		_ = store.SetCurrentAccountID(accB.ID)
+		detector.SyncAfterInternalSwitch(accB)
+		_ = json.NewEncoder(w).Encode(map[string]any{"email": accA.Email})
+	}))
+	defer srv.Close()
+
+	detector.oauthClient = &oauth.Client{
+		HTTPClient:  srv.Client(),
+		UserInfoURL: srv.URL + "/userinfo",
+	}
+	detector.readLocal = func(target string) (*SystemCredential, string, error) {
+		return &SystemCredential{AccessToken: "at-stale", RefreshToken: "rt-unknown-no-email"}, "keychain", nil
+	}
+	res2 := detector.DetectOnce(context.Background())
+	if store.GetCurrentAccountID() != accB.ID || notifyCount != 0 || res2.MatchedAccountID != accB.ID {
+		t.Fatalf("matchAccount 联网期间内部切号必须阻断过时写回与误报: current=%q notifyCount=%d res=%+v",
+			store.GetCurrentAccountID(), notifyCount, res2)
+	}
+
+	// 场景 3：无并发切号时，外部通过同邮箱重新登录并轮换了新 RT，应自动回写新 RT 并解除 invalid_grant 禁用态
+	detector.readLocal = func(target string) (*SystemCredential, string, error) {
+		return &SystemCredential{
+			AccessToken:  "at-fresh-from-ext",
+			RefreshToken: "rt-rotated-fresh",
+			Email:        "OLD@GMAIL.COM",
+		}, "keychain", nil
+	}
+	res3 := detector.DetectOnce(context.Background())
+	if !res3.Changed || !res3.Managed || res3.MatchedAccountID != accA.ID {
+		t.Fatalf("期望通过邮箱匹配 accA 并标记变更，实际 %+v", res3)
+	}
+	updatedA, ok := store.GetAccount(accA.ID)
+	if !ok {
+		t.Fatal("未找到 accA")
+	}
+	if updatedA.Token.RefreshToken != "rt-rotated-fresh" || updatedA.Token.AccessToken != "at-fresh-from-ext" {
+		t.Fatalf("外部重登产生的新令牌应回写到 store，实际 %+v", updatedA.Token)
+	}
+	if updatedA.Disabled || updatedA.QuotaError != nil {
+		t.Fatalf("回写有效新令牌后应自动解除 invalid_grant 禁用与令牌错误态，实际 disabled=%v err=%+v", updatedA.Disabled, updatedA.QuotaError)
+	}
+}

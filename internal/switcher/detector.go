@@ -54,6 +54,7 @@ type ActiveDetector struct {
 	detectMu sync.Mutex
 
 	stateMu      sync.Mutex
+	syncEpoch    uint64
 	lastStateKey string
 	lastResult   ActiveDetectionResult
 	emailCache   map[string]cachedResolvedEmail
@@ -122,7 +123,8 @@ func (d *ActiveDetector) LastResult() ActiveDetectionResult {
 	return d.lastResult
 }
 
-// SyncAfterInternalSwitch 在本程序内部完成切号或本机导入后同步基线状态，避免下一次轮询误报为“外部切号”。
+// SyncAfterInternalSwitch 在本程序内部完成切号或本机导入后同步基线状态并递增 syncEpoch，
+// 使此前已发起但滞后返回的后台探测结果自动失效，彻底消除两段式 TOCTOU 竞态窗口。
 func (d *ActiveDetector) SyncAfterInternalSwitch(acc model.Account) {
 	if d.store == nil {
 		return
@@ -138,9 +140,23 @@ func (d *ActiveDetector) SyncAfterInternalSwitch(acc model.Account) {
 		DetectedAt:       d.nowFunc().Unix(),
 	}
 	d.stateMu.Lock()
+	d.syncEpoch++
 	d.lastStateKey = buildDetectionStateKey(res)
 	d.lastResult = res
 	d.stateMu.Unlock()
+}
+
+func (d *ActiveDetector) getSyncEpoch() uint64 {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.syncEpoch
+}
+
+func (d *ActiveDetector) isStaleDetection(startEpoch uint64) bool {
+	if d.isSwitching != nil && d.isSwitching() {
+		return true
+	}
+	return d.getSyncEpoch() != startEpoch
 }
 
 func (d *ActiveDetector) loop(ctx context.Context) {
@@ -188,6 +204,7 @@ func (d *ActiveDetector) detect(ctx context.Context, emitCallback bool) ActiveDe
 	if d.isSwitching != nil && d.isSwitching() {
 		return d.LastResult()
 	}
+	startEpoch := d.getSyncEpoch()
 
 	readFn := d.readLocal
 	if readFn == nil {
@@ -195,6 +212,10 @@ func (d *ActiveDetector) detect(ctx context.Context, emitCallback bool) ActiveDe
 	}
 
 	cred, source, err := readFn(target)
+	// 读取系统凭据 I/O 期间若发生了内部切号（进行中或已递增 syncEpoch），直接丢弃过时探测结果
+	if d.isStaleDetection(startEpoch) {
+		return d.LastResult()
+	}
 	if err != nil {
 		// 读取系统凭据失败时保持当前已知状态，不误清 currentAccountID
 		res := ActiveDetectionResult{
@@ -205,7 +226,6 @@ func (d *ActiveDetector) detect(ctx context.Context, emitCallback bool) ActiveDe
 		return res
 	}
 
-	prevID := d.store.GetCurrentAccountID()
 	res := ActiveDetectionResult{
 		Source:       source,
 		TargetClient: target,
@@ -214,18 +234,26 @@ func (d *ActiveDetector) detect(ctx context.Context, emitCallback bool) ActiveDe
 
 	if cred == nil {
 		// 本机所有受检凭据来源均明确为空（未登录或已退出）
+		if d.isStaleDetection(startEpoch) {
+			return d.LastResult()
+		}
+		prevID := d.store.GetCurrentAccountID()
 		if prevID != "" {
 			if setErr := d.store.SetCurrentAccountID(""); setErr == nil {
 				res.Changed = true
 			}
 		}
-		d.commitAndNotify(res, emitCallback)
+		d.commitAndNotify(res, emitCallback, startEpoch)
 		return res
 	}
 
 	res.HasCredential = true
 	accounts := d.store.ListAccounts()
 	matched, detectedEmail, resolveErr := d.matchAccount(ctx, cred, accounts, now)
+	// 匹配与 OAuth 联网解析（最长 10s）返回后再次核验是否发生内部切号，封堵第二段 TOCTOU 竞态窗口
+	if d.isStaleDetection(startEpoch) {
+		return d.LastResult()
+	}
 	if resolveErr != nil {
 		// 断网或 Google OAuth 临时不可达导致无法识别未知凭据身份：保留现有激活态，不误清空 currentAccountID。
 		res.Error = resolveErr.Error()
@@ -233,10 +261,21 @@ func (d *ActiveDetector) detect(ctx context.Context, emitCallback bool) ActiveDe
 	}
 	res.DetectedEmail = detectedEmail
 
+	prevID := d.store.GetCurrentAccountID()
 	if matched != nil {
 		res.Managed = true
 		res.MatchedAccountID = matched.ID
 		res.DetectedEmail = matched.Email
+
+		// 若外部程序通过同邮箱重新登录产生了新的 RefreshToken，将其原子回写到本地账号库，避免后续刷新报 invalid_grant
+		credRT := strings.TrimSpace(cred.RefreshToken)
+		if credRT != "" && credRT != strings.TrimSpace(matched.Token.RefreshToken) {
+			d.syncRotatedCredentialToStore(matched.ID, cred)
+		}
+
+		if d.isStaleDetection(startEpoch) {
+			return d.LastResult()
+		}
 		if prevID != matched.ID {
 			if setErr := d.store.SetCurrentAccountID(matched.ID); setErr == nil {
 				res.Changed = true
@@ -252,14 +291,64 @@ func (d *ActiveDetector) detect(ctx context.Context, emitCallback bool) ActiveDe
 		}
 	}
 
-	d.commitAndNotify(res, emitCallback)
+	if !d.commitAndNotify(res, emitCallback, startEpoch) {
+		return d.LastResult()
+	}
 	return res
 }
 
-func (d *ActiveDetector) commitAndNotify(res ActiveDetectionResult, emitCallback bool) {
+// syncRotatedCredentialToStore 在外部客户端通过同邮箱重新登录并轮换 RefreshToken 时，
+// 原子回写最新令牌字段并自动解除因旧令牌失效引起的 invalid_grant 禁用态。
+func (d *ActiveDetector) syncRotatedCredentialToStore(accountID string, cred *SystemCredential) {
+	if d.store == nil || cred == nil {
+		return
+	}
+	newRT := strings.TrimSpace(cred.RefreshToken)
+	if newRT == "" {
+		return
+	}
+	newAT := strings.TrimSpace(cred.AccessToken)
+	newIDTok := strings.TrimSpace(cred.IDToken)
+	var newExpiry int64
+	if expStr := strings.TrimSpace(cred.Expiry); expStr != "" {
+		if ts, err := time.Parse(time.RFC3339Nano, expStr); err == nil {
+			newExpiry = ts.Unix()
+		} else if ts, err := time.Parse(time.RFC3339, expStr); err == nil {
+			newExpiry = ts.Unix()
+		}
+	}
+
+	_, _ = d.store.UpdateAccount(accountID, func(target *model.Account) error {
+		target.Token.RefreshToken = newRT
+		if newAT != "" {
+			target.Token.AccessToken = newAT
+			if newExpiry > 0 {
+				target.Token.ExpiryTimestamp = newExpiry
+			}
+		}
+		if newIDTok != "" {
+			target.Token.IDToken = newIDTok
+		}
+		if target.Disabled && strings.HasPrefix(target.DisabledReason, "invalid_grant") {
+			target.Disabled = false
+			target.DisabledReason = ""
+			target.DisabledAt = 0
+		}
+		if target.QuotaError != nil && (target.QuotaError.Reason == "INVALID_GRANT" || target.QuotaError.Reason == "TOKEN_REFRESH_FAILED") {
+			target.QuotaError = nil
+		}
+		return nil
+	})
+}
+
+func (d *ActiveDetector) commitAndNotify(res ActiveDetectionResult, emitCallback bool, startEpoch uint64) bool {
 	key := buildDetectionStateKey(res)
 
 	d.stateMu.Lock()
+	if d.syncEpoch != startEpoch || (d.isSwitching != nil && d.isSwitching()) {
+		d.stateMu.Unlock()
+		return false
+	}
 	stateChanged := key != d.lastStateKey
 	d.lastStateKey = key
 	d.lastResult = res
@@ -268,6 +357,7 @@ func (d *ActiveDetector) commitAndNotify(res ActiveDetectionResult, emitCallback
 	if emitCallback && (res.Changed || stateChanged) && d.onChanged != nil {
 		d.onChanged(res)
 	}
+	return true
 }
 
 func (d *ActiveDetector) matchAccount(

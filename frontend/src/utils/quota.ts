@@ -530,7 +530,7 @@ export function summarizeQuotaCategories(
   return result
 }
 
-// 返回账号综合最低配额百分比（同时覆盖所有分类双窗口与合并后全部客户端模型）；若尚未拉取配额则返回 -1。
+// 返回账号综合最低配额百分比（与后端 MinQuotaPercentage 同口径：已由分类权威汇总覆盖的模型分类以展示窗口为准，避免 FREE 账号被隐藏 5h 窗口拉低）；若尚未拉取配额则返回 -1。
 export function getMinQuotaPercentage(account: Account, nowMs = Date.now()): number {
   const categories = summarizeQuotaCategories(account, nowMs)
   const merged = mergeAccountModels(account)
@@ -545,11 +545,17 @@ export function getMinQuotaPercentage(account: Account, nowMs = Date.now()): num
     return min
   }
 
+  const coveredCategories = new Set<QuotaCategoryKey>()
   let min = 100
   for (const cat of categories) {
+    coveredCategories.add(cat.key)
     if (cat.percentage < min) min = cat.percentage
   }
   for (const m of merged) {
+    const catKey = classifyModelCategory(m)
+    if (catKey && coveredCategories.has(catKey)) {
+      continue
+    }
     if (m.percentage < min) min = m.percentage
   }
   return min

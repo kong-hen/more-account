@@ -1,15 +1,20 @@
 package switcher
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
 	"more-account/internal/model"
+	"more-account/internal/oauth"
+	"more-account/internal/storage"
 )
 
 func TestProtobufUnifiedOAuthRoundTrip(t *testing.T) {
@@ -240,5 +245,96 @@ func TestMatchMacProcessCommandAndAppPathValidation(t *testing.T) {
 	dupMsg = append(dupMsg, EncodeStringField(1, "latest-token")...)
 	if got := extractStringField(dupMsg, 1); got != "latest-token" {
 		t.Fatalf("重复标量字段应返回最后一个值 latest-token，实际 %q", got)
+	}
+}
+
+func TestIDERollbackStateDBWhenSystemCredentialWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.vscdb")
+
+	// 1. 预先写入旧账号 A 凭据（含其他 sibling sentinel 键）
+	accA := model.Account{
+		ID:    "acc-a",
+		Email: "a@example.com",
+		Token: model.TokenData{
+			AccessToken:     "at-a",
+			RefreshToken:    "rt-a",
+			ExpiryTimestamp: time.Now().Unix() + 3600,
+			ProjectID:       "proj-a",
+		},
+	}
+	if err := InjectAccountToStateDB(dbPath, accA); err != nil {
+		t.Fatalf("初始化旧账号 state.vscdb 失败: %v", err)
+	}
+
+	store, err := storage.NewStore(dir)
+	if err != nil {
+		t.Fatalf("初始化 store 失败: %v", err)
+	}
+	accB, err := store.UpsertAccount(model.Account{
+		Email: "b@example.com",
+		Token: model.TokenData{
+			AccessToken:     "at-b",
+			RefreshToken:    "rt-b",
+			ExpiryTimestamp: time.Now().Unix() + 3600,
+		},
+	})
+	if err != nil {
+		t.Fatalf("创建目标账号 B 失败: %v", err)
+	}
+
+	// 2. 劫持包内钩子：定位到临时 state.vscdb，并模拟后续系统凭据写入失败
+	origWrite := writeSystemCredentialsFn
+	origIDEPath := defaultIDEStateDBPathFn
+	defaultIDEStateDBPathFn = func() string { return dbPath }
+	writeSystemCredentialsFn = func(_ model.Account, _ bool) error {
+		return errors.New("mock keychain locked")
+	}
+	defer func() {
+		writeSystemCredentialsFn = origWrite
+		defaultIDEStateDBPathFn = origIDEPath
+	}()
+
+	svc := NewService(store, oauth.NewClient())
+	if _, err := svc.SwitchAccount(context.Background(), SwitchRequest{
+		AccountID:    accB.ID,
+		TargetClient: "ide",
+		Launch:       false,
+	}); err == nil {
+		t.Fatal("系统凭据写入失败时 SwitchAccount 必须返回错误")
+	}
+
+	// 3. 验证 state.vscdb 已精确回滚回旧账号 A（而非残留账号 B 半写状态）
+	cred, err := ReadCredentialFromStateDB(dbPath)
+	if err != nil || cred == nil {
+		t.Fatalf("回滚后读取 state.vscdb 失败: cred=%+v err=%v", cred, err)
+	}
+	if cred.RefreshToken != "rt-a" || cred.Email != "a@example.com" {
+		t.Fatalf("期望 state.vscdb 回滚为旧账号 A(rt-a)，实际 %+v", cred)
+	}
+}
+
+func TestMatchWindowsTasklistCSVAndWaitUntilStopped(t *testing.T) {
+	csvOut := `"Antigravity.exe","1234","Console","1","120,000 K"` + "\r\n" +
+		`"Antigravity Helper.exe","5678","Console","1","40,000 K"` + "\r\n"
+	if !matchWindowsTasklistCSV(csvOut, "antigravity.exe") {
+		t.Fatal("应精确忽略大小写命中 Antigravity.exe")
+	}
+	if matchWindowsTasklistCSV(csvOut, "Antigravity IDE.exe") {
+		t.Fatal("不应误命中未在列表中的 Antigravity IDE.exe")
+	}
+	if matchWindowsTasklistCSV("INFO: No tasks are running which match the specified criteria.\r\n", "Antigravity.exe") {
+		t.Fatal("无匹配进程提示行不应判为运行中")
+	}
+
+	checks := 0
+	if !waitUntilStopped(300*time.Millisecond, 10*time.Millisecond, func() bool {
+		checks++
+		return checks < 3
+	}) {
+		t.Fatal("进程在第 3 次轮询退出时应返回 true")
+	}
+	if waitUntilStopped(30*time.Millisecond, 10*time.Millisecond, func() bool { return true }) {
+		t.Fatal("进程持续存活超过超时窗口应返回 false")
 	}
 }

@@ -445,3 +445,37 @@ func TestFetchQuotaCapturesValidationURLFromLoadCodeAssist(t *testing.T) {
 		t.Fatalf("期望标记 VALIDATION_REQUIRED 与 IsForbidden=true，实际 err=%+v quota=%+v", res.Error, res.Quota)
 	}
 }
+
+func TestRefreshAllCountsUnprocessedAndReturnsErrorOnCanceledContext(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("初始化 store 失败: %v", err)
+	}
+	for _, email := range []string{"a@example.com", "b@example.com", "c@example.com"} {
+		if _, err := store.UpsertAccount(model.Account{
+			Email: email,
+			Token: model.TokenData{
+				AccessToken:     "at",
+				RefreshToken:    "rt-" + email,
+				ExpiryTimestamp: time.Now().Unix() + 3600,
+			},
+		}); err != nil {
+			t.Fatalf("写入测试账号失败: %v", err)
+		}
+	}
+
+	svc := NewService(store, oauth.NewClient(), NewClient())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stats, err := svc.RefreshAll(ctx, 2, nil)
+	if err == nil {
+		t.Fatal("已取消上下文执行 RefreshAll 必须返回错误，避免前端误报全部成功")
+	}
+	if stats == nil || stats.Total != 3 || stats.Failed != 3 || stats.Success != 0 {
+		t.Fatalf("期望统计全部 3 个未执行账号为失败，实际 stats=%+v", stats)
+	}
+	if len(stats.Errors) == 0 {
+		t.Fatalf("期望 stats.Errors 包含取消/超时诊断信息: %+v", stats)
+	}
+}

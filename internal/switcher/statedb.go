@@ -81,6 +81,123 @@ func upsertTopicSentinel(ctx context.Context, q sqlQuerier, tableKey, sentinelKe
 	return err
 }
 
+var stateDBManagedKeys = []string{
+	"antigravityUnifiedStateSync.oauthToken",
+	"antigravityUnifiedStateSync.userStatus",
+	"antigravityUnifiedStateSync.enterprisePreferences",
+	"antigravityOnboarding",
+}
+
+// StateDBKeySnapshot 记录切号前 state.vscdb 中受影响键的原始状态，用于在后续系统凭据写入失败时精确回滚。
+type StateDBKeySnapshot struct {
+	FileExisted bool
+	HasTable    bool
+	Values      map[string]string
+	Present     map[string]bool
+}
+
+// SnapshotStateDBKeys 在写入 state.vscdb 前备份受影响键的原始值，不干扰数据库内其他用户设置。
+func SnapshotStateDBKeys(dbPath string) (*StateDBKeySnapshot, error) {
+	snap := &StateDBKeySnapshot{
+		Values:  make(map[string]string, len(stateDBManagedKeys)),
+		Present: make(map[string]bool, len(stateDBManagedKeys)),
+	}
+	if strings.TrimSpace(dbPath) == "" {
+		return snap, nil
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return snap, nil
+		}
+		return nil, err
+	}
+	snap.FileExisted = true
+
+	db, err := sql.Open("sqlite", buildSQLiteURI(dbPath, true))
+	if err != nil {
+		return nil, fmt.Errorf("快照只读打开 state.vscdb 失败: %w", err)
+	}
+	defer db.Close()
+
+	for _, key := range stateDBManagedKeys {
+		var val string
+		err := db.QueryRow(`SELECT value FROM ItemTable WHERE key = ?`, key).Scan(&val)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				snap.HasTable = true
+				continue
+			}
+			if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+				return snap, nil
+			}
+			return nil, fmt.Errorf("快照读取 state.vscdb 键 %s 失败: %w", key, err)
+		}
+		snap.HasTable = true
+		snap.Present[key] = true
+		snap.Values[key] = val
+	}
+	return snap, nil
+}
+
+// RestoreStateDBKeys 将 state.vscdb 中受影响的键精确恢复为切号前快照；若切号前文件不存在则清理新建文件。
+func RestoreStateDBKeys(dbPath string, snap *StateDBKeySnapshot) error {
+	if snap == nil || strings.TrimSpace(dbPath) == "" {
+		return nil
+	}
+	if !snap.FileExisted {
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+		return nil
+	}
+
+	db, err := sql.Open("sqlite", buildSQLiteURI(dbPath, false))
+	if err != nil {
+		return fmt.Errorf("回滚打开 state.vscdb 失败: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("获取 state.vscdb 回滚连接失败: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+		_ = conn.Close()
+	}()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("开启 state.vscdb 回滚事务失败: %w", err)
+	}
+	if !snap.HasTable {
+		if _, err := conn.ExecContext(ctx, `DROP TABLE IF EXISTS ItemTable`); err != nil {
+			return fmt.Errorf("回滚移除新建 ItemTable 失败: %w", err)
+		}
+	} else {
+		for _, key := range stateDBManagedKeys {
+			if snap.Present[key] {
+				if _, err := conn.ExecContext(ctx, `INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)`, key, snap.Values[key]); err != nil {
+					return fmt.Errorf("回滚恢复键 %s 失败: %w", key, err)
+				}
+			} else {
+				if _, err := conn.ExecContext(ctx, `DELETE FROM ItemTable WHERE key = ?`, key); err != nil {
+					return fmt.Errorf("回滚清理键 %s 失败: %w", key, err)
+				}
+			}
+		}
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("提交 state.vscdb 回滚事务失败: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 // InjectAccountToStateDB 将账号凭据以 BEGIN IMMEDIATE 写事务 + Protobuf/Base64 格式原子注入 Antigravity IDE / 旧版 state.vscdb，
 // 避免 DEFERRED 事务先读后写锁升级触发 SQLITE_BUSY，并在落盘后收紧文件权限至 0600。
 func InjectAccountToStateDB(dbPath string, account model.Account) error {

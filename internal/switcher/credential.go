@@ -15,9 +15,12 @@ import (
 )
 
 const (
-	desktopFallbackFileName   = "jetski-standalone-oauth-token"
-	osCredCacheMaxIdle        = 3 * time.Minute
-	osCredErrorBackoffWindow  = 10 * time.Minute
+	desktopFallbackFileName  = "jetski-standalone-oauth-token"
+	// 缩短正常缓存 TTL 至 30 秒，在避免每 10 秒频繁调用系统凭据命令的同时，
+	// 将外部程序仅改写 Keychain/Credential Manager 而不改本地回退文件时的感知延迟由 3 分钟降至 30 秒内。
+	osCredCacheMaxIdle       = 30 * time.Second
+	// 读取系统凭据报错（如系统锁屏）时缩短退避窗口至 2 分钟，兼顾避免高频弹窗与解锁后快速自愈。
+	osCredErrorBackoffWindow = 2 * time.Minute
 )
 
 type antigravityCredentialToken struct {

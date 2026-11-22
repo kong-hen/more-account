@@ -55,6 +55,7 @@ const appStore = useAppStore()
 const isCurrent = computed(() => appStore.currentAccountId === props.account.id)
 const isRefreshing = computed(() => Boolean(appStore.refreshingIds[props.account.id]))
 const isSwitching = computed(() => appStore.switchingId === props.account.id)
+const anySwitching = computed(() => Boolean(appStore.switchingId))
 const hasAnySelection = computed(() => appStore.selectedAccountIds.length > 0)
 const displayEmail = computed(() => maskEmail(props.account.email, appStore.settings.privacyMode))
 const tier = computed(() => getTierLabel(props.account))
@@ -456,7 +457,7 @@ async function handleCopyValidationUrl() {
 
         <button
           type="button"
-          :disabled="isSwitching"
+          :disabled="anySwitching"
           class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs leading-none font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
           :class="isCurrent ? 'account-card__switch-btn--current' : 'account-card__switch-btn'"
           @click="appStore.switchToAccount(account.id)"

@@ -119,7 +119,8 @@ async function handleSubmit() {
     <template #footer>
       <button
         type="button"
-        class="px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)]"
+        :disabled="saving"
+        class="px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
         style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
         @click="emit('close')"
       >

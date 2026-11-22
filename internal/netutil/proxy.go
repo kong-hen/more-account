@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,8 +34,13 @@ func ValidateProxyURL(raw string) (*url.URL, error) {
 	if strings.TrimSpace(parsed.Hostname()) == "" {
 		return nil, fmt.Errorf("代理地址缺少有效主机名")
 	}
-	if p := parsed.Port(); p == "" {
+	p := parsed.Port()
+	if p == "" {
 		return nil, fmt.Errorf("代理地址请显式指定端口号（例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）")
+	}
+	portNum, err := strconv.Atoi(p)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return nil, fmt.Errorf("代理端口号 %q 无效（必须为 1-65535 之间的整数）", p)
 	}
 	return parsed, nil
 }
@@ -150,6 +156,14 @@ func TestConnectivity(ctx context.Context, rawProxyURL string, probeURL string) 
 		return 0, fmt.Errorf("连接测试失败: %w", err)
 	}
 	_ = resp.Body.Close()
+
+	// 拦截代理认证失败与代理/上游网关异常响应（HEAD /token 正常时会返回 405，故允许 2xx-4xx 中除 407 外的状态）
+	if resp.StatusCode == http.StatusProxyAuthRequired {
+		return 0, fmt.Errorf("代理需要身份认证 (HTTP 407)，请在代理地址中配置用户名与密码")
+	}
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return 0, fmt.Errorf("代理或目标端点返回异常状态 (HTTP %d)", resp.StatusCode)
+	}
 
 	ms := time.Since(started).Milliseconds()
 	if ms <= 0 {

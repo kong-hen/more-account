@@ -83,12 +83,15 @@ export const useAppStore = defineStore('app', () => {
   const sortBy = ref<AccountSortBy>('custom')
   const viewMode = ref<AccountViewMode>('cards')
 
-  // 多选与右侧详情抽屉（含未保存修改保护）
+  // 多选与右侧详情抽屉（含跨账号与跨模块导航的未保存修改保护）
   const selectedAccountIds = ref<string[]>([])
   const activeDetailAccountId = ref<string | null>(null)
   const detailDrawerDirty = ref(false)
   const pendingDetailTargetId = ref<string | null | undefined>(undefined)
-  const hasPendingUnsavedDetail = computed(() => pendingDetailTargetId.value !== undefined)
+  const pendingNavigation = ref<{ section: AppSection; groupFilter?: string } | null>(null)
+  const hasPendingUnsavedDetail = computed(
+    () => pendingDetailTargetId.value !== undefined || pendingNavigation.value !== null,
+  )
   const oauthCompletedSeq = ref(0)
   const oauthFailedSeq = ref(0)
   const oauthLastError = ref('')
@@ -211,11 +214,18 @@ export const useAppStore = defineStore('app', () => {
       accounts.value = state.accounts ?? []
       currentAccountId.value = state.currentAccountId ?? ''
       groups.value = state.groups ?? []
+      if (state.platform) {
+        platform.value = state.platform
+      }
+      const defaultCloseBehavior = platform.value === 'darwin' ? 'background' : 'quit'
       settings.value = {
         ...settings.value,
         ...(state.settings ?? {}),
         theme: state.settings?.theme === 'dark' ? 'dark' : 'light',
-        closeBehavior: state.settings?.closeBehavior === 'quit' ? 'quit' : 'background',
+        closeBehavior:
+          state.settings?.closeBehavior === 'quit' || state.settings?.closeBehavior === 'background'
+            ? state.settings.closeBehavior
+            : defaultCloseBehavior,
         macStatusBarMode:
           state.settings?.macStatusBarMode === 'icon_only' || state.settings?.macStatusBarMode === 'off'
             ? state.settings.macStatusBarMode
@@ -230,9 +240,6 @@ export const useAppStore = defineStore('app', () => {
         defaultGitHubRepo.value = state.defaultGitHubRepo
       }
       hasBuiltInOAuth.value = Boolean(state.hasBuiltInOAuth)
-      if (state.platform) {
-        platform.value = state.platform
-      }
       applyTheme(settings.value.theme)
 
       // 注册后端事件推送（手动批量进度 + 后台自动刷新状态与完成通知）
@@ -294,14 +301,16 @@ export const useAppStore = defineStore('app', () => {
           oauthCompletedSeq.value += 1
         }),
       )
-      // 全局监听 OAuth 授权失败或超时事件：即使关闭了添加弹窗也能收到明确的错误通知
+      // 全局监听 OAuth 授权失败或超时事件：兼容后端 silent=true 静默取消/超时，不误弹红色错误提示框
       cleanups.push(
         onWailsEvent('oauth:failed', (payload: unknown) => {
-          const p = payload as { error?: string } | null
+          const p = payload as { error?: string; silent?: boolean } | null
           const message = p?.error || 'OAuth 授权失败'
-          oauthLastError.value = message
+          oauthLastError.value = p?.silent ? '' : message
           oauthFailedSeq.value += 1
-          notify(`OAuth 授权失败：${message}`, 'error', 4800)
+          if (!p?.silent) {
+            notify(`OAuth 授权失败：${message}`, 'error', 4800)
+          }
         }),
       )
       // 监听状态栏发起的切号完成事件：同步刷新账号列表与切号历史
@@ -320,11 +329,15 @@ export const useAppStore = defineStore('app', () => {
         onWailsEvent('settings:updated', (payload: unknown) => {
           const next = payload as Partial<AppSettings> | null
           if (!next) return
+          const defaultCloseBehavior = platform.value === 'darwin' ? 'background' : 'quit'
           settings.value = {
             ...settings.value,
             ...next,
             theme: next.theme === 'dark' ? 'dark' : 'light',
-            closeBehavior: next.closeBehavior === 'quit' ? 'quit' : 'background',
+            closeBehavior:
+              next.closeBehavior === 'quit' || next.closeBehavior === 'background'
+                ? next.closeBehavior
+                : defaultCloseBehavior,
             macStatusBarMode:
               next.macStatusBarMode === 'icon_only' || next.macStatusBarMode === 'off'
                 ? next.macStatusBarMode
@@ -526,6 +539,8 @@ export const useAppStore = defineStore('app', () => {
         notify(`全部 ${stats.success} 个账号配额已更新`, 'success')
       }
     } catch (err) {
+      // 超时或部分失败后仍重新拉取账号列表，将已完成刷新的部分账号结果同步至界面
+      await reloadAccounts().catch(() => {})
       notify(`批量刷新失败：${extractErrorMessage(err)}`, 'error')
     } finally {
       refreshingAll.value = false
@@ -566,6 +581,11 @@ export const useAppStore = defineStore('app', () => {
         await loadSwitchHistory()
       }
     } catch (err) {
+      // 切号失败（例如预刷新遇到 invalid_grant 被后端标记禁用并记录失败历史）时同步刷新列表与历史，即时反映最新状态
+      await reloadAccounts().catch(() => {})
+      if (activeSection.value === 'history') {
+        await loadSwitchHistory().catch(() => {})
+      }
       notify(`切号失败：${extractErrorMessage(err)}`, 'error', 5000)
     } finally {
       switchingId.value = null
@@ -767,23 +787,61 @@ export const useAppStore = defineStore('app', () => {
   function requestSelectDetailAccount(nextId: string | null) {
     if (nextId === activeDetailAccountId.value) return
     if (detailDrawerDirty.value && activeDetailAccountId.value) {
+      pendingNavigation.value = null
       pendingDetailTargetId.value = nextId
       return
     }
     activeDetailAccountId.value = nextId
   }
 
+  // 切换主功能模块时检查详情抽屉是否存在未保存编辑，避免抽屉随 v-if 卸载导致修改静默丢失
+  function requestSwitchSection(section: AppSection) {
+    if (section === activeSection.value) return
+    if (activeSection.value === 'accounts' && detailDrawerDirty.value && activeDetailAccountId.value) {
+      pendingDetailTargetId.value = undefined
+      pendingNavigation.value = { section }
+      return
+    }
+    if (section !== 'accounts') {
+      activeDetailAccountId.value = null
+    }
+    activeSection.value = section
+  }
+
+  function requestSelectGroup(groupId: string) {
+    if (activeSection.value === 'accounts' && selectedGroupFilter.value === groupId) return
+    if (activeSection.value === 'accounts' && detailDrawerDirty.value && activeDetailAccountId.value) {
+      pendingDetailTargetId.value = undefined
+      pendingNavigation.value = { section: 'accounts', groupFilter: groupId }
+      return
+    }
+    activeSection.value = 'accounts'
+    selectedGroupFilter.value = groupId
+  }
+
   function confirmDiscardDetailChanges() {
-    const next = pendingDetailTargetId.value
+    const nextDetail = pendingDetailTargetId.value
+    const nextNav = pendingNavigation.value
     pendingDetailTargetId.value = undefined
+    pendingNavigation.value = null
     detailDrawerDirty.value = false
-    if (next !== undefined) {
-      activeDetailAccountId.value = next
+    if (nextDetail !== undefined) {
+      activeDetailAccountId.value = nextDetail
+    }
+    if (nextNav) {
+      if (nextNav.section !== 'accounts') {
+        activeDetailAccountId.value = null
+      }
+      activeSection.value = nextNav.section
+      if (nextNav.groupFilter !== undefined) {
+        selectedGroupFilter.value = nextNav.groupFilter
+      }
     }
   }
 
   function cancelDiscardDetailChanges() {
     pendingDetailTargetId.value = undefined
+    pendingNavigation.value = null
   }
 
   // 计算属性
@@ -992,6 +1050,8 @@ export const useAppStore = defineStore('app', () => {
     toggleSelectAccount,
     clearAdvancedFilters,
     requestSelectDetailAccount,
+    requestSwitchSection,
+    requestSelectGroup,
     confirmDiscardDetailChanges,
     cancelDiscardDetailChanges,
     quitApp,

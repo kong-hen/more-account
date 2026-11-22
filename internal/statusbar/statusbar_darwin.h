@@ -9,6 +9,7 @@
 // 由 Objective-C 原生层导出的 C 控制接口（均内部保障主线程安全）。
 void MAStatusBarStart(const void *iconBytes, int iconLen, bool closeToBackground);
 void MAStatusBarSetCloseToBackground(bool enabled);
+void MAStatusBarSetPreventAppNap(bool enabled);
 void MAStatusBarUpdateJSON(const char *snapshotJSON);
 void MAStatusBarStop(void);
 
@@ -20,5 +21,6 @@ extern void maStatusBarOnRefreshCurrent(void);
 extern void maStatusBarOnRefreshAll(void);
 extern void maStatusBarOnTogglePrivacy(void);
 extern void maStatusBarOnQuit(void);
+extern void maStatusBarOnSystemWake(void);
 
 #endif // MORE_ACCOUNT_STATUSBAR_DARWIN_H

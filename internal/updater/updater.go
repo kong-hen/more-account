@@ -353,7 +353,8 @@ func scoreAssetForPlatform(lowerName, goos, goarch string) int {
 
 	hasArm := strings.Contains(lowerName, "arm64") || strings.Contains(lowerName, "aarch64")
 	hasAmd := strings.Contains(lowerName, "amd64") || strings.Contains(lowerName, "x86_64") || strings.Contains(lowerName, "x64")
-	hasUniversal := strings.Contains(lowerName, "universal") || strings.Contains(lowerName, "all")
+	// 仅匹配 universal 或按分隔符独立存在的 "all" 词元，避免误命中 "installer" 中的 "all" 子串。
+	hasUniversal := strings.Contains(lowerName, "universal") || hasStandaloneArchToken(lowerName, "all")
 
 	switch goarch {
 	case "arm64":
@@ -378,6 +379,19 @@ func scoreAssetForPlatform(lowerName, goos, goarch string) int {
 		}
 	}
 	return score
+}
+
+// hasStandaloneArchToken 按常见文件名分隔符切分词元，精确判断是否存在独立架构标识（如 -all.zip / _all.dmg）。
+func hasStandaloneArchToken(lowerName, token string) bool {
+	tokens := strings.FieldsFunc(lowerName, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	})
+	for _, t := range tokens {
+		if t == token {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckLatestRelease 检查指定 GitHub 仓库的最新版本。
@@ -406,9 +420,9 @@ func CheckLatestRelease(ctx context.Context, httpClient *http.Client, rawRepo st
 		return buildCheckResult(repo, currentVersion, *rel, webBase), nil
 	}
 
-	// 若 /releases/latest 返回 404，可能是仓库尚未发布正式 Release（或仅有预发布版本），进一步查询 releases?per_page=1 区分
+	// 若 /releases/latest 返回 404，可能是仓库尚未发布正式 Release（或仅有预发布版本），进一步查询最近 5 条 releases 跳过草稿（Draft）进行区分
 	if status == http.StatusNotFound {
-		listURL := fmt.Sprintf("%s/repos/%s/releases?per_page=1", apiBase, repo)
+		listURL := fmt.Sprintf("%s/repos/%s/releases?per_page=5", apiBase, repo)
 		firstRel, listStatus, listErr := fetchFirstReleaseFromList(ctx, httpClient, listURL, currentVersion)
 		if listErr == nil {
 			if firstRel != nil {

@@ -2,12 +2,16 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// ErrCorruptJSON 表示本地持久化 JSON 文件内容损坏、无法反序列化。
+var ErrCorruptJSON = errors.New("JSON 文件格式损坏")
 
 // ExpandHomePath 将以 ~ 或 ~/ 开头的路径展开为当前用户主目录。
 func ExpandHomePath(raw string) string {
@@ -110,7 +114,7 @@ func ReadJSONIfExists(path string, out any) (bool, error) {
 		return false, nil
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
-		return false, fmt.Errorf("解析 JSON 失败 %s: %w", path, err)
+		return false, fmt.Errorf("%w %s: %v", ErrCorruptJSON, path, err)
 	}
 	return true, nil
 }

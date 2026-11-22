@@ -14,10 +14,11 @@ func TestValidateProxyURL(t *testing.T) {
 	}
 
 	valid := []string{
+		"http://127.0.0.1:1",
 		"http://127.0.0.1:7890",
 		"https://proxy.example.com:8443",
 		"socks5://127.0.0.1:1080",
-		"socks5h://user:pass@127.0.0.1:1080",
+		"socks5h://user:pass@127.0.0.1:65535",
 	}
 	for _, raw := range valid {
 		if _, err := ValidateProxyURL(raw); err != nil {
@@ -29,6 +30,9 @@ func TestValidateProxyURL(t *testing.T) {
 		"ftp://127.0.0.1:21",
 		"127.0.0.1:7890",
 		"http://127.0.0.1",
+		"http://127.0.0.1:0",
+		"http://127.0.0.1:65536",
+		"socks5://127.0.0.1:99999",
 		"socks5://:1080",
 		"javascript:alert(1)",
 	}
@@ -65,5 +69,18 @@ func TestDynamicTransportAndConnectivity(t *testing.T) {
 	ms, err := TestConnectivity(context.Background(), "", srv.URL)
 	if err != nil || ms <= 0 {
 		t.Fatalf("连通性探测应当成功并返回正数耗时，实际 ms=%d err=%v", ms, err)
+	}
+}
+
+func TestConnectivityRejectsProxyAuthAndServerErrors(t *testing.T) {
+	for _, status := range []int{http.StatusProxyAuthRequired, http.StatusBadGateway, http.StatusServiceUnavailable} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+		}))
+		_, err := TestConnectivity(context.Background(), "", srv.URL)
+		srv.Close()
+		if err == nil {
+			t.Fatalf("HTTP %d 响应应当被连通性测试判定为失败", status)
+		}
 	}
 }

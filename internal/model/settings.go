@@ -1,9 +1,11 @@
 package model
 
+import "runtime"
+
 const (
-	// CloseBehaviorBackground 点击关闭窗口按钮时仅隐藏页面，程序在后台继续运行（默认）。
+	// CloseBehaviorBackground 点击关闭窗口按钮时仅隐藏页面，程序在后台继续运行（macOS 默认）。
 	CloseBehaviorBackground = "background"
-	// CloseBehaviorQuit 点击关闭窗口按钮时直接退出程序。
+	// CloseBehaviorQuit 点击关闭窗口按钮时直接退出程序（Windows/Linux 默认）。
 	CloseBehaviorQuit = "quit"
 
 	// MacStatusBarIconQuota macOS 顶部状态栏显示模板图标与当前账号最低剩余额度百分比（默认）。
@@ -13,6 +15,20 @@ const (
 	// MacStatusBarOff 关闭 macOS 顶部状态栏图标。
 	MacStatusBarOff = "off"
 )
+
+// DefaultCloseBehaviorForOS 根据目标操作系统返回默认窗口关闭行为：
+// macOS 具备原生顶部状态栏与 Dock 重开入口，默认隐藏到后台；Windows/Linux 未接入系统托盘前默认直接退出。
+func DefaultCloseBehaviorForOS(goos string) string {
+	if goos == "darwin" {
+		return CloseBehaviorBackground
+	}
+	return CloseBehaviorQuit
+}
+
+// DefaultCloseBehavior 返回当前运行平台的默认窗口关闭行为。
+func DefaultCloseBehavior() string {
+	return DefaultCloseBehaviorForOS(runtime.GOOS)
+}
 
 // AppSettings 保存用户全局偏好设置。
 // Theme 默认固定为 "light"，不跟随系统暗色模式，仅在用户手动切换时变更为 "dark"。
@@ -46,7 +62,7 @@ func DefaultSettings() AppSettings {
 		LowQuotaThreshold:          20,
 		AutoRefreshMinutes:         5,
 		InactiveAutoRefreshMinutes: 60,
-		CloseBehavior:              CloseBehaviorBackground,
+		CloseBehavior:              DefaultCloseBehavior(),
 		MacStatusBarMode:           MacStatusBarIconQuota,
 		AutoCheckUpdate:            true,
 	}

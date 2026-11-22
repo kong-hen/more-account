@@ -41,12 +41,11 @@ const navItems: Array<{ id: AppSection; label: string; icon: typeof Users }> = [
 ]
 
 function selectSection(section: AppSection) {
-  appStore.activeSection = section
+  appStore.requestSwitchSection(section)
 }
 
 function selectGroup(groupId: string) {
-  appStore.activeSection = 'accounts'
-  appStore.selectedGroupFilter = groupId
+  appStore.requestSelectGroup(groupId)
 }
 
 function openCurrentAccountDetail() {

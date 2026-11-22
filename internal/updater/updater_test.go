@@ -77,6 +77,22 @@ func TestSelectRecommendedAsset(t *testing.T) {
 	if winPick == nil || winPick.Name != "MoreAccount-setup-amd64.exe" {
 		t.Fatalf("Windows amd64 应优先匹配安装器 exe，实际 %+v", winPick)
 	}
+
+	// 验证 installer 中的 "all" 子串不会被误识别为通用架构（universal/all）
+	if hasStandaloneArchToken("moreaccount-macos-installer.dmg", "all") {
+		t.Fatal("installer 不应命中独立架构词元 all")
+	}
+	if !hasStandaloneArchToken("moreaccount-macos-all.zip", "all") {
+		t.Fatal("以分隔符独立出现的 all 应当命中")
+	}
+	macAssets := []ReleaseAsset{
+		{Name: "MoreAccount-macOS-installer.dmg", DownloadURL: "https://github.com/demo/r/releases/download/v1.1.0/MoreAccount-macOS-installer.dmg"},
+		{Name: "MoreAccount-macOS-universal.zip", DownloadURL: "https://github.com/demo/r/releases/download/v1.1.0/MoreAccount-macOS-universal.zip"},
+	}
+	armPick := SelectRecommendedAsset(macAssets, "darwin", "arm64")
+	if armPick == nil || armPick.Name != "MoreAccount-macOS-universal.zip" {
+		t.Fatalf("macOS arm64 应优先匹配 universal.zip，而非误把 installer.dmg 当作 all，实际 %+v", armPick)
+	}
 }
 
 func TestCheckLatestReleaseFullFlow(t *testing.T) {
@@ -153,5 +169,51 @@ func TestCheckLatestReleaseFullFlow(t *testing.T) {
 	}
 	if !fbRes.HasUpdate || fbRes.LatestVersion != "1.3.5" {
 		t.Fatalf("期望通过 Web 重定向识别到 1.3.5，实际 %+v", fbRes)
+	}
+}
+
+func TestCheckLatestReleaseSkipsLeadingDraftRelease(t *testing.T) {
+	var seenPerPage string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/demo/with-draft/releases/latest":
+			w.WriteHeader(http.StatusNotFound)
+		case "/repos/demo/with-draft/releases":
+			seenPerPage = r.URL.Query().Get("per_page")
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"tag_name": "v1.5.0-draft",
+					"draft":    true,
+				},
+				{
+					"tag_name": "v1.4.0-rc.1",
+					"name":     "v1.4.0-rc.1",
+					"html_url": "https://github.com/demo/with-draft/releases/tag/v1.4.0-rc.1",
+					"draft":    false,
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	origAPI, origWeb := GitHubAPIBaseURL, GitHubWebBaseURL
+	GitHubAPIBaseURL = srv.URL
+	GitHubWebBaseURL = srv.URL
+	defer func() {
+		GitHubAPIBaseURL = origAPI
+		GitHubWebBaseURL = origWeb
+	}()
+
+	res, err := CheckLatestRelease(context.Background(), srv.Client(), "demo/with-draft", "1.0.0")
+	if err != nil {
+		t.Fatalf("跳过首条 Draft 检测更新失败: %v", err)
+	}
+	if seenPerPage != "5" {
+		t.Fatalf("期望列表回退查询 per_page=5，实际 %q", seenPerPage)
+	}
+	if res.NoReleaseYet || !res.HasUpdate || res.LatestVersion != "1.4.0-rc.1" {
+		t.Fatalf("期望跳过 Draft 后识别出 v1.4.0-rc.1，实际 %+v", res)
 	}
 }

@@ -28,7 +28,7 @@ import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
 import { api, extractErrorMessage } from '@/services/api'
-import { copyToClipboard, maskToken } from '@/utils/privacy'
+import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
 import {
   formatDateTime,
   formatResetCountdown,
@@ -66,6 +66,7 @@ const formTwoFactorSecret = ref('')
 const savingDetails = ref(false)
 const detailsDirty = ref(false)
 
+const showLoginAccount = ref(false)
 const showPassword = ref(false)
 const showRefreshToken = ref(false)
 const copiedField = ref('')
@@ -81,6 +82,11 @@ let unmounted = false
 const isCurrent = computed(() => props.account && appStore.currentAccountId === props.account.id)
 const isRefreshing = computed(() => Boolean(props.account && appStore.refreshingIds[props.account.id]))
 const isSwitching = computed(() => Boolean(props.account && appStore.switchingId === props.account.id))
+const anySwitching = computed(() => Boolean(appStore.switchingId))
+const displayHeaderEmail = computed(() =>
+  props.account ? maskEmail(props.account.email, appStore.settings.privacyMode) : '',
+)
+const loginAccountMasked = computed(() => appStore.settings.privacyMode && !showLoginAccount.value)
 const isTestingCurrent = computed(
   () => Boolean(props.account && wakeupStore.testingScopeId && wakeupStore.testingAccountId === props.account.id),
 )
@@ -154,6 +160,7 @@ function syncFormFromAccount(acc: Account | null, resetVisibility: boolean) {
   detailsDirty.value = false
   appStore.detailDrawerDirty = false
   if (resetVisibility) {
+    showLoginAccount.value = false
     showPassword.value = false
     showRefreshToken.value = false
   }
@@ -371,8 +378,12 @@ async function openValidationUrl(url: string) {
             class="w-2 h-2 rounded-full shrink-0"
             style="background-color: var(--success)"
           />
-          <h2 class="text-sm font-semibold truncate" style="color: var(--text-primary)">
-            {{ account.email }}
+          <h2
+            class="text-sm font-semibold truncate"
+            style="color: var(--text-primary)"
+            :title="displayHeaderEmail"
+          >
+            {{ displayHeaderEmail }}
           </h2>
           <button
             type="button"
@@ -436,7 +447,7 @@ async function openValidationUrl(url: string) {
       <section class="grid grid-cols-2 gap-2">
         <button
           type="button"
-          :disabled="isSwitching"
+          :disabled="anySwitching"
           class="inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-medium text-white cursor-pointer disabled:opacity-60"
           style="background-color: var(--accent)"
           @click="appStore.switchToAccount(account.id, true)"
@@ -447,7 +458,7 @@ async function openValidationUrl(url: string) {
 
         <button
           type="button"
-          :disabled="isSwitching"
+          :disabled="anySwitching"
           class="inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border text-xs font-medium cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-60"
           style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
           @click="appStore.switchToAccount(account.id, false)"
@@ -561,7 +572,7 @@ async function openValidationUrl(url: string) {
           />
         </div>
 
-        <!-- 登录账号（直接明文显示，未自定义时默认展示账号邮箱） -->
+        <!-- 登录账号（非隐私模式明文显示；开启全局隐私脱敏模式时默认掩码展示并支持点击眼睛按钮显隐切换） -->
         <div>
           <div class="flex items-center justify-between gap-2 mb-1">
             <label for="detail-login-account-input" class="block text-[11.5px]" style="color: var(--text-muted)">
@@ -584,15 +595,29 @@ async function openValidationUrl(url: string) {
               <input
                 id="detail-login-account-input"
                 v-model="formLoginAccount"
-                type="text"
+                :type="loginAccountMasked ? 'password' : 'text'"
                 autocomplete="off"
                 autocorrect="off"
                 autocapitalize="none"
                 spellcheck="false"
-                :placeholder="`默认同邮箱：${account.email}`"
-                class="w-full pl-8 pr-2.5 py-1.5 text-xs rounded-lg border font-mono-num"
+                :placeholder="`默认同邮箱：${displayHeaderEmail}`"
+                class="w-full pl-8 py-1.5 text-xs rounded-lg border font-mono-num"
+                :class="appStore.settings.privacyMode ? 'pr-8' : 'pr-2.5'"
                 style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
               />
+              <button
+                v-if="appStore.settings.privacyMode"
+                type="button"
+                :aria-pressed="showLoginAccount"
+                :title="showLoginAccount ? '隐藏登录账号' : '显示登录账号'"
+                aria-label="切换登录账号显示"
+                class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 cursor-pointer transition-colors hover:opacity-80"
+                style="color: var(--text-muted)"
+                @click="showLoginAccount = !showLoginAccount"
+              >
+                <EyeOff v-if="showLoginAccount" class="w-3.5 h-3.5" />
+                <Eye v-else class="w-3.5 h-3.5" />
+              </button>
             </div>
             <button
               type="button"

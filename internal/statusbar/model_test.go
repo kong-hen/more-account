@@ -159,3 +159,17 @@ func TestBuildSnapshotPrivacyAbnormalAndBusyStates(t *testing.T) {
 		t.Fatalf("无激活账号但有纳管账号时应仅允许刷新全部，实际 cur=%v all=%v", emptyCurrent.CanRefreshCurrent, emptyCurrent.CanRefreshAll)
 	}
 }
+
+func TestControllerInterfaceWakeCallbackAndAppNapExported(t *testing.T) {
+	ctrl := NewController(Callbacks{
+		OnSystemWake: func() {},
+	})
+	if ctrl == nil {
+		t.Fatal("NewController 不应返回 nil")
+	}
+	// 验证 SetSystemWakeCallback 与 SetPreventAppNap 接口及包级导出函数均可安全调用且无数据竞态
+	ctrl.SetSystemWakeCallback(func() {})
+	SetSystemWakeCallback(nil)
+	ctrl.SetPreventAppNap(false)
+	SetPreventAppNap(false)
+}

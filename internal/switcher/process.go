@@ -2,6 +2,7 @@ package switcher
 
 import (
 	"context"
+	"encoding/csv"
 	"fmt"
 	"os"
 	"os/exec"
@@ -94,10 +95,7 @@ func stopClientProcesses(target, customDesktop, customIDE string) error {
 				exeName = base
 			}
 		}
-		killCmd := exec.Command("taskkill", "/IM", exeName, "/T")
-		configureHiddenSubprocess(killCmd)
-		_ = killCmd.Run()
-		time.Sleep(800 * time.Millisecond)
+		stopWindowsProcesses(exeName)
 		return nil
 
 	default:
@@ -205,13 +203,88 @@ func signalOwnedPIDs(pids []int, sig syscall.Signal) {
 	}
 }
 
-func stopLinuxProcessesByExe(expectedRealPath, expectedBase string) {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
+// stopWindowsProcesses 先以温和方式通知目标进程树退出，轮询等待最多 6 秒；
+// 若超时仍存活则通过 taskkill /F /T 强制结束并确认退出，防止旧进程锁死或回写 state.vscdb。
+func stopWindowsProcesses(exeName string) {
+	if !isWindowsProcessRunning(exeName) {
 		return
 	}
+	gracefulCmd := exec.Command("taskkill", "/IM", exeName, "/T")
+	configureHiddenSubprocess(gracefulCmd)
+	_ = gracefulCmd.Run()
+
+	if waitUntilStopped(6*time.Second, 250*time.Millisecond, func() bool {
+		return isWindowsProcessRunning(exeName)
+	}) {
+		return
+	}
+
+	forceCmd := exec.Command("taskkill", "/F", "/IM", exeName, "/T")
+	configureHiddenSubprocess(forceCmd)
+	_ = forceCmd.Run()
+
+	_ = waitUntilStopped(2*time.Second, 200*time.Millisecond, func() bool {
+		return isWindowsProcessRunning(exeName)
+	})
+}
+
+func isWindowsProcessRunning(exeName string) bool {
+	trimmed := strings.TrimSpace(exeName)
+	if trimmed == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tasklist", "/FI", fmt.Sprintf("IMAGENAME eq %s", trimmed), "/NH", "/FO", "CSV")
+	configureHiddenSubprocess(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return matchWindowsTasklistCSV(string(out), trimmed)
+}
+
+// matchWindowsTasklistCSV 解析 tasklist /NH /FO CSV 输出，精确比对首列进程名（忽略大小写）。
+func matchWindowsTasklistCSV(csvOutput, exeName string) bool {
+	target := strings.ToLower(strings.TrimSpace(exeName))
+	if target == "" {
+		return false
+	}
+	r := csv.NewReader(strings.NewReader(csvOutput))
+	r.FieldsPerRecord = -1
+	records, err := r.ReadAll()
+	if err != nil {
+		return false
+	}
+	for _, rec := range records {
+		if len(rec) > 0 && strings.ToLower(strings.TrimSpace(rec[0])) == target {
+			return true
+		}
+	}
+	return false
+}
+
+// waitUntilStopped 轮询检查 isRunning()，在 timeout 内全部退出时返回 true，超时返回 false。
+func waitUntilStopped(timeout, interval time.Duration, isRunning func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !isRunning() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(interval)
+	}
+}
+
+func findLinuxClientPIDs(expectedRealPath, expectedBase string) []int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
 	selfPID := os.Getpid()
-	killedAny := false
+	var pids []int
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -231,18 +304,34 @@ func stopLinuxProcessesByExe(expectedRealPath, expectedBase string) {
 		} else if filepath.Base(exeClean) == expectedBase {
 			matched = true
 		}
-		if !matched {
-			continue
+		if matched {
+			pids = append(pids, pid)
 		}
+	}
+	return pids
+}
+
+func stopLinuxProcessesByExe(expectedRealPath, expectedBase string) {
+	pids := findLinuxClientPIDs(expectedRealPath, expectedBase)
+	if len(pids) == 0 {
+		return
+	}
+	signalOwnedPIDs(pids, syscall.SIGTERM)
+	if waitUntilStopped(6*time.Second, 200*time.Millisecond, func() bool {
+		return len(findLinuxClientPIDs(expectedRealPath, expectedBase)) > 0
+	}) {
+		return
+	}
+	// 超时仍未退出时，向残余进程发送强制终止信号（SIGKILL）并二次确认退出
+	remaining := findLinuxClientPIDs(expectedRealPath, expectedBase)
+	for _, pid := range remaining {
 		if proc, err := os.FindProcess(pid); err == nil {
-			if sigErr := proc.Signal(syscall.SIGTERM); sigErr == nil {
-				killedAny = true
-			}
+			_ = proc.Kill()
 		}
 	}
-	if killedAny {
-		time.Sleep(800 * time.Millisecond)
-	}
+	_ = waitUntilStopped(1500*time.Millisecond, 150*time.Millisecond, func() bool {
+		return len(findLinuxClientPIDs(expectedRealPath, expectedBase)) > 0
+	})
 }
 
 // snapshotAndStopMacHubs 在 macOS 上协同停止当前用户下共享凭据的 agy --hub --app_data_dir antigravity 进程，
@@ -439,9 +528,17 @@ func launchClientApp(target, customDesktop, customIDE string) error {
 
 	switch runtime.GOOS {
 	case "darwin":
-		cmd := exec.Command("open", "-a", appPath)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("启动应用失败: %v (%s)", err, strings.TrimSpace(string(out)))
+		// 仅对 .app 应用包使用 open -a；用户自定义的非 .app 直接可执行二进制走 startDetached，与停止逻辑保持一致。
+		if strings.HasSuffix(strings.ToLower(appPath), ".app") {
+			cmd := exec.Command("open", "-a", appPath)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("启动应用失败: %v (%s)", err, strings.TrimSpace(string(out)))
+			}
+			return nil
+		}
+		cmd := exec.Command(appPath)
+		if err := startDetached(cmd); err != nil {
+			return fmt.Errorf("启动应用失败: %w", err)
 		}
 		return nil
 	default:

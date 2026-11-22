@@ -113,7 +113,8 @@ func (r *AutoRefresher) RunDueOnce(ctx context.Context) int {
 		return 0
 	}
 	settings := r.store.GetSettings()
-	if settings.AutoRefreshMinutes <= 0 && settings.InactiveAutoRefreshMinutes <= 0 {
+	quotaResetWatched := collectQuotaResetWatchedAccountIDs(r.store.GetWakeupState())
+	if settings.AutoRefreshMinutes <= 0 && settings.InactiveAutoRefreshMinutes <= 0 && len(quotaResetWatched) == 0 {
 		return 0
 	}
 	if !r.running.CompareAndSwap(false, true) {
@@ -143,13 +144,14 @@ func (r *AutoRefresher) RunDueOnce(ctx context.Context) int {
 			delete(r.summaryBackfillTried, id)
 		}
 	}
-	dueIDs, backfillIDs := selectDueAccountIDs(
+	dueIDs, backfillIDs := selectDueAccountIDsWithResetWatch(
 		accounts,
 		currentAccountID,
 		now,
 		activeInterval,
 		inactiveInterval,
 		r.summaryBackfillTried,
+		quotaResetWatched,
 	)
 	r.mu.Unlock()
 
@@ -235,12 +237,34 @@ func (r *AutoRefresher) refreshIDs(ctx context.Context, ids []string, concurrenc
 	return int(updated.Load()), succeeded
 }
 
-// selectDueAccountIDs 筛选需要自动刷新的账号 ID（跳过已失效、该类别已关闭自动刷新及处于失败退避期内的账号）：
-// - 当前正在使用的账号使用 activeInterval，未使用账号使用 inactiveInterval；
-// 1) 从未拉取过配额；
-// 2) 已有模型但缺少 5h/周共享额度桶（单次进程内仅立即补拉一次，避免空桶账号死循环）；
-// 3) 距离上次刷新已达到该账号类别配置的自动刷新间隔；
-// 4) 任意 5h/周额度或模型的重置时间刚到期（超过 5 秒宽限期）。
+// collectQuotaResetWatchedAccountIDs 收集已启用的配额重置（quota_reset / wakeOnReset）唤醒任务所引用的账号 ID。
+// 当用户关闭「未使用账号自动刷新」时，仍对这些账号在重置窗口到期后提供保底刷新，避免配额重置唤醒失效。
+func collectQuotaResetWatchedAccountIDs(ws model.WakeupState) map[string]bool {
+	if !ws.Enabled || len(ws.Tasks) == 0 {
+		return nil
+	}
+	watched := make(map[string]bool)
+	for _, task := range ws.Tasks {
+		if !task.Enabled {
+			continue
+		}
+		if task.Schedule.RepeatMode != "quota_reset" && !task.Schedule.WakeOnReset {
+			continue
+		}
+		for _, id := range task.Schedule.SelectedAccounts {
+			trimmed := strings.TrimSpace(id)
+			if trimmed != "" {
+				watched[trimmed] = true
+			}
+		}
+	}
+	if len(watched) == 0 {
+		return nil
+	}
+	return watched
+}
+
+// selectDueAccountIDs 筛选需要自动刷新的账号 ID（兼容无 quota_reset 监听的既有调用）。
 func selectDueAccountIDs(
 	accounts []model.Account,
 	currentAccountID string,
@@ -249,10 +273,37 @@ func selectDueAccountIDs(
 	inactiveInterval time.Duration,
 	summaryBackfillTried map[string]bool,
 ) (due []string, backfill []string) {
+	return selectDueAccountIDsWithResetWatch(
+		accounts,
+		currentAccountID,
+		now,
+		activeInterval,
+		inactiveInterval,
+		summaryBackfillTried,
+		nil,
+	)
+}
+
+// selectDueAccountIDsWithResetWatch 筛选需要自动刷新的账号 ID（跳过已失效、该类别已关闭自动刷新且无配额重置唤醒依赖、以及处于失败退避期内的账号）：
+// - 当前正在使用的账号使用 activeInterval，未使用账号使用 inactiveInterval；
+// - 若某非当前账号关闭了常规自动刷新（interval<=0），但被已启用的 quota_reset 唤醒任务监听，则在缺少配额基线或重置窗口到期后保底刷新；
+// 1) 从未拉取过配额；
+// 2) 已有模型但缺少 5h/周共享额度桶（单次进程内仅立即补拉一次，避免空桶账号死循环）；
+// 3) 距离上次刷新已达到该账号类别配置的自动刷新间隔；
+// 4) 任意 5h/周额度或模型的重置时间刚到期（超过 5 秒宽限期）。
+func selectDueAccountIDsWithResetWatch(
+	accounts []model.Account,
+	currentAccountID string,
+	now time.Time,
+	activeInterval time.Duration,
+	inactiveInterval time.Duration,
+	summaryBackfillTried map[string]bool,
+	quotaResetWatched map[string]bool,
+) (due []string, backfill []string) {
 	nowUnix := now.Unix()
 	activeSecs := int64(activeInterval.Seconds())
 	inactiveSecs := int64(inactiveInterval.Seconds())
-	if activeSecs <= 0 && inactiveSecs <= 0 {
+	if activeSecs <= 0 && inactiveSecs <= 0 && len(quotaResetWatched) == 0 {
 		return nil, nil
 	}
 
@@ -266,8 +317,9 @@ func selectDueAccountIDs(
 		if currentAccountID != "" && acc.ID == currentAccountID {
 			intervalSecs = activeSecs
 		}
-		// 当前账号所属类别（使用中 / 未使用）若关闭自动刷新，则跳过
-		if intervalSecs <= 0 {
+		watchedForReset := quotaResetWatched[acc.ID]
+		// 当前账号所属类别（使用中 / 未使用）若关闭自动刷新，且未被已启用配额重置唤醒任务监听，则跳过
+		if intervalSecs <= 0 && !watchedForReset {
 			continue
 		}
 
@@ -278,7 +330,11 @@ func selectDueAccountIDs(
 				lastSuccess = acc.Quota.LastUpdated
 			}
 			if acc.QuotaError.Timestamp >= lastSuccess {
-				retryInterval := maxInt64(minInt64(intervalSecs, 10*60), 2*60)
+				baseRetry := intervalSecs
+				if baseRetry <= 0 {
+					baseRetry = 5 * 60
+				}
+				retryInterval := maxInt64(minInt64(baseRetry, 10*60), 2*60)
 				if nowUnix-acc.QuotaError.Timestamp < retryInterval {
 					continue
 				}
@@ -290,7 +346,14 @@ func selectDueAccountIDs(
 		}
 		// 处于明确 403 封禁态时按较长间隔低频复查（至少 30 分钟），避免高频无效请求
 		if acc.Quota.IsForbidden {
-			if nowUnix-acc.Quota.LastUpdated >= maxInt64(intervalSecs, 30*60) {
+			if intervalSecs > 0 && nowUnix-acc.Quota.LastUpdated >= maxInt64(intervalSecs, 30*60) {
+				due = append(due, acc.ID)
+			}
+			continue
+		}
+		// 仅由 quota_reset 唤醒任务保底监听（未开启常规周期刷新）的账号：仅在重置窗口到期后触发保底刷新，避免平白产生常规轮询请求
+		if intervalSecs <= 0 {
+			if hasPassedResetWindow(acc.Quota, nowUnix) {
 				due = append(due, acc.ID)
 			}
 			continue

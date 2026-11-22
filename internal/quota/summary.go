@@ -73,6 +73,22 @@ func isExcludedSummaryModel(rawName, rawDisplay string) bool {
 	return isExcludedNonAntigravityModel(rawName, rawDisplay)
 }
 
+// ClassifySummaryBucket 将云端配额摘要桶 ID 归一化到统一大模型家族标识（gemini-argon / gemini-carbon / gemini-flash / claude-gpt），
+// 未命中时返回空串，供跨模块（如定时唤醒配额重置检测）统一复用。
+func ClassifySummaryBucket(bucketID string) string {
+	key, _, ok := classifySummaryBucket(bucketID)
+	if !ok {
+		return ""
+	}
+	return key
+}
+
+// ClassifyModelCategory 根据模型原始 ID 与展示名（兼容 MODEL_PLACEHOLDER_*）归类到统一大模型家族标识，
+// 未命中时返回空串，供跨模块统一复用。
+func ClassifyModelCategory(modelName, displayName string) string {
+	return classifyModelCategory(modelName, displayName)
+}
+
 func classifySummaryBucket(bucketID string) (key string, isWeekly bool, ok bool) {
 	id := strings.ToLower(strings.TrimSpace(bucketID))
 	if id == "" {
@@ -353,13 +369,22 @@ func MinQuotaPercentage(acc model.Account, now time.Time) int {
 		return minPct
 	}
 
+	coveredCategories := make(map[string]struct{}, len(cats))
 	minPct := 100
 	for _, c := range cats {
+		coveredCategories[c.Key] = struct{}{}
 		if c.Percentage < minPct {
 			minPct = c.Percentage
 		}
 	}
 	for _, m := range filteredModels {
+		// 若该模型所属分类已由 SummarizeAccountCategories 权威汇总（例如 FREE 账号隐藏 5h 后以周额度展示），
+		// 不再用原始模型可能携带的隐藏窗口数值覆盖，保持状态栏、低配额告警与卡片口径一致。
+		if cat := classifyModelCategory(m.Name, m.DisplayName); cat != "" {
+			if _, covered := coveredCategories[cat]; covered {
+				continue
+			}
+		}
 		if m.Percentage < minPct {
 			minPct = m.Percentage
 		}

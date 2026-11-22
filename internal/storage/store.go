@@ -1,9 +1,11 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -43,6 +45,7 @@ type Store struct {
 	switchHistory    []model.SwitchHistoryItem
 	wakeupState      model.WakeupState
 	wakeupHistory    []model.WakeupHistoryItem
+	startupWarnings  []string
 }
 
 // DefaultDataDir 返回默认独立数据目录，支持环境变量 MORE_ACCOUNT_DATA_DIR 覆盖。
@@ -85,26 +88,84 @@ func (s *Store) DataDir() string {
 	return s.dataDir
 }
 
+// StartupWarnings 返回启动加载本地数据期间记录的损坏文件容错恢复告警列表（深拷贝）。
+func (s *Store) StartupWarnings() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.startupWarnings) == 0 {
+		return nil
+	}
+	out := make([]string, len(s.startupWarnings))
+	copy(out, s.startupWarnings)
+	return out
+}
+
+// backupCorruptFile 将损坏的本地 JSON 文件隔离备份为 <file>.corrupt-<timestamp>，避免反复崩溃并保留现场供人工恢复。
+func (s *Store) backupCorruptFile(path string) string {
+	ts := time.Now().Format("20060102-150405")
+	backupPath := fmt.Sprintf("%s.corrupt-%s", path, ts)
+	if _, err := os.Stat(backupPath); err == nil {
+		backupPath = fmt.Sprintf("%s.corrupt-%s-%d", path, ts, time.Now().UnixNano())
+	}
+	if err := os.Rename(path, backupPath); err == nil {
+		return filepath.Base(backupPath)
+	}
+	// 若跨卷或文件句柄占用导致重命名失败，尝试复制一份只读备份保留现场
+	if raw, err := os.ReadFile(path); err == nil {
+		if wErr := WriteBytesAtomic(backupPath, raw, 0600); wErr == nil {
+			return filepath.Base(backupPath)
+		}
+	}
+	return ""
+}
+
+// loadJSONWithRecovery 以容错模式加载本地 JSON：解析损坏时自动备份隔离并记录启动告警，防止单个文件损坏导致整个应用启动 panic。
+func (s *Store) loadJSONWithRecovery(filename string, out any, isCritical bool) bool {
+	path := filepath.Join(s.dataDir, filename)
+	exists, err := ReadJSONIfExists(path, out)
+	if err == nil {
+		return exists
+	}
+
+	backupName := ""
+	if errors.Is(err, ErrCorruptJSON) {
+		backupName = s.backupCorruptFile(path)
+	}
+
+	if isCritical {
+		if backupName != "" {
+			s.startupWarnings = append(s.startupWarnings,
+				fmt.Sprintf("【高危】核心账号数据文件 %s 已损坏，已自动备份至 %s 并以空账号列表启动，请从备份手动修复或重新导入账号。", filename, backupName))
+		} else {
+			s.startupWarnings = append(s.startupWarnings,
+				fmt.Sprintf("【高危】核心账号数据文件 %s 读取失败（%v），已回退空账号列表启动，请检查数据目录文件权限或完整性。", filename, err))
+		}
+	} else {
+		if backupName != "" {
+			s.startupWarnings = append(s.startupWarnings,
+				fmt.Sprintf("本地配置文件 %s 已损坏，已备份至 %s 并恢复默认配置继续启动。", filename, backupName))
+		} else {
+			s.startupWarnings = append(s.startupWarnings,
+				fmt.Sprintf("本地配置文件 %s 读取失败（%v），已恢复默认配置继续启动。", filename, err))
+		}
+	}
+	return false
+}
+
 func (s *Store) loadAll() error {
 	var accFile persistedAccountsFile
-	if exists, err := ReadJSONIfExists(filepath.Join(s.dataDir, accountsFileName), &accFile); err != nil {
-		return err
-	} else if exists {
+	if s.loadJSONWithRecovery(accountsFileName, &accFile, true) {
 		s.accounts = accFile.Accounts
 		s.currentAccountID = accFile.CurrentAccountID
 	}
 
 	var groups []model.AccountGroup
-	if exists, err := ReadJSONIfExists(filepath.Join(s.dataDir, groupsFileName), &groups); err != nil {
-		return err
-	} else if exists {
+	if s.loadJSONWithRecovery(groupsFileName, &groups, false) {
 		s.groups = groups
 	}
 
 	settings := model.DefaultSettings()
-	if exists, err := ReadJSONIfExists(filepath.Join(s.dataDir, settingsFileName), &settings); err != nil {
-		return err
-	} else if exists {
+	if s.loadJSONWithRecovery(settingsFileName, &settings, false) {
 		settings = normalizeSettings(settings)
 		// 启动自检：若磁盘手工修改了非法代理地址或非法仓库路径，自动回退为空以免阻塞启动
 		if _, pErr := netutil.ValidateProxyURL(settings.ProxyURL); pErr != nil {
@@ -115,27 +176,24 @@ func (s *Store) loadAll() error {
 		} else {
 			settings.GitHubRepo = normRepo
 		}
+	} else {
+		// 反序列化中途失败可能污染结构体部分字段，确保完整回退默认值
+		settings = model.DefaultSettings()
 	}
 	s.settings = settings
 
 	var switchHistory []model.SwitchHistoryItem
-	if exists, err := ReadJSONIfExists(filepath.Join(s.dataDir, switchHistoryFileName), &switchHistory); err != nil {
-		return err
-	} else if exists {
+	if s.loadJSONWithRecovery(switchHistoryFileName, &switchHistory, false) {
 		s.switchHistory = switchHistory
 	}
 
 	var wakeupState model.WakeupState
-	if exists, err := ReadJSONIfExists(filepath.Join(s.dataDir, wakeupStateFileName), &wakeupState); err != nil {
-		return err
-	} else if exists {
+	if s.loadJSONWithRecovery(wakeupStateFileName, &wakeupState, false) {
 		s.wakeupState = wakeupState
 	}
 
 	var wakeupHistory []model.WakeupHistoryItem
-	if exists, err := ReadJSONIfExists(filepath.Join(s.dataDir, wakeupHistoryFileName), &wakeupHistory); err != nil {
-		return err
-	} else if exists {
+	if s.loadJSONWithRecovery(wakeupHistoryFileName, &wakeupHistory, false) {
 		s.wakeupHistory = wakeupHistory
 	}
 
@@ -172,6 +230,10 @@ func (s *Store) loadAll() error {
 }
 
 func normalizeSettings(in model.AppSettings) model.AppSettings {
+	return normalizeSettingsForOS(in, runtime.GOOS)
+}
+
+func normalizeSettingsForOS(in model.AppSettings, goos string) model.AppSettings {
 	// 严格遵守设计约束：仅允许 light 或 dark，默认始终为 light（不跟随系统暗色）。
 	if in.Theme != "dark" {
 		in.Theme = "light"
@@ -200,12 +262,14 @@ func normalizeSettings(in model.AppSettings) model.AppSettings {
 	} else if in.InactiveAutoRefreshMinutes > 1440 {
 		in.InactiveAutoRefreshMinutes = 1440
 	}
-	// CloseBehavior: 缺省或非法值均默认归为后台运行，保障旧配置平滑升级。
+	// CloseBehavior: 尊重老配置或用户显式写入的 background / quit，缺省或非法值按平台默认值归一化（macOS 默认后台，Windows/Linux 默认直接退出）。
 	switch strings.TrimSpace(in.CloseBehavior) {
+	case model.CloseBehaviorBackground:
+		in.CloseBehavior = model.CloseBehaviorBackground
 	case model.CloseBehaviorQuit:
 		in.CloseBehavior = model.CloseBehaviorQuit
 	default:
-		in.CloseBehavior = model.CloseBehaviorBackground
+		in.CloseBehavior = model.DefaultCloseBehaviorForOS(goos)
 	}
 	// MacStatusBarMode: 缺省或非法值默认归为图标+额度百分比。
 	switch strings.TrimSpace(in.MacStatusBarMode) {
@@ -354,6 +418,9 @@ func (s *Store) hasGroupLocked(groupID string) bool {
 }
 
 func (s *Store) writeAccountsFile(currentID string, accounts []model.Account) error {
+	if accounts == nil {
+		accounts = []model.Account{}
+	}
 	payload := persistedAccountsFile{
 		Version:          "1.0",
 		CurrentAccountID: currentID,
@@ -363,6 +430,9 @@ func (s *Store) writeAccountsFile(currentID string, accounts []model.Account) er
 }
 
 func (s *Store) writeGroupsFile(groups []model.AccountGroup) error {
+	if groups == nil {
+		groups = []model.AccountGroup{}
+	}
 	return WriteJSONAtomic(filepath.Join(s.dataDir, groupsFileName), groups, 0600)
 }
 
@@ -371,14 +441,23 @@ func (s *Store) writeSettingsFile(settings model.AppSettings) error {
 }
 
 func (s *Store) writeSwitchHistoryFile(items []model.SwitchHistoryItem) error {
+	if items == nil {
+		items = []model.SwitchHistoryItem{}
+	}
 	return WriteJSONAtomic(filepath.Join(s.dataDir, switchHistoryFileName), items, 0600)
 }
 
 func (s *Store) writeWakeupStateFile(state model.WakeupState) error {
+	if state.Tasks == nil {
+		state.Tasks = []model.WakeupTask{}
+	}
 	return WriteJSONAtomic(filepath.Join(s.dataDir, wakeupStateFileName), state, 0600)
 }
 
 func (s *Store) writeWakeupHistoryFile(items []model.WakeupHistoryItem) error {
+	if items == nil {
+		items = []model.WakeupHistoryItem{}
+	}
 	return WriteJSONAtomic(filepath.Join(s.dataDir, wakeupHistoryFileName), items, 0600)
 }
 
@@ -946,14 +1025,15 @@ func (s *Store) AppendSwitchHistory(item model.SwitchHistoryItem) error {
 	return nil
 }
 
-// ClearSwitchHistory 清空全部切号历史。
+// ClearSwitchHistory 清空全部切号历史（落盘写空数组 [] 而非 null）。
 func (s *Store) ClearSwitchHistory() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.writeSwitchHistoryFile(nil); err != nil {
+	empty := []model.SwitchHistoryItem{}
+	if err := s.writeSwitchHistoryFile(empty); err != nil {
 		return err
 	}
-	s.switchHistory = nil
+	s.switchHistory = empty
 	return nil
 }
 
@@ -1063,13 +1143,14 @@ func (s *Store) AppendWakeupHistory(item model.WakeupHistoryItem) error {
 	return nil
 }
 
-// ClearWakeupHistory 清空唤醒执行历史。
+// ClearWakeupHistory 清空唤醒执行历史（落盘写空数组 [] 而非 null）。
 func (s *Store) ClearWakeupHistory() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.writeWakeupHistoryFile(nil); err != nil {
+	empty := []model.WakeupHistoryItem{}
+	if err := s.writeWakeupHistoryFile(empty); err != nil {
 		return err
 	}
-	s.wakeupHistory = nil
+	s.wakeupHistory = empty
 	return nil
 }

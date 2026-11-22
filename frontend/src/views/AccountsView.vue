@@ -35,8 +35,14 @@ const appStore = useAppStore()
 const filterMenuOpen = ref(false)
 const filterWrapRef = ref<HTMLElement | null>(null)
 const batchGroupTarget = ref('')
+const batchAssigning = ref(false)
 const draggingAccountId = ref<string | null>(null)
 const dragOverAccountId = ref<string | null>(null)
+
+const allVisibleSelected = computed(() => {
+  const visibleIds = appStore.filteredAccounts.map((a) => a.id)
+  return visibleIds.length > 0 && visibleIds.every((id) => appStore.selectedAccountIds.includes(id))
+})
 
 const canReorder = computed(
   () => appStore.sortBy === 'custom' && appStore.filteredAccounts.length > 1,
@@ -145,11 +151,14 @@ function toggleSelectAllVisible() {
 }
 
 async function applyBatchGroup() {
-  if (appStore.selectedAccountIds.length === 0) return
+  if (appStore.selectedAccountIds.length === 0 || batchAssigning.value) return
+  batchAssigning.value = true
   try {
     await appStore.assignAccountsToGroup(appStore.selectedAccountIds, batchGroupTarget.value)
   } catch (err) {
     appStore.notify(`批量归组失败：${extractErrorMessage(err)}`, 'error')
+  } finally {
+    batchAssigning.value = false
   }
 }
 
@@ -501,7 +510,7 @@ const refreshButtonTooltip = computed(() => {
           style="color: var(--text-secondary)"
           @click="toggleSelectAllVisible"
         >
-          全选当前列表
+          {{ allVisibleSelected ? '取消全选当前列表' : '全选当前列表' }}
         </button>
       </div>
 
@@ -516,12 +525,13 @@ const refreshButtonTooltip = computed(() => {
           />
           <button
             type="button"
-            class="h-7 inline-flex items-center gap-1 px-2.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)]"
+            :disabled="batchAssigning"
+            class="h-7 inline-flex items-center gap-1 px-2.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
             style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
             @click="applyBatchGroup"
           >
             <FolderInput class="w-3.5 h-3.5" />
-            归组
+            {{ batchAssigning ? '归组中...' : '归组' }}
           </button>
         </div>
 

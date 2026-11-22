@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -33,6 +34,9 @@ func shellExecuteOpen(target string) error {
 		0,
 		swShowNormal,
 	)
+	// 显式保活传入 Win32 API 的 UTF-16 指针，满足 Go unsafe.Pointer 内存安全规范
+	runtime.KeepAlive(verbPtr)
+	runtime.KeepAlive(targetPtr)
 	// ShellExecuteW 返回值大于 32 表示调用成功
 	if ret <= 32 {
 		if callErr != nil && callErr != syscall.Errno(0) {

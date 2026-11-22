@@ -114,7 +114,7 @@ async function handleCopyPrimaryLink() {
 }
 
 async function handleRecheck() {
-  await appStore.checkForUpdates(false)
+  await appStore.checkForUpdates(false, info.value?.repo ?? '')
 }
 </script>
 

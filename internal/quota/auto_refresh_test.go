@@ -157,3 +157,72 @@ func TestSelectDueAccountIDsIndependentToggle(t *testing.T) {
 		t.Fatalf("期望仅刷新 inactive-acc，实际 %v", due)
 	}
 }
+
+func TestSelectDueAccountIDsQuotaResetWatchFallbackWhenInactiveDisabled(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	accounts := []model.Account{
+		{
+			// 未使用且未被 quota_reset 监听，重置窗口到期也不应刷新
+			ID: "unwatched-reset",
+			Quota: &model.QuotaData{
+				LastUpdated: now.Add(-10 * time.Minute).Unix(),
+				SummaryBuckets: []model.QuotaBucket{
+					{BucketID: "3p-5h", Percentage: 0, ResetTime: now.Add(-15 * time.Second).Format(time.RFC3339)},
+				},
+			},
+		},
+		{
+			// 未使用但被 quota_reset 监听，重置窗口未到期：不应白白触发常规轮询
+			ID: "watched-future",
+			Quota: &model.QuotaData{
+				LastUpdated: now.Add(-3 * time.Hour).Unix(),
+				SummaryBuckets: []model.QuotaBucket{
+					{BucketID: "3p-5h", Percentage: 50, ResetTime: now.Add(2 * time.Hour).Format(time.RFC3339)},
+				},
+			},
+		},
+		{
+			// 未使用且被 quota_reset 监听，重置窗口刚过期：应触发保底刷新
+			ID: "watched-expired",
+			Quota: &model.QuotaData{
+				LastUpdated: now.Add(-10 * time.Minute).Unix(),
+				SummaryBuckets: []model.QuotaBucket{
+					{BucketID: "3p-5h", Percentage: 0, ResetTime: now.Add(-20 * time.Second).Format(time.RFC3339)},
+				},
+			},
+		},
+		{
+			// 未使用且被 quota_reset 监听，尚无配额基线：应触发首次拉取
+			ID: "watched-no-quota",
+		},
+	}
+
+	ws := model.WakeupState{
+		Enabled: true,
+		Tasks: []model.WakeupTask{
+			{
+				ID:      "t-reset",
+				Enabled: true,
+				Schedule: model.WakeupSchedule{
+					RepeatMode:       "quota_reset",
+					SelectedAccounts: []string{"watched-future", "watched-expired", "watched-no-quota"},
+				},
+			},
+		},
+	}
+	watched := collectQuotaResetWatchedAccountIDs(ws)
+	due, _ := selectDueAccountIDsWithResetWatch(accounts, "other-active", now, 5*time.Minute, 0, nil, watched)
+
+	want := map[string]bool{
+		"watched-expired":  true,
+		"watched-no-quota": true,
+	}
+	if len(due) != len(want) {
+		t.Fatalf("期望保底选出 %d 个账号，实际 %d: %v", len(want), len(due), due)
+	}
+	for _, id := range due {
+		if !want[id] {
+			t.Fatalf("意外选出账号 %q (all=%v)", id, due)
+		}
+	}
+}

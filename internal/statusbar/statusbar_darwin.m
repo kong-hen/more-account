@@ -104,11 +104,15 @@ static void MATryInstallWindowHooks(int attemptsLeft) {
 @property (nonatomic, strong) NSImage *templateIcon;
 @property (nonatomic, strong) NSDictionary *lastSnapshot;
 @property (nonatomic, assign) BOOL stopped;
+@property (nonatomic, assign) BOOL menuOpen;
+@property (nonatomic, assign) BOOL pendingMenuRebuild;
 - (void)applySnapshotJSON:(NSString *)jsonString;
 - (void)stop;
 @end
 
 static MAStatusBarController *gController = nil;
+static id gWakeObserver = nil;
+static id gAppNapActivity = nil;
 
 @implementation MAStatusBarController
 
@@ -364,11 +368,19 @@ static MAStatusBarController *gController = nil;
 
     BOOL visible = [snap[@"visible"] boolValue];
     if (!visible) {
+        self.pendingMenuRebuild = NO;
         [self removeStatusItem];
         return;
     }
     [self ensureStatusItem];
     [self updateButtonWithSnapshot:snap];
+    // 菜单处于展开追踪期时禁止调用 removeAllItems，避免正在操作的菜单或二级子菜单突然关闭/闪断；
+    // 仅缓存最新快照并标记待重建，待 menuDidClose: 时平滑刷新。
+    if (self.menuOpen) {
+        self.pendingMenuRebuild = YES;
+        return;
+    }
+    self.pendingMenuRebuild = NO;
     [self rebuildMenuWithSnapshot:snap];
 }
 
@@ -376,6 +388,8 @@ static MAStatusBarController *gController = nil;
     if (self.stopped) {
         return;
     }
+    self.menuOpen = YES;
+    self.pendingMenuRebuild = NO;
     // 展开菜单前在主线程同步向 Go 内存 Store 拉取最新快照（无网络 I/O、不回派主线程），保证重置倒计时实时精确
     char *freshJSON = maStatusBarFetchSnapshotJSON();
     if (freshJSON != NULL) {
@@ -387,6 +401,18 @@ static MAStatusBarController *gController = nil;
             [self updateButtonWithSnapshot:snap];
             [self rebuildMenuWithSnapshot:snap];
         }
+    }
+}
+
+- (void)menuDidClose:(NSMenu *)menu {
+    self.menuOpen = NO;
+    if (self.stopped) {
+        self.pendingMenuRebuild = NO;
+        return;
+    }
+    if (self.pendingMenuRebuild && self.lastSnapshot != nil) {
+        self.pendingMenuRebuild = NO;
+        [self rebuildMenuWithSnapshot:self.lastSnapshot];
     }
 }
 
@@ -461,11 +487,40 @@ void MAStatusBarStart(const void *iconBytes, int iconLen, bool closeToBackground
         } else {
             gController.stopped = NO;
         }
+        // 注册系统休眠唤醒通知，使 Go 侧定时唤醒、配额刷新与账号探测在机器醒来后即时补检
+        if (gWakeObserver == nil) {
+            NSNotificationCenter *wsCenter = [[NSWorkspace sharedWorkspace] notificationCenter];
+            gWakeObserver = [wsCenter addObserverForName:NSWorkspaceDidWakeNotification
+                                                  object:nil
+                                                   queue:[NSOperationQueue mainQueue]
+                                              usingBlock:^(NSNotification * _Nonnull note) {
+                (void)note;
+                maStatusBarOnSystemWake();
+            }];
+        }
     });
 }
 
 void MAStatusBarSetCloseToBackground(bool enabled) {
     atomic_store(&gCloseToBackground, enabled);
+}
+
+void MAStatusBarSetPreventAppNap(bool enabled) {
+    MARunOnMainThread(^{
+        if (enabled) {
+            if (gAppNapActivity == nil) {
+                // 使用 NSActivityUserInitiatedAllowingIdleSystemSleep 抑制后台 App Nap 定时器合并，同时允许系统正常空闲休眠
+                gAppNapActivity = [[NSProcessInfo processInfo]
+                    beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep
+                                      reason:@"More Account background scheduled wakeup and quota refresh"];
+            }
+        } else {
+            if (gAppNapActivity != nil) {
+                [[NSProcessInfo processInfo] endActivity:gAppNapActivity];
+                gAppNapActivity = nil;
+            }
+        }
+    });
 }
 
 void MAStatusBarUpdateJSON(const char *snapshotJSON) {
@@ -485,6 +540,14 @@ void MAStatusBarUpdateJSON(const char *snapshotJSON) {
 
 void MAStatusBarStop(void) {
     MARunOnMainThread(^{
+        if (gWakeObserver != nil) {
+            [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:gWakeObserver];
+            gWakeObserver = nil;
+        }
+        if (gAppNapActivity != nil) {
+            [[NSProcessInfo processInfo] endActivity:gAppNapActivity];
+            gAppNapActivity = nil;
+        }
         if (gController != nil) {
             [gController stop];
             gController = nil;

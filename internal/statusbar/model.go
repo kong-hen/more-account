@@ -50,12 +50,15 @@ type Callbacks struct {
 	OnRefreshAll     func()
 	OnTogglePrivacy  func()
 	OnQuit           func()
+	OnSystemWake     func()
 }
 
-// Controller 抽象跨平台状态栏与窗口后台钩子生命周期控制。
+// Controller 抽象跨平台状态栏、窗口后台钩子、休眠唤醒监听与防 App Nap 生命周期控制。
 type Controller interface {
 	Start(closeToBackground bool)
 	SetCloseToBackground(enabled bool)
+	SetSystemWakeCallback(fn func())
+	SetPreventAppNap(enabled bool)
 	Update(snap Snapshot)
 	Stop()
 }

@@ -30,6 +30,12 @@ type SwitchOutcome struct {
 	DurationMs    int64         `json:"durationMs"`
 }
 
+// 包内默认凭据与路径函数钩子，便于单元测试注入故障以验证 IDE 半写回滚等边界路径。
+var (
+	writeSystemCredentialsFn = WriteSystemCredentials
+	defaultIDEStateDBPathFn  = DefaultIDEStateDBPath
+)
+
 // Service 编排反重力账号切换，内置单飞锁防止并发切号导致凭据竞争写入。
 type Service struct {
 	mu          sync.Mutex
@@ -121,7 +127,7 @@ func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*Switch
 	var writeErr error
 	switch target {
 	case "desktop":
-		writeErr = WriteSystemCredentials(acc, false)
+		writeErr = writeSystemCredentialsFn(acc, false)
 		// 若本机存在旧版 desktop state.vscdb，一并同步兼容
 		if writeErr == nil {
 			if legacyDB := DefaultDesktopStateDBPath(); legacyDB != "" {
@@ -133,17 +139,26 @@ func (s *Service) SwitchAccount(ctx context.Context, req SwitchRequest) (*Switch
 			}
 		}
 	case "cli":
-		writeErr = WriteSystemCredentials(acc, true)
+		writeErr = writeSystemCredentialsFn(acc, true)
 	case "ide":
-		// Antigravity IDE 同时写入 state.vscdb 与共享系统凭据，兼容新旧版本
-		ideDB := DefaultIDEStateDBPath()
+		// Antigravity IDE 同时写入 state.vscdb 与共享系统凭据，兼容新旧版本；
+		// 写入前先快照受影响键，若后续系统凭据写入失败则精确回滚 state.vscdb，防止残留半写状态引发探测器误报。
+		ideDB := defaultIDEStateDBPathFn()
+		var prevSnap *StateDBKeySnapshot
 		if ideDB == "" {
 			writeErr = fmt.Errorf("无法定位 Antigravity IDE state.vscdb 路径")
 		} else {
+			if snap, snapErr := SnapshotStateDBKeys(ideDB); snapErr == nil {
+				prevSnap = snap
+			}
 			writeErr = InjectAccountToStateDB(ideDB, acc)
 		}
 		if writeErr == nil {
-			if sysErr := WriteSystemCredentials(acc, false); sysErr != nil {
+			if sysErr := writeSystemCredentialsFn(acc, false); sysErr != nil {
+				if prevSnap != nil {
+					_ = RestoreStateDBKeys(ideDB, prevSnap)
+				}
+				InvalidateSystemCredentialCache()
 				writeErr = sysErr
 			}
 		}
