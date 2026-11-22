@@ -47,6 +47,7 @@ export const useAppStore = defineStore('app', () => {
   const appVersion = ref('1.0.0')
   const defaultGitHubRepo = ref('kong-hen/more-account')
   const hasBuiltInOAuth = ref(false)
+  const platform = ref<string>('darwin')
   const updateInfo = ref<UpdateCheckResult | null>(null)
   const checkingUpdate = ref(false)
   const updateModalOpen = ref(false)
@@ -58,7 +59,7 @@ export const useAppStore = defineStore('app', () => {
     cliDirOk: false,
   })
 
-  // 默认严格为浅色主题，不跟随系统暗色；当前账号默认每 5 分钟刷新、未使用账号默认每 60 分钟刷新
+  // 默认严格为浅色主题，不跟随系统暗色；默认点击关闭按钮隐藏到后台运行、macOS 状态栏显示图标+额度
   const settings = ref<AppSettings>({
     theme: 'light',
     privacyMode: false,
@@ -67,6 +68,8 @@ export const useAppStore = defineStore('app', () => {
     lowQuotaThreshold: 20,
     autoRefreshMinutes: 5,
     inactiveAutoRefreshMinutes: 60,
+    closeBehavior: 'background',
+    macStatusBarMode: 'icon_quota',
     autoCheckUpdate: true,
   })
 
@@ -212,6 +215,11 @@ export const useAppStore = defineStore('app', () => {
         ...settings.value,
         ...(state.settings ?? {}),
         theme: state.settings?.theme === 'dark' ? 'dark' : 'light',
+        closeBehavior: state.settings?.closeBehavior === 'quit' ? 'quit' : 'background',
+        macStatusBarMode:
+          state.settings?.macStatusBarMode === 'icon_only' || state.settings?.macStatusBarMode === 'off'
+            ? state.settings.macStatusBarMode
+            : 'icon_quota',
       }
       clientInfo.value = state.clientInfo ?? clientInfo.value
       dataDir.value = state.dataDir ?? ''
@@ -222,6 +230,9 @@ export const useAppStore = defineStore('app', () => {
         defaultGitHubRepo.value = state.defaultGitHubRepo
       }
       hasBuiltInOAuth.value = Boolean(state.hasBuiltInOAuth)
+      if (state.platform) {
+        platform.value = state.platform
+      }
       applyTheme(settings.value.theme)
 
       // 注册后端事件推送（手动批量进度 + 后台自动刷新状态与完成通知）
@@ -291,6 +302,44 @@ export const useAppStore = defineStore('app', () => {
           oauthLastError.value = message
           oauthFailedSeq.value += 1
           notify(`OAuth 授权失败：${message}`, 'error', 4800)
+        }),
+      )
+      // 监听状态栏发起的切号完成事件：同步刷新账号列表与切号历史
+      cleanups.push(
+        onWailsEvent('account:switched', (payload: unknown) => {
+          const p = payload as { accountId?: string; email?: string } | null
+          void reloadAccounts().catch(() => {})
+          void loadSwitchHistory().catch(() => {})
+          if (p?.email) {
+            notify(`已通过状态栏切换至 ${maskEmail(p.email, settings.value.privacyMode)}`, 'success')
+          }
+        }),
+      )
+      // 监听状态栏等后台入口触发的全局设置同步（例如隐私脱敏模式切换）
+      cleanups.push(
+        onWailsEvent('settings:updated', (payload: unknown) => {
+          const next = payload as Partial<AppSettings> | null
+          if (!next) return
+          settings.value = {
+            ...settings.value,
+            ...next,
+            theme: next.theme === 'dark' ? 'dark' : 'light',
+            closeBehavior: next.closeBehavior === 'quit' ? 'quit' : 'background',
+            macStatusBarMode:
+              next.macStatusBarMode === 'icon_only' || next.macStatusBarMode === 'off'
+                ? next.macStatusBarMode
+                : 'icon_quota',
+          }
+          applyTheme(settings.value.theme)
+        }),
+      )
+      // 监听状态栏后台动作失败提示
+      cleanups.push(
+        onWailsEvent('statusbar:error', (payload: unknown) => {
+          const p = payload as { message?: string } | null
+          if (p?.message) {
+            notify(p.message, 'error', 4600)
+          }
         }),
       )
 
@@ -856,6 +905,15 @@ export const useAppStore = defineStore('app', () => {
     return sorted
   })
 
+  async function quitApp() {
+    if (!isWailsRuntime()) return
+    try {
+      await api.quitApp()
+    } catch (err) {
+      notify(`退出应用失败：${extractErrorMessage(err)}`, 'error')
+    }
+  }
+
   return {
     loading,
     activeSection,
@@ -870,6 +928,7 @@ export const useAppStore = defineStore('app', () => {
     appVersion,
     defaultGitHubRepo,
     hasBuiltInOAuth,
+    platform,
     updateInfo,
     checkingUpdate,
     updateModalOpen,
@@ -935,5 +994,6 @@ export const useAppStore = defineStore('app', () => {
     requestSelectDetailAccount,
     confirmDiscardDetailChanges,
     cancelDiscardDetailChanges,
+    quitApp,
   }
 })

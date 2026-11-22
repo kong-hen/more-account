@@ -13,13 +13,17 @@ import {
   ArrowUpCircle,
   Eye,
   EyeOff,
+  Minimize2,
+  LogOut,
+  Power,
+  PanelTop,
 } from 'lucide-vue-next'
 import BaseModal from '@/components/common/BaseModal.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTokenUsageStore } from '@/stores/tokenUsageStore'
 import { api, extractErrorMessage } from '@/services/api'
-import type { AppSettings, RuntimeTarget } from '@/types/models'
+import type { AppSettings, MacStatusBarMode, RuntimeTarget } from '@/types/models'
 
 const props = defineProps<{
   open: boolean
@@ -103,6 +107,26 @@ function setInactiveAutoRefreshMinutes(val: string) {
   form.value.inactiveAutoRefreshMinutes = Number.isFinite(num) ? num : 60
 }
 
+const isMacOS = computed(() => appStore.platform === 'darwin')
+
+const macStatusBarOptions: Array<{ value: MacStatusBarMode; label: string; desc: string }> = [
+  {
+    value: 'icon_quota',
+    label: '图标 + 额度百分比',
+    desc: '在顶部菜单栏实时显示最低剩余额度（默认）',
+  },
+  {
+    value: 'icon_only',
+    label: '仅显示图标',
+    desc: '精简占位，点击展开原生菜单查看配额',
+  },
+  {
+    value: 'off',
+    label: '关闭状态栏',
+    desc: '不在顶部菜单栏显示，可通过 Dock 唤回窗口',
+  },
+]
+
 const runtimeOptions: Array<{ value: RuntimeTarget; label: string; desc: string }> = [
   {
     value: 'desktop',
@@ -173,6 +197,11 @@ async function handleSave() {
     const payload: AppSettings = {
       ...form.value,
       lowQuotaThreshold: cleanThreshold,
+      closeBehavior: form.value.closeBehavior === 'quit' ? 'quit' : 'background',
+      macStatusBarMode:
+        form.value.macStatusBarMode === 'icon_only' || form.value.macStatusBarMode === 'off'
+          ? form.value.macStatusBarMode
+          : 'icon_quota',
       desktopAppPath: (form.value.desktopAppPath ?? '').trim(),
       ideAppPath: (form.value.ideAppPath ?? '').trim(),
       tokenUsageDataDir: (form.value.tokenUsageDataDir ?? '').trim(),
@@ -247,6 +276,91 @@ async function handleSave() {
               <div class="text-[11px]" style="color: var(--text-muted)">低亮度护眼</div>
             </div>
           </button>
+        </div>
+      </section>
+
+      <!-- 窗口关闭行为与 macOS 顶部状态栏配置 -->
+      <section
+        class="p-3.5 rounded-xl border space-y-3"
+        style="border-color: var(--border-subtle); background-color: var(--bg-app)"
+      >
+        <div>
+          <div class="text-xs font-semibold" style="color: var(--text-primary)">窗口关闭与后台运行</div>
+          <div class="mt-0.5 text-[11px]" style="color: var(--text-muted)">
+            {{
+              isMacOS
+                ? '点击关闭按钮或按 ⌘W 时仅隐藏页面，程序继续在后台运行；可通过顶部状态栏或 Dock 图标重新打开，按 ⌘Q 彻底退出'
+                : '点击关闭按钮时隐藏窗口并在后台继续运行（定时刷新与唤醒不受影响），再次打开桌面图标即可恢复窗口'
+            }}
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2.5">
+          <button
+            type="button"
+            class="flex items-start gap-2.5 p-2.5 rounded-xl border text-left cursor-pointer transition-colors"
+            :style="
+              form.closeBehavior !== 'quit'
+                ? { borderColor: 'var(--accent)', backgroundColor: 'var(--accent-soft)' }
+                : { borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)' }
+            "
+            @click="form.closeBehavior = 'background'"
+          >
+            <Minimize2
+              class="w-4 h-4 shrink-0 mt-0.5"
+              :style="{ color: form.closeBehavior !== 'quit' ? 'var(--accent)' : 'var(--text-muted)' }"
+              aria-hidden="true"
+            />
+            <div>
+              <div class="text-xs font-semibold" style="color: var(--text-primary)">隐藏到后台运行</div>
+              <div class="text-[11px] mt-0.5" style="color: var(--text-muted)">关闭页面不退出（默认）</div>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            class="flex items-start gap-2.5 p-2.5 rounded-xl border text-left cursor-pointer transition-colors"
+            :style="
+              form.closeBehavior === 'quit'
+                ? { borderColor: 'var(--accent)', backgroundColor: 'var(--accent-soft)' }
+                : { borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)' }
+            "
+            @click="form.closeBehavior = 'quit'"
+          >
+            <LogOut
+              class="w-4 h-4 shrink-0 mt-0.5"
+              :style="{ color: form.closeBehavior === 'quit' ? 'var(--accent)' : 'var(--text-muted)' }"
+              aria-hidden="true"
+            />
+            <div>
+              <div class="text-xs font-semibold" style="color: var(--text-primary)">直接退出程序</div>
+              <div class="text-[11px] mt-0.5" style="color: var(--text-muted)">点击关闭即结束后台任务</div>
+            </div>
+          </button>
+        </div>
+
+        <div v-if="isMacOS" class="space-y-2 pt-2.5 border-t" style="border-color: var(--border-subtle)">
+          <div class="flex items-center gap-1.5 text-xs font-semibold" style="color: var(--text-primary)">
+            <PanelTop class="w-3.5 h-3.5" style="color: var(--text-secondary)" aria-hidden="true" />
+            <span>macOS 顶部状态栏显示</span>
+          </div>
+          <div class="grid grid-cols-3 gap-2">
+            <button
+              v-for="opt in macStatusBarOptions"
+              :key="opt.value"
+              type="button"
+              class="p-2.5 rounded-xl border text-left cursor-pointer transition-colors"
+              :style="
+                form.macStatusBarMode === opt.value
+                  ? { borderColor: 'var(--accent)', backgroundColor: 'var(--accent-soft)' }
+                  : { borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)' }
+              "
+              @click="form.macStatusBarMode = opt.value"
+            >
+              <div class="text-xs font-semibold" style="color: var(--text-primary)">{{ opt.label }}</div>
+              <div class="text-[10.5px] leading-snug mt-0.5" style="color: var(--text-muted)">{{ opt.desc }}</div>
+            </button>
+          </div>
         </div>
       </section>
 
@@ -646,6 +760,16 @@ async function handleSave() {
     </div>
 
     <template #footer>
+      <button
+        type="button"
+        :disabled="saving"
+        class="mr-auto inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border cursor-pointer transition-colors hover:bg-[var(--danger-soft)] disabled:opacity-50"
+        style="border-color: var(--border-strong); color: var(--danger-text); background-color: var(--bg-surface)"
+        @click="appStore.quitApp()"
+      >
+        <Power class="w-3.5 h-3.5" aria-hidden="true" />
+        <span>彻底退出应用</span>
+      </button>
       <button
         type="button"
         class="px-3.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"

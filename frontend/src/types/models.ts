@@ -92,6 +92,8 @@ export interface AccountGroup {
 
 export type ThemeMode = 'light' | 'dark'
 export type RuntimeTarget = 'desktop' | 'ide' | 'cli'
+export type CloseBehavior = 'background' | 'quit'
+export type MacStatusBarMode = 'icon_quota' | 'icon_only' | 'off'
 export type AppSection = 'accounts' | 'usage' | 'wakeup' | 'history'
 
 export interface AppSettings {
@@ -102,6 +104,8 @@ export interface AppSettings {
   lowQuotaThreshold: number
   autoRefreshMinutes: number
   inactiveAutoRefreshMinutes: number
+  closeBehavior: CloseBehavior
+  macStatusBarMode: MacStatusBarMode
   desktopAppPath?: string
   ideAppPath?: string
   tokenUsageDataDir?: string
@@ -163,6 +167,7 @@ export interface BootstrapState {
   appVersion: string
   defaultGitHubRepo: string
   hasBuiltInOAuth: boolean
+  platform?: string
 }
 
 export interface RefreshStats {

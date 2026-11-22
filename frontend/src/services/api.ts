@@ -33,6 +33,7 @@ interface WailsAppBridge {
   OpenExternalURL(rawURL: string): Promise<void>
   OpenDataFolder(): Promise<void>
   PickDirectory(title: string): Promise<string>
+  QuitApp(): Promise<void>
 
   ListAccounts(): Promise<Account[]>
   GetCurrentAccountID(): Promise<string>
@@ -132,6 +133,7 @@ export const api = {
   openExternalURL: (rawURL: string) => getBridge().OpenExternalURL(rawURL),
   openDataFolder: () => getBridge().OpenDataFolder(),
   pickDirectory: (title: string) => getBridge().PickDirectory(title),
+  quitApp: () => getBridge().QuitApp(),
 
   listAccounts: () => getBridge().ListAccounts(),
   getCurrentAccountID: () => getBridge().GetCurrentAccountID(),
