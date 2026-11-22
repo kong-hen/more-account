@@ -18,6 +18,9 @@ import (
 // ErrOAuthCanceled 表示用户主动取消或由新会话替代了旧的 OAuth 授权等待。
 var ErrOAuthCanceled = errors.New("已取消 OAuth 授权")
 
+// ErrOAuthTimeout 表示等待 OAuth 授权回调超过预设时限。
+var ErrOAuthTimeout = errors.New("等待 OAuth 授权超时")
+
 // ErrOAuthProcessing 表示当前授权会话已收到回调，正在后台换取令牌并同步账号信息。
 var ErrOAuthProcessing = errors.New("回调已提交，正在换取令牌并同步账号信息，请稍候")
 
@@ -329,6 +332,9 @@ func (m *LoginManager) createAndActivateSessionLocked(cfg SessionConfig) (*activ
 			writeCallbackHTML(w, http.StatusBadRequest, false, "安全校验失败（state 缺失或不匹配），请返回原有授权页面完成操作。")
 			return
 		}
+		// 通过 state 安全校验意味着已收到真实浏览器授权回调（无论授权成功、被拒绝还是缺 code），
+		// 立即清除静默预监听标志，确保任何真实回调报错均向用户可见而绝不被静默吞掉。
+		sess.silent.Store(false)
 		if errParam := strings.TrimSpace(q.Get("error")); errParam != "" {
 			writeCallbackHTML(w, http.StatusBadRequest, false, "授权失败，请返回 More Account 查看详情。")
 			sess.deliverErr(fmt.Errorf("Google 授权被拒绝: %s", errParam))
@@ -504,7 +510,7 @@ func (m *LoginManager) WaitForState(ctx context.Context, expectedState string) (
 	case <-ctx.Done():
 		m.recordEndedSilent(sess)
 		m.cancelIfCurrent(sess)
-		return "", fmt.Errorf("等待 OAuth 授权超时")
+		return "", ErrOAuthTimeout
 	}
 }
 

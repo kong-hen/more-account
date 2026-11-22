@@ -91,11 +91,11 @@ type scanSnapshot struct {
 
 // Service 提供严格只读的 Antigravity 本地 Token 用量扫描、缓存与多维聚合查询。
 type Service struct {
-	cacheDir       string
-	getCustomDir   func() string
-	scanMu         sync.Mutex
-	snapMu         sync.RWMutex
-	snapshot       *scanSnapshot
+	cacheDir     string
+	getCustomDir func() string
+	scanMu       sync.Mutex
+	snapMu       sync.RWMutex
+	snapshot     *scanSnapshot
 }
 
 // NewService 创建 Token 用量只读分析服务。

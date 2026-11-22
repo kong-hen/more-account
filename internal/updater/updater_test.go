@@ -10,13 +10,13 @@ import (
 
 func TestNormalizeGitHubRepo(t *testing.T) {
 	cases := map[string]string{
-		"":                                                   "",
-		"  ":                                                 "",
-		"kong-hen/more-account":                              "kong-hen/more-account",
-		"https://github.com/kong-hen/more-account":           "kong-hen/more-account",
-		"https://github.com/kong-hen/more-account.git":       "kong-hen/more-account",
-		"https://github.com/kong-hen/more-account/releases":  "kong-hen/more-account",
-		"github.com/org-1/app_2":                             "org-1/app_2",
+		"":                      "",
+		"  ":                    "",
+		"kong-hen/more-account": "kong-hen/more-account",
+		"https://github.com/kong-hen/more-account":          "kong-hen/more-account",
+		"https://github.com/kong-hen/more-account.git":      "kong-hen/more-account",
+		"https://github.com/kong-hen/more-account/releases": "kong-hen/more-account",
+		"github.com/org-1/app_2":                            "org-1/app_2",
 	}
 	for input, want := range cases {
 		got, err := NormalizeGitHubRepo(input)

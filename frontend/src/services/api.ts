@@ -54,6 +54,7 @@ interface WailsAppBridge {
   SubmitOAuthCallbackURL(rawURL: string): Promise<void>
   CancelOAuthLogin(): Promise<void>
   CancelSilentOAuthLogin(): Promise<boolean>
+  MarkOAuthUserInitiated(state: string): Promise<void>
 
   RefreshAccountQuota(accountId: string): Promise<Account>
   RefreshAllQuotas(): Promise<RefreshStats>
@@ -160,6 +161,7 @@ export const api = {
   submitOAuthCallbackURL: (rawURL: string) => getBridge().SubmitOAuthCallbackURL(rawURL),
   cancelOAuthLogin: () => getBridge().CancelOAuthLogin(),
   cancelSilentOAuthLogin: () => getBridge().CancelSilentOAuthLogin(),
+  markOAuthUserInitiated: (state = '') => getBridge().MarkOAuthUserInitiated(state),
 
   refreshAccountQuota: (accountId: string) => getBridge().RefreshAccountQuota(accountId),
   refreshAllQuotas: () => getBridge().RefreshAllQuotas(),

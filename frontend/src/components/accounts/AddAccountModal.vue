@@ -148,6 +148,15 @@ watch(targetGroupId, (nextGroupId) => {
   }
 })
 
+// 同步标记当前 OAuth 会话为用户主动发起，同时清除后端自动预监听静默标志，防止后续超时或回调报错被静默吞掉
+function markOAuthUserInitiated(state?: string) {
+  userInitiatedOAuth.value = true
+  const targetState = state ?? oauthState.value
+  if (isWailsRuntime() && (oauthWaiting.value || Boolean(targetState))) {
+    void api.markOAuthUserInitiated(targetState).catch(() => {})
+  }
+}
+
 // 若用户尚未主动发起授权（未点打开网页、未复制链接、未提交回调），关闭弹窗或切走 Tab 时静默取消自动预监听，
 // 防止 10 分钟后后台预监听超时误弹错误提示，且绝不误杀用户已主动发起或正在处理中的会话。
 async function cancelUninitiatedOAuthSilently() {
@@ -168,10 +177,11 @@ async function ensureOAuthListening(mode: 'init' | 'open' | 'copy' = 'init') {
     userInitiatedOAuth.value = true
   }
 
-  // 若自动预监听正在进行中而用户立即点击了操作按钮，等待预监听完成再按需执行打开/复制，避免吞掉用户点击
+  // 若自动预监听正在进行中而用户立即点击了操作按钮，等待预监听完成再同步主动标记并按需打开/复制，避免吞掉用户点击或遗留后端静默态
   if (oauthStartingMode.value === 'init' && mode !== 'init' && pendingInitPromise) {
     const existing = await pendingInitPromise
     if (existing) {
+      markOAuthUserInitiated(existing.state)
       if (mode === 'open' && existing.authUrl && !oauthBusy.value) {
         try {
           await api.openExternalURL(existing.authUrl)
@@ -208,6 +218,10 @@ async function ensureOAuthListening(mode: 'init' | 'open' | 'copy' = 'init') {
       if (isProcessing) {
         oauthProcessing.value = true
         userInitiatedOAuth.value = true
+      }
+      // 若本次由用户主动复制链接发起，或在预监听返回前用户已触发主动操作，立即同步清除后端静默标志
+      if (mode === 'copy' || userInitiatedOAuth.value) {
+        markOAuthUserInitiated(sess.state ?? '')
       }
       return sess
     } catch (err) {
@@ -285,7 +299,7 @@ async function startOAuthAndOpen() {
 // 方式 B：确保本地回调监听开启并复制授权链接（不自动弹系统浏览器，便于粘贴到指纹浏览器或无痕窗口）
 async function prepareAndCopyOAuthUrl() {
   if (oauthBusy.value) return
-  userInitiatedOAuth.value = true
+  markOAuthUserInitiated()
   const sess = oauthWaiting.value && oauthAuthUrl.value
     ? { authUrl: oauthAuthUrl.value }
     : await ensureOAuthListening('copy')
@@ -315,7 +329,7 @@ async function resetOAuthSession() {
     oauthCallbackInput.value = ''
     oauthWaiting.value = true
     oauthProcessing.value = false
-    userInitiatedOAuth.value = true
+    markOAuthUserInitiated(sess.state ?? '')
     appStore.notify('已重新生成授权链接并刷新本地回调端口', 'info', 2200)
   } catch (err) {
     clearOAuthSessionState(false)
@@ -325,10 +339,10 @@ async function resetOAuthSession() {
   }
 }
 
-// 在等待回调期间直接打开当前会话的授权链接（复用当前监听端口，不重新生成覆盖已复制的链接）
+// 在等待回调期间直接打开当前会话的授权链接（复用当前监听端口并通知后端升级为主动授权）
 async function openCurrentOAuthUrl() {
   if (oauthBusy.value) return
-  userInitiatedOAuth.value = true
+  markOAuthUserInitiated()
   if (!oauthAuthUrl.value) {
     await startOAuthAndOpen()
     return
@@ -356,7 +370,7 @@ async function submitManualCallback() {
     return
   }
   oauthError.value = ''
-  userInitiatedOAuth.value = true
+  markOAuthUserInitiated()
   oauthSubmitting.value = true
   const submittedState = oauthState.value
   try {
@@ -374,13 +388,13 @@ async function submitManualCallback() {
 }
 
 function handleSelectAuthUrl(event: Event) {
-  userInitiatedOAuth.value = true
+  markOAuthUserInitiated()
   ;(event.target as HTMLInputElement).select()
 }
 
 async function copyAuthUrl() {
   if (!oauthAuthUrl.value || oauthBusy.value) return
-  userInitiatedOAuth.value = true
+  markOAuthUserInitiated()
   if (await copyToClipboard(oauthAuthUrl.value)) {
     oauthUrlCopied.value = true
     appStore.notify('已复制授权链接', 'success', 2000)
@@ -706,7 +720,7 @@ async function handleImportTokens() {
                 class="w-full px-2.5 py-1.5 text-[11px] rounded-lg border font-mono-num select-all"
                 style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-secondary)"
                 @click="handleSelectAuthUrl"
-                @copy="userInitiatedOAuth = true"
+                @copy="markOAuthUserInitiated()"
               />
             </div>
 

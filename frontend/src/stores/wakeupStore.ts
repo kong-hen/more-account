@@ -22,12 +22,14 @@ export const useWakeupStore = defineStore('wakeup', () => {
   const testingScopeId = ref<string | null>(null)
   const testingAccountId = ref<string | null>(null)
 
-  // 请求序号守卫：防止较早发起的慢拉取响应覆盖较新的配置与历史快照
+  // 请求序号与在途计数分离：loadSeq 仅丢弃过期写回，activeLoadCount 无条件归零复位 loading，避免 saveState 竞态残留 loading=true
   let loadSeq = 0
+  let activeLoadCount = 0
 
   async function loadAll() {
     if (!isWailsRuntime()) return
     const seq = ++loadSeq
+    activeLoadCount += 1
     loading.value = true
     try {
       const [s, h] = await Promise.all([api.getWakeupState(), api.listWakeupHistory()])
@@ -35,7 +37,8 @@ export const useWakeupStore = defineStore('wakeup', () => {
       state.value = s ?? { enabled: false, tasks: [] }
       history.value = h ?? []
     } finally {
-      if (seq === loadSeq) {
+      activeLoadCount = Math.max(0, activeLoadCount - 1)
+      if (activeLoadCount === 0) {
         loading.value = false
       }
     }

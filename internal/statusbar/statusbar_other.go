@@ -15,9 +15,9 @@ func SetSystemWakeCallback(_ func()) {}
 // SetPreventAppNap 在非 macOS 平台为空实现。
 func SetPreventAppNap(_ bool) {}
 
-func (noopController) Start(_ bool)                  {}
-func (noopController) SetCloseToBackground(_ bool)   {}
+func (noopController) Start(_ bool)                   {}
+func (noopController) SetCloseToBackground(_ bool)    {}
 func (noopController) SetSystemWakeCallback(_ func()) {}
-func (noopController) SetPreventAppNap(_ bool)       {}
-func (noopController) Update(_ Snapshot)             {}
-func (noopController) Stop()                         {}
+func (noopController) SetPreventAppNap(_ bool)        {}
+func (noopController) Update(_ Snapshot)              {}
+func (noopController) Stop()                          {}

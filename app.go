@@ -73,6 +73,7 @@ type App struct {
 	wakeupService      *wakeup.Service
 	eventEmitter       func(name string, data ...any)
 	openBrowserFn      func(rawURL string) error
+	oauthWaitTimeout   time.Duration
 }
 
 // NewApp 创建并装配全部后端领域服务。
@@ -804,8 +805,12 @@ func (a *App) beginOAuthSession(groupID string, openBrowser bool) (oauth.LoginSe
 	go func(sessionState, redirectURI, codeVerifier string) {
 		defer a.oauthManager.FinishProcessing(sessionState)
 
-		// 等待浏览器回跳或手动提交回调 URL（最多 10 分钟）
-		waitCtx, waitCancel := context.WithTimeout(a.baseCtx(), 10*time.Minute)
+		// 等待浏览器回跳或手动提交回调 URL（最多 10 分钟，测试可覆盖超时时长）
+		waitTimeout := 10 * time.Minute
+		if a.oauthWaitTimeout > 0 {
+			waitTimeout = a.oauthWaitTimeout
+		}
+		waitCtx, waitCancel := context.WithTimeout(a.baseCtx(), waitTimeout)
 		defer waitCancel()
 
 		code, waitErr := a.oauthManager.WaitForState(waitCtx, sessionState)
@@ -818,7 +823,8 @@ func (a *App) beginOAuthSession(groupID string, openBrowser bool) (oauth.LoginSe
 				"error": waitErr.Error(),
 				"state": sessionState,
 			}
-			if a.oauthManager.IsSessionSilent(sessionState) {
+			// 仅当未主动发起的静默预监听等待超时才附带 silent: true；真实浏览器回调报错（如 access_denied）永不静默
+			if errors.Is(waitErr, oauth.ErrOAuthTimeout) && a.oauthManager.IsSessionSilent(sessionState) {
 				payload["silent"] = true
 			}
 			a.emitEvent("oauth:failed", payload)
@@ -898,6 +904,11 @@ func (a *App) CancelOAuthLogin() {
 // CancelSilentOAuthLogin 仅在当前会话仍处于未主动发起授权的静默预监听 waiting 状态时安全释放监听，绝不打断主动授权或令牌换取。
 func (a *App) CancelSilentOAuthLogin() bool {
 	return a.oauthManager.CancelIfSilent()
+}
+
+// MarkOAuthUserInitiated 将当前（或匹配 state 的）OAuth 监听会话标记为用户主动发起，清除自动预监听静默标志。
+func (a *App) MarkOAuthUserInitiated(state string) {
+	a.oauthManager.MarkUserInitiated(state)
 }
 
 // ─── 配额刷新 ─────────────────────────────────────────────────

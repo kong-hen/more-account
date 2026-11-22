@@ -412,9 +412,9 @@ func TestLoginManagerSubmitCallbackURLNormalizedVariants(t *testing.T) {
 	setupTestOAuthEnv(t)
 
 	cases := []struct {
-		name      string
-		buildRaw  func(sess LoginSession) string
-		wantCode  string
+		name     string
+		buildRaw func(sess LoginSession) string
+		wantCode string
 	}{
 		{
 			name: "大写 HTTP scheme",

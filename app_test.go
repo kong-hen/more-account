@@ -1122,3 +1122,95 @@ func TestCorruptJSONStartupRecoveryAndWarnings(t *testing.T) {
 		t.Fatalf("期望在数据目录生成损坏文件备份，实际文件: %+v", entries)
 	}
 }
+
+func TestOAuthSilentFailureSemanticsEndToEnd(t *testing.T) {
+	t.Setenv("MORE_ACCOUNT_DATA_DIR", t.TempDir())
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_ID", "test-client-id.apps.googleusercontent.com")
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET", "test-client-secret-placeholder")
+
+	app := NewApp()
+	defer app.CancelOAuthLogin()
+	app.openBrowserFn = func(string) error { return nil }
+
+	failedCh := make(chan map[string]any, 4)
+	app.eventEmitter = func(name string, data ...any) {
+		if name != "oauth:failed" || len(data) == 0 {
+			return
+		}
+		if payload, ok := data[0].(map[string]any); ok {
+			failedCh <- payload
+		}
+	}
+
+	// 1. 静默预监听会话收到浏览器 error=access_denied 回调：必须非静默上报（不含 silent: true）
+	sessDenied, err := app.PrepareOAuthLogin("")
+	if err != nil {
+		t.Fatalf("PrepareOAuthLogin 失败: %v", err)
+	}
+	resp, err := http.Get(fmt.Sprintf("%s?state=%s&error=access_denied", sessDenied.RedirectURI, sessDenied.State)) //nolint:gosec // 本地测试回环地址
+	if err != nil {
+		t.Fatalf("请求本地回调失败: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case payload := <-failedCh:
+		if payload["state"] != sessDenied.State {
+			t.Fatalf("access_denied 事件 state 不匹配: %+v", payload)
+		}
+		if silent, _ := payload["silent"].(bool); silent {
+			t.Fatalf("浏览器真实 access_denied 回调绝不能携带 silent=true: %+v", payload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("超时未收到 access_denied 的 oauth:failed 事件")
+	}
+
+	// 等待前一个会话清理完成
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && app.GetActiveOAuthSession() != nil {
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// 2. 用户主动操作（如复制链接/点网页验证调用 MarkOAuthUserInitiated）后等待超时：必须非静默上报
+	app.oauthWaitTimeout = 40 * time.Millisecond
+	sessInitiated, err := app.PrepareOAuthLogin("")
+	if err != nil {
+		t.Fatalf("PrepareOAuthLogin 失败: %v", err)
+	}
+	app.MarkOAuthUserInitiated(sessInitiated.State)
+
+	select {
+	case payload := <-failedCh:
+		if payload["state"] != sessInitiated.State {
+			t.Fatalf("主动发起超时事件 state 不匹配: %+v", payload)
+		}
+		if silent, _ := payload["silent"].(bool); silent {
+			t.Fatalf("用户主动发起后超时绝不能携带 silent=true: %+v", payload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("超时未收到主动发起超时的 oauth:failed 事件")
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && app.GetActiveOAuthSession() != nil {
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// 3. 纯静默预监听（用户未任何主动操作）等待超时：必须携带 silent=true，避免误弹红框
+	sessSilent, err := app.PrepareOAuthLogin("")
+	if err != nil {
+		t.Fatalf("PrepareOAuthLogin 失败: %v", err)
+	}
+
+	select {
+	case payload := <-failedCh:
+		if payload["state"] != sessSilent.State {
+			t.Fatalf("静默超时事件 state 不匹配: %+v", payload)
+		}
+		if silent, _ := payload["silent"].(bool); !silent {
+			t.Fatalf("纯静默预监听超时应携带 silent=true，实际: %+v", payload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("超时未收到静默超时的 oauth:failed 事件")
+	}
+}
