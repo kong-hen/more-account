@@ -53,6 +53,7 @@ interface WailsAppBridge {
   SetOAuthTargetGroup(groupId: string): Promise<void>
   SubmitOAuthCallbackURL(rawURL: string): Promise<void>
   CancelOAuthLogin(): Promise<void>
+  CancelSilentOAuthLogin(): Promise<boolean>
 
   RefreshAccountQuota(accountId: string): Promise<Account>
   RefreshAllQuotas(): Promise<RefreshStats>
@@ -158,6 +159,7 @@ export const api = {
   setOAuthTargetGroup: (groupId: string) => getBridge().SetOAuthTargetGroup(groupId),
   submitOAuthCallbackURL: (rawURL: string) => getBridge().SubmitOAuthCallbackURL(rawURL),
   cancelOAuthLogin: () => getBridge().CancelOAuthLogin(),
+  cancelSilentOAuthLogin: () => getBridge().CancelSilentOAuthLogin(),
 
   refreshAccountQuota: (accountId: string) => getBridge().RefreshAccountQuota(accountId),
   refreshAllQuotas: () => getBridge().RefreshAllQuotas(),

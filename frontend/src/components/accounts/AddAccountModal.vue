@@ -20,8 +20,6 @@ import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
 import { getAccountValidationUrl, isAccountValidationRequired } from '@/utils/quota'
 import type { Account, OAuthLoginSession } from '@/types/models'
 
-type OAuthSessionWithStatus = OAuthLoginSession & { status?: string }
-
 const props = defineProps<{
   open: boolean
 }>()
@@ -54,7 +52,7 @@ const oauthUrlCopied = ref(false)
 const oauthError = ref('')
 const oauthBusy = computed(() => oauthSubmitting.value || oauthProcessing.value)
 
-let pendingInitPromise: Promise<OAuthSessionWithStatus | null> | null = null
+let pendingInitPromise: Promise<OAuthLoginSession | null> | null = null
 let eventCleanups: Array<() => void> = []
 
 // 本机导入状态
@@ -151,14 +149,14 @@ watch(targetGroupId, (nextGroupId) => {
 })
 
 // 若用户尚未主动发起授权（未点打开网页、未复制链接、未提交回调），关闭弹窗或切走 Tab 时静默取消自动预监听，
-// 防止 10 分钟后后台预监听超时误弹错误提示。
+// 防止 10 分钟后后台预监听超时误弹错误提示，且绝不误杀用户已主动发起或正在处理中的会话。
 async function cancelUninitiatedOAuthSilently() {
   if (!isWailsRuntime()) return
   if (userInitiatedOAuth.value || oauthBusy.value) return
   if (!oauthWaiting.value && !oauthStartingMode.value) return
   clearOAuthSessionState(true)
   oauthError.value = ''
-  await api.cancelOAuthLogin().catch(() => {})
+  await api.cancelSilentOAuthLogin().catch(() => {})
 }
 
 // 确保本地 OAuth 回调监听已开启（优先复用后台仍在运行中的监听端口或处理中会话，避免重复生成使旧链接失效）
@@ -189,18 +187,17 @@ async function ensureOAuthListening(mode: 'init' | 'open' | 'copy' = 'init') {
   oauthError.value = ''
   oauthStartingMode.value = mode
 
-  const run = async (): Promise<OAuthSessionWithStatus | null> => {
+  const run = async (): Promise<OAuthLoginSession | null> => {
     try {
-      const sess = (
+      const sess =
         mode === 'open'
           ? await api.startOAuthLogin(targetGroupId.value)
           : await api.prepareOAuthLogin(targetGroupId.value)
-      ) as OAuthSessionWithStatus
 
       const isProcessing = sess.status === 'processing'
       // 若自动预监听返回时弹窗已关闭或已切到其他标签页，且用户未主动发起授权也未处于处理中，立即静默释放监听
       if (mode === 'init' && !isProcessing && !userInitiatedOAuth.value && (!props.open || activeTab.value !== 'oauth')) {
-        await api.cancelOAuthLogin().catch(() => {})
+        await api.cancelSilentOAuthLogin().catch(() => {})
         return null
       }
 
@@ -311,7 +308,7 @@ async function resetOAuthSession() {
   oauthStartingMode.value = 'reset'
   try {
     await api.cancelOAuthLogin().catch(() => {})
-    const sess = (await api.prepareOAuthLogin(targetGroupId.value)) as OAuthSessionWithStatus
+    const sess = await api.prepareOAuthLogin(targetGroupId.value)
     oauthState.value = sess.state ?? ''
     oauthAuthUrl.value = sess.authUrl
     oauthRedirectUri.value = sess.redirectUri
@@ -433,7 +430,9 @@ async function handleImportLocal() {
       changed: false,
       detectedAt: Math.floor(Date.now() / 1000),
     }
-    appStore.activeDetailAccountId = acc.id
+    if (!appStore.detailDrawerDirty) {
+      appStore.activeDetailAccountId = acc.id
+    }
     const emailLabel = maskEmail(acc.email, appStore.settings.privacyMode)
     if (isAccountValidationRequired(acc)) {
       pendingVerifyAccounts.value = [acc]

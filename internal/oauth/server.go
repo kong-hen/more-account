@@ -173,6 +173,7 @@ type LoginManager struct {
 	startMu             sync.Mutex
 	mu                  sync.Mutex
 	current             *activeSession
+	endedSilent         map[string]bool
 	CredentialsProvider func() (clientID, clientSecret string)
 	// PostCallbackGrace 收到合法回调并向浏览器写出成功页面后，额外保留本地监听的短暂缓冲时长，
 	// 防止浏览器二次刷新或重定向重试时立即遇到连接断开。
@@ -182,6 +183,7 @@ type LoginManager struct {
 // NewLoginManager 创建登录会话管理器。
 func NewLoginManager() *LoginManager {
 	return &LoginManager{
+		endedSilent:       make(map[string]bool),
 		PostCallbackGrace: 1500 * time.Millisecond,
 	}
 }
@@ -420,6 +422,9 @@ func (m *LoginManager) FinishProcessing(state string) {
 		target = m.current
 		m.current = nil
 	}
+	if state != "" && m.endedSilent != nil {
+		delete(m.endedSilent, state)
+	}
 	m.mu.Unlock()
 
 	if target != nil {
@@ -439,17 +444,29 @@ func (m *LoginManager) MarkUserInitiated(state string) {
 	}
 }
 
-// IsSessionSilent 判断指定 state 的当前会话是否仍处于未主动发起授权的静默预监听态。
+// IsSessionSilent 判断指定 state 的会话是否处于未主动发起授权的静默预监听态（兼容等待超时或出错后已脱离 m.current 的短时回查）。
 func (m *LoginManager) IsSessionSilent(state string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.current == nil {
-		return false
+	if m.current != nil && (state == "" || m.current.state == state) {
+		return m.current.silent.Load()
 	}
-	if state != "" && m.current.state != state {
-		return false
+	if state != "" && m.endedSilent != nil {
+		return m.endedSilent[state]
 	}
-	return m.current.silent.Load()
+	return false
+}
+
+func (m *LoginManager) recordEndedSilent(sess *activeSession) {
+	if sess == nil || sess.state == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.endedSilent == nil {
+		m.endedSilent = make(map[string]bool)
+	}
+	m.endedSilent[sess.state] = sess.silent.Load()
+	m.mu.Unlock()
 }
 
 // WaitForState 按指定 state 绑定等待对应会话，收到授权码后切入 processing 状态并保留会话引用直至 FinishProcessing 清理。
@@ -479,11 +496,13 @@ func (m *LoginManager) WaitForState(ctx context.Context, expectedState string) (
 		}
 		return code, nil
 	case err := <-sess.errCh:
+		m.recordEndedSilent(sess)
 		m.cancelIfCurrent(sess)
 		return "", err
 	case <-sess.cancelCh:
 		return "", ErrOAuthCanceled
 	case <-ctx.Done():
+		m.recordEndedSilent(sess)
 		m.cancelIfCurrent(sess)
 		return "", fmt.Errorf("等待 OAuth 授权超时")
 	}

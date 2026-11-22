@@ -43,6 +43,7 @@ type BootstrapState struct {
 	DefaultGitHubRepo string                     `json:"defaultGitHubRepo"`
 	HasBuiltInOAuth   bool                       `json:"hasBuiltInOAuth"`
 	Platform          string                     `json:"platform"`
+	StartupWarnings   []string                   `json:"startupWarnings,omitempty"`
 }
 
 // App 是 Wails 桌面应用的后端绑定总入口，仅负责参数协调与事件桥接。
@@ -54,6 +55,8 @@ type App struct {
 	quitting           atomic.Bool
 	statusRefreshing   atomic.Bool
 	statusSwitching    atomic.Bool
+	activeRefreshOps   atomic.Int32
+	activeSwitchOps    atomic.Int32
 	statusErrMu        sync.RWMutex
 	statusLastError    string
 	statusBar          statusbar.Controller
@@ -68,6 +71,8 @@ type App struct {
 	importerService    *importer.Service
 	usageService       *tokenusage.Service
 	wakeupService      *wakeup.Service
+	eventEmitter       func(name string, data ...any)
+	openBrowserFn      func(rawURL string) error
 }
 
 // NewApp 创建并装配全部后端领域服务。
@@ -163,6 +168,13 @@ func NewApp() *App {
 		OnRefreshAll:     app.refreshAllFromStatusBar,
 		OnTogglePrivacy:  app.togglePrivacyFromStatusBar,
 		OnQuit:           app.QuitApp,
+		OnSystemWake:     app.handleSystemWake,
+	})
+	// 联动活跃定时唤醒任务状态与 macOS 防 App Nap，确保后台隐藏窗口期间定时调度不被系统合并推迟
+	app.wakeupService.SetActiveTasksChangedHook(func(active bool) {
+		if app.statusBar != nil {
+			app.statusBar.SetPreventAppNap(active)
+		}
 	})
 	return app
 }
@@ -176,6 +188,8 @@ func (a *App) startup(ctx context.Context) {
 	a.syncWindowBackground(settings.Theme)
 	if a.statusBar != nil {
 		a.statusBar.Start(settings.CloseBehavior != model.CloseBehaviorQuit)
+		a.statusBar.SetSystemWakeCallback(a.handleSystemWake)
+		a.statusBar.SetPreventAppNap(a.wakeupService.HasActiveScheduledTasks())
 		a.syncStatusBar()
 	}
 	a.wakeupService.Start(ctx)
@@ -185,6 +199,7 @@ func (a *App) startup(ctx context.Context) {
 
 func (a *App) shutdown(ctx context.Context) {
 	if a.statusBar != nil {
+		a.statusBar.SetPreventAppNap(false)
 		a.statusBar.Stop()
 	}
 	a.oauthManager.Cancel()
@@ -213,7 +228,21 @@ func (a *App) beforeClose(ctx context.Context) bool {
 	return false
 }
 
-// ShowMainWindow 恢复并前置显示主窗口，同时触发静默账号探测与到期配额刷新。
+// handleSystemWake 响应 macOS 系统休眠唤醒通知，立即触发定时唤醒补检、本机切号探测与到期配额检查。
+func (a *App) handleSystemWake() {
+	if a.wakeupService != nil {
+		a.wakeupService.TriggerCheckNow()
+	}
+	if a.activeDetector != nil {
+		a.activeDetector.TriggerCheck()
+	}
+	if a.autoRefresher != nil {
+		a.autoRefresher.TriggerCheck()
+	}
+	a.syncStatusBar()
+}
+
+// ShowMainWindow 恢复并前置显示主窗口，同时触发静默账号探测、到期配额刷新与定时唤醒补检。
 func (a *App) ShowMainWindow() {
 	a.setStatusBarError("")
 	if ctx := a.getCtx(); ctx != nil {
@@ -223,6 +252,9 @@ func (a *App) ShowMainWindow() {
 	}
 	a.TriggerActiveDetect()
 	a.TriggerAutoRefreshIfDue()
+	if a.wakeupService != nil {
+		a.wakeupService.TriggerCheckNow()
+	}
 	a.syncStatusBar()
 }
 
@@ -258,12 +290,16 @@ func (a *App) getStatusBarError() string {
 }
 
 func (a *App) buildStatusBarSnapshot() statusbar.Snapshot {
+	switching := a.statusSwitching.Load() || a.activeSwitchOps.Load() > 0
+	if !switching && a.switcherService != nil {
+		switching = a.switcherService.IsSwitching()
+	}
 	return statusbar.BuildSnapshot(statusbar.BuildInput{
 		Accounts:         a.store.ListAccounts(),
 		CurrentAccountID: a.store.GetCurrentAccountID(),
 		Settings:         a.store.GetSettings(),
-		Refreshing:       a.statusRefreshing.Load(),
-		Switching:        a.statusSwitching.Load(),
+		Refreshing:       a.statusRefreshing.Load() || a.activeRefreshOps.Load() > 0,
+		Switching:        switching,
 		LastError:        a.getStatusBarError(),
 		Now:              time.Now(),
 	})
@@ -277,6 +313,9 @@ func (a *App) syncStatusBar() {
 }
 
 func (a *App) switchAccountFromStatusBar(accountID string) {
+	if a.activeSwitchOps.Load() > 0 || (a.switcherService != nil && a.switcherService.IsSwitching()) {
+		return
+	}
 	if !a.statusSwitching.CompareAndSwap(false, true) {
 		return
 	}
@@ -314,6 +353,9 @@ func (a *App) refreshCurrentFromStatusBar() {
 	if curID == "" {
 		return
 	}
+	if a.activeRefreshOps.Load() > 0 {
+		return
+	}
 	if !a.statusRefreshing.CompareAndSwap(false, true) {
 		return
 	}
@@ -334,6 +376,9 @@ func (a *App) refreshCurrentFromStatusBar() {
 
 func (a *App) refreshAllFromStatusBar() {
 	if len(a.store.ListAccounts()) == 0 {
+		return
+	}
+	if a.activeRefreshOps.Load() > 0 {
 		return
 	}
 	if !a.statusRefreshing.CompareAndSwap(false, true) {
@@ -385,6 +430,10 @@ func (a *App) syncWindowBackground(theme string) {
 }
 
 func (a *App) emitEvent(name string, data ...any) {
+	if a.eventEmitter != nil {
+		a.eventEmitter(name, data...)
+		return
+	}
 	ctx := a.getCtx()
 	if ctx == nil {
 		return
@@ -409,6 +458,7 @@ func (a *App) GetBootstrapState() *BootstrapState {
 		DefaultGitHubRepo: defaultRepo,
 		HasBuiltInOAuth:   oauth.HasBuiltInCredentials(),
 		Platform:          runtime.GOOS,
+		StartupWarnings:   a.store.StartupWarnings(),
 	}
 }
 
@@ -434,10 +484,21 @@ func (a *App) CheckForUpdates(repoOverride string) (*updater.UpdateCheckResult, 
 	return updater.CheckLatestRelease(ctx, client, targetRepo, updater.AppVersion)
 }
 
-// SaveSettings 保存全局设置，热更新网络代理、同步原生窗口背景色并通知后台服务立即应用新配置。
+// SaveSettings 保存全局设置，校验自定义 OAuth 成对凭据，热更新网络代理、同步原生窗口背景色并通知后台服务立即应用新配置。
 func (a *App) SaveSettings(settings model.AppSettings) (model.AppSettings, error) {
+	if err := oauth.ValidateCustomCredentials(settings.OAuthClientID, settings.OAuthClientSecret); err != nil {
+		return model.AppSettings{}, err
+	}
+	prevSettings := a.store.GetSettings()
 	saved, err := a.store.SaveSettings(settings)
 	if err == nil {
+		if strings.TrimSpace(prevSettings.OAuthClientID) != strings.TrimSpace(saved.OAuthClientID) ||
+			strings.TrimSpace(prevSettings.OAuthClientSecret) != strings.TrimSpace(saved.OAuthClientSecret) {
+			// 自定义 OAuth 凭据变更时立即取消旧回调监听，避免后续换取令牌使用过期客户端配置
+			if a.oauthManager != nil {
+				a.oauthManager.Cancel()
+			}
+		}
 		if a.netTransport != nil {
 			_ = a.netTransport.SetProxy(saved.ProxyURL)
 		}
@@ -712,56 +773,89 @@ func (a *App) GetActiveOAuthSession() *oauth.LoginSession {
 	return &sess
 }
 
+func (a *App) openOAuthBrowser(authURL string) {
+	if a.openBrowserFn != nil {
+		_ = a.openBrowserFn(authURL)
+		return
+	}
+	_ = a.OpenExternalURL(authURL)
+}
+
 func (a *App) beginOAuthSession(groupID string, openBrowser bool) (oauth.LoginSession, error) {
 	a.SetOAuthTargetGroup(groupID)
 
-	// 若当前已有存活中的本地回调监听，直接复用同一端口与会话，避免重复点击或复制后误杀已发出的回调监听
-	if existing, ok := a.oauthManager.CurrentSession(); ok {
-		if openBrowser {
-			_ = a.OpenExternalURL(existing.AuthURL)
-		}
-		return existing, nil
-	}
-
-	sess, err := a.oauthManager.StartSession()
+	// 原子复用已有活跃监听/处理中会话或启动全新本地回调服务，避免并发双监听与误杀旧会话
+	info, created, err := a.oauthManager.EnsureSession(oauth.SessionConfig{Silent: !openBrowser})
 	if err != nil {
 		return oauth.LoginSession{}, err
 	}
 
 	if openBrowser {
-		_ = a.OpenExternalURL(sess.AuthURL)
+		a.oauthManager.MarkUserInitiated(info.State)
+		if info.Status != oauth.SessionStatusProcessing {
+			a.openOAuthBrowser(info.AuthURL)
+		}
+	}
+
+	if !created {
+		return info.ToLoginSession(), nil
 	}
 
 	go func(sessionState, redirectURI, codeVerifier string) {
-		ctx, cancel := context.WithTimeout(a.baseCtx(), 10*time.Minute)
-		defer cancel()
+		defer a.oauthManager.FinishProcessing(sessionState)
 
-		code, waitErr := a.oauthManager.WaitForState(ctx, sessionState)
+		// 等待浏览器回跳或手动提交回调 URL（最多 10 分钟）
+		waitCtx, waitCancel := context.WithTimeout(a.baseCtx(), 10*time.Minute)
+		defer waitCancel()
+
+		code, waitErr := a.oauthManager.WaitForState(waitCtx, sessionState)
 		if waitErr != nil {
 			// 用户主动取消或被新会话替代时静默结束，不再误报 oauth:failed 打断界面或弹出错误条
 			if errors.Is(waitErr, oauth.ErrOAuthCanceled) {
 				return
 			}
-			a.emitEvent("oauth:failed", map[string]any{"error": waitErr.Error()})
+			payload := map[string]any{
+				"error": waitErr.Error(),
+				"state": sessionState,
+			}
+			if a.oauthManager.IsSessionSilent(sessionState) {
+				payload["silent"] = true
+			}
+			a.emitEvent("oauth:failed", payload)
 			return
 		}
 
-		tokenResp, exErr := a.oauthClient.ExchangeCode(ctx, code, redirectURI, codeVerifier)
+		// 收到授权码后立刻标记处理中并推送事件，确保前端实时锁定输入并展示“验证并导入中...”反馈
+		a.oauthManager.MarkProcessing(sessionState)
+		a.emitEvent("oauth:processing", map[string]any{"state": sessionState})
+
+		// 令牌换取、用户信息拉取与首次配额刷新使用独立 60 秒上下文，避免受前序等待剩余时间挤压
+		exchangeCtx, exchangeCancel := context.WithTimeout(a.baseCtx(), 60*time.Second)
+		defer exchangeCancel()
+
+		tokenResp, exErr := a.oauthClient.ExchangeCode(exchangeCtx, code, redirectURI, codeVerifier)
 		if exErr != nil {
-			a.emitEvent("oauth:failed", map[string]any{"error": exErr.Error()})
+			a.emitEvent("oauth:failed", map[string]any{
+				"error": exErr.Error(),
+				"state": sessionState,
+			})
 			return
 		}
 		if strings.TrimSpace(tokenResp.RefreshToken) == "" {
 			a.emitEvent("oauth:failed", map[string]any{
 				"error": "Google 未返回 refresh_token，请在 Google 账号安全页撤销旧授权后重试",
+				"state": sessionState,
 			})
 			return
 		}
 
 		targetGroupID := a.getOAuthTargetGroup()
-		acc, addErr := a.importerService.AddByRefreshToken(ctx, tokenResp.RefreshToken, targetGroupID, nil)
+		acc, addErr := a.importerService.AddByTokenResponse(exchangeCtx, tokenResp, targetGroupID, nil)
 		if addErr != nil {
-			a.emitEvent("oauth:failed", map[string]any{"error": addErr.Error()})
+			a.emitEvent("oauth:failed", map[string]any{
+				"error": addErr.Error(),
+				"state": sessionState,
+			})
 			return
 		}
 
@@ -772,10 +866,13 @@ func (a *App) beginOAuthSession(groupID string, openBrowser bool) (oauth.LoginSe
 			a.autoRefresher.TriggerCheck()
 		}
 		a.syncStatusBar()
-		a.emitEvent("oauth:completed", map[string]any{"account": acc})
-	}(sess.State, sess.RedirectURI, sess.CodeVerifier)
+		a.emitEvent("oauth:completed", map[string]any{
+			"account": acc,
+			"state":   sessionState,
+		})
+	}(info.State, info.RedirectURI, info.CodeVerifier)
 
-	return sess, nil
+	return info.ToLoginSession(), nil
 }
 
 // StartOAuthLogin 启动本地回调监听并立即打开系统浏览器跳转到网页验证授权。
@@ -798,42 +895,63 @@ func (a *App) CancelOAuthLogin() {
 	a.oauthManager.Cancel()
 }
 
+// CancelSilentOAuthLogin 仅在当前会话仍处于未主动发起授权的静默预监听 waiting 状态时安全释放监听，绝不打断主动授权或令牌换取。
+func (a *App) CancelSilentOAuthLogin() bool {
+	return a.oauthManager.CancelIfSilent()
+}
+
 // ─── 配额刷新 ─────────────────────────────────────────────────
 
 // RefreshAccountQuota 刷新单个账号的令牌和实时模型配额。
 func (a *App) RefreshAccountQuota(accountID string) (model.Account, error) {
+	a.activeRefreshOps.Add(1)
+	a.syncStatusBar()
+	defer func() {
+		a.activeRefreshOps.Add(-1)
+		a.syncStatusBar()
+	}()
+
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 40*time.Second)
 	defer cancel()
-	acc, err := a.quotaService.RefreshAccount(ctx, accountID)
-	a.syncStatusBar()
-	return acc, err
+	return a.quotaService.RefreshAccount(ctx, accountID)
 }
 
 // RefreshAllQuotas 并发刷新全部账号配额，并实时发送 quota:progress 进度事件。
 func (a *App) RefreshAllQuotas() (*model.RefreshStats, error) {
+	a.activeRefreshOps.Add(1)
+	a.syncStatusBar()
+	defer func() {
+		a.activeRefreshOps.Add(-1)
+		a.syncStatusBar()
+	}()
+
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 3*time.Minute)
 	defer cancel()
-	stats, err := a.quotaService.RefreshAll(ctx, 4, func(done, total int) {
+	return a.quotaService.RefreshAll(ctx, 4, func(done, total int) {
 		a.emitEvent("quota:progress", map[string]any{
 			"done":  done,
 			"total": total,
 		})
 	})
-	a.syncStatusBar()
-	return stats, err
 }
 
 // ─── 账号切换与切号历史 ───────────────────────────────────────
 
 // SwitchAccount 切换本地反重力客户端账号，可选是否自动重启客户端。
 func (a *App) SwitchAccount(req switcher.SwitchRequest) (*switcher.SwitchOutcome, error) {
+	a.activeSwitchOps.Add(1)
+	a.syncStatusBar()
+	defer func() {
+		a.activeSwitchOps.Add(-1)
+		a.syncStatusBar()
+	}()
+
 	ctx, cancel := context.WithTimeout(a.baseCtx(), 60*time.Second)
 	defer cancel()
 	res, err := a.switcherService.SwitchAccount(ctx, req)
 	if err == nil && res != nil && a.autoRefresher != nil {
 		a.autoRefresher.TriggerCheck()
 	}
-	a.syncStatusBar()
 	return res, err
 }
 
@@ -909,6 +1027,7 @@ func formatTokenUsageCSV(bundle *model.TokenUsageBundle) (string, error) {
 		"精确输出Token",
 		"思考Token",
 		"缓存读取Token",
+		"缓存写入Token",
 		"估算Token",
 		"综合总Token",
 		"最后更新时间",
@@ -931,6 +1050,7 @@ func formatTokenUsageCSV(bundle *model.TokenUsageBundle) (string, error) {
 				strconv.FormatUint(item.Exact.OutputTokens, 10),
 				strconv.FormatUint(item.Exact.ThinkingTokens, 10),
 				strconv.FormatUint(item.Exact.CacheReadTokens, 10),
+				strconv.FormatUint(item.Exact.CacheWriteTokens, 10),
 				strconv.FormatUint(item.Estimated.TotalTokens, 10),
 				strconv.FormatUint(combinedTotal, 10),
 				sanitizeCSVCell(item.LastModifiedTime),
@@ -947,17 +1067,14 @@ func formatTokenUsageCSV(bundle *model.TokenUsageBundle) (string, error) {
 	return buf.String(), nil
 }
 
-// SaveTokenUsageCSV 将当前筛选条件下的完整对话 Token 消耗明细导出为 CSV 文件。
+// SaveTokenUsageCSV 将当前筛选条件下的完整对话 Token 消耗明细导出为 CSV 文件（跳过分页上限）。
 func (a *App) SaveTokenUsageCSV(query model.TokenUsageQuery) (string, error) {
 	ctx := a.getCtx()
 	if ctx == nil {
 		return "", fmt.Errorf("应用上下文未就绪")
 	}
-	exportQuery := query
-	exportQuery.Page = 1
-	exportQuery.PageSize = 10000
 
-	bundle, err := a.usageService.Query(exportQuery)
+	bundle, err := a.usageService.QueryForExport(query)
 	if err != nil {
 		return "", err
 	}
@@ -993,11 +1110,18 @@ func (a *App) GetWakeupState() model.WakeupState {
 	return a.store.GetWakeupState()
 }
 
-// SaveWakeupState 保存唤醒调度总开关与任务列表，并同步配额重置监测基线。
+// SaveWakeupState 校验并保存唤醒调度总开关与任务列表，同步配额重置监测基线、即时触发检查并更新防 App Nap 状态。
 func (a *App) SaveWakeupState(state model.WakeupState) error {
+	if err := wakeup.ValidateWakeupState(state); err != nil {
+		return err
+	}
 	err := a.store.SaveWakeupState(state)
 	if err == nil && a.wakeupService != nil {
 		a.wakeupService.SyncResetBaseline()
+		a.wakeupService.TriggerCheckNow()
+		if a.statusBar != nil {
+			a.statusBar.SetPreventAppNap(a.wakeupService.HasActiveScheduledTasks())
+		}
 	}
 	return err
 }

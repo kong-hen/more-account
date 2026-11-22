@@ -168,6 +168,7 @@ export interface BootstrapState {
   defaultGitHubRepo: string
   hasBuiltInOAuth: boolean
   platform?: string
+  startupWarnings?: string[]
 }
 
 export interface RefreshStats {
@@ -188,6 +189,7 @@ export interface OAuthLoginSession {
   authUrl: string
   redirectUri: string
   state: string
+  status?: string
 }
 
 export interface SwitchRequest {
@@ -337,6 +339,13 @@ export interface TokenUsageQuery {
   pageSize: number
 }
 
+export interface WorkspaceFilterOption {
+  value: string
+  label: string
+  name: string
+  path?: string
+}
+
 export interface TokenUsageOverview {
   exact: ExactTokenTotals
   estimated: EstimatedTokenTotals
@@ -347,7 +356,9 @@ export interface TokenUsageOverview {
   models: ModelUsageSummary[]
   workspaces: WorkspaceUsageSummary[]
   availableModels: string[]
+  availableModelNames?: Record<string, string>
   availableWorkspaces: string[]
+  availableWorkspaceOptions?: WorkspaceFilterOption[]
   scanDurationMs: number
   scannedFiles: number
   cachedFiles: number

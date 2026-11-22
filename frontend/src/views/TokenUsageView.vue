@@ -29,19 +29,6 @@ import { api, extractErrorMessage } from '@/services/api'
 import { formatDateTime, formatExactNumber, formatTokenCount } from '@/utils/quota'
 import type { TokenUsageOverview, TokenUsageQuery, WorkspaceUsageSummary } from '@/types/models'
 
-// 兼容后端扩展返回的全量模型显示名映射与按路径区分的工作区筛选选项（阶段 2 将同步至 types/models.ts）
-interface WorkspaceFilterOption {
-  value: string
-  label: string
-  name: string
-  path?: string
-}
-
-type ExtendedTokenUsageOverview = TokenUsageOverview & {
-  availableModelNames?: Record<string, string>
-  availableWorkspaceOptions?: WorkspaceFilterOption[]
-}
-
 const appStore = useAppStore()
 const usageStore = useTokenUsageStore()
 const exportingCSV = ref(false)
@@ -71,8 +58,8 @@ const presets: Array<{ id: TokenUsageQuery['preset']; label: string }> = [
   { id: 'all', label: '全部' },
 ]
 
-const overview = computed<ExtendedTokenUsageOverview | null>(
-  () => (usageStore.bundle?.overview as ExtendedTokenUsageOverview | undefined) ?? null,
+const overview = computed<TokenUsageOverview | null>(
+  () => usageStore.bundle?.overview ?? null,
 )
 const conversations = computed(() => usageStore.bundle?.conversations ?? null)
 const usageSettings = computed(() => usageStore.bundle?.settings ?? null)

@@ -669,46 +669,17 @@ var builtinPlaceholderFamilies = map[string]string{
 	"model_placeholder_m427": "gemini-carbon",
 }
 
-// classifyWakeupBucketFamily 将 CloudCode 共享配额桶 ID 归一化至四大家族（与 internal/quota/summary.go 保持完全一致）：
-// gemini-argon / gemini-carbon / gemini-flash / claude-gpt。
+// classifyWakeupBucketFamily 委托复用 quota.ClassifySummaryBucket，与账号卡片、状态栏保持唯一四家族映射源。
 func classifyWakeupBucketFamily(bucketID string) string {
-	id := strings.ToLower(strings.TrimSpace(bucketID))
-	if id == "" {
-		return ""
-	}
-	switch {
-	case strings.Contains(id, "argon"):
-		return "gemini-argon"
-	case strings.Contains(id, "carbon"):
-		return "gemini-carbon"
-	case strings.Contains(id, "3p") || strings.Contains(id, "claude") || strings.Contains(id, "anthropic") || strings.Contains(id, "gpt"):
-		return "claude-gpt"
-	case strings.Contains(id, "gemini") || strings.Contains(id, "flash") || strings.Contains(id, "neon") || strings.Contains(id, "hydrogen"):
-		return "gemini-flash"
-	default:
-		return ""
-	}
+	return quota.ClassifySummaryBucket(bucketID)
 }
 
-// classifyWakeupModelFamily 结合模型 ID 与显示名（含 MODEL_PLACEHOLDER_* 占位映射）将其归一化至四大家族。
+// classifyWakeupModelFamily 委托复用 quota.ClassifyModelCategory，并在缺失展示名时回退至内置占位模型兜底映射。
 func classifyWakeupModelFamily(modelName, displayName string) string {
-	lowerID := strings.ToLower(strings.TrimSpace(modelName))
-	lowerDisp := strings.ToLower(strings.TrimSpace(displayName))
-	combined := strings.TrimSpace(lowerID + " " + lowerDisp)
-	switch {
-	case strings.Contains(combined, "argon"):
-		return "gemini-argon"
-	case strings.Contains(combined, "carbon"):
-		return "gemini-carbon"
-	case strings.Contains(combined, "claude") || strings.Contains(combined, "sonnet") ||
-		strings.Contains(combined, "opus") || strings.Contains(combined, "anthropic") ||
-		strings.Contains(combined, "gpt"):
-		return "claude-gpt"
-	case strings.Contains(combined, "flash") || strings.Contains(combined, "neon") || strings.Contains(combined, "hydrogen"):
-		return "gemini-flash"
-	case strings.Contains(combined, "gemini") && !strings.Contains(combined, "image"):
-		return "gemini-flash"
+	if cat := quota.ClassifyModelCategory(modelName, displayName); cat != "" {
+		return cat
 	}
+	lowerID := strings.ToLower(strings.TrimSpace(modelName))
 	if fam, ok := builtinPlaceholderFamilies[lowerID]; ok {
 		return fam
 	}

@@ -48,6 +48,7 @@ export const useAppStore = defineStore('app', () => {
   const defaultGitHubRepo = ref('kong-hen/more-account')
   const hasBuiltInOAuth = ref(false)
   const platform = ref<string>('darwin')
+  const startupWarnings = ref<string[]>([])
   const updateInfo = ref<UpdateCheckResult | null>(null)
   const checkingUpdate = ref(false)
   const updateModalOpen = ref(false)
@@ -240,7 +241,12 @@ export const useAppStore = defineStore('app', () => {
         defaultGitHubRepo.value = state.defaultGitHubRepo
       }
       hasBuiltInOAuth.value = Boolean(state.hasBuiltInOAuth)
+      startupWarnings.value = Array.isArray(state.startupWarnings) ? [...state.startupWarnings] : []
       applyTheme(settings.value.theme)
+      for (const warn of startupWarnings.value) {
+        const isCritical = warn.includes('【高危】')
+        notify(warn, isCritical ? 'error' : 'warning', isCritical ? 10_000 : 7_000)
+      }
 
       // 注册后端事件推送（手动批量进度 + 后台自动刷新状态与完成通知）
       cleanups.push(
@@ -963,6 +969,10 @@ export const useAppStore = defineStore('app', () => {
     return sorted
   })
 
+  function dismissStartupWarnings() {
+    startupWarnings.value = []
+  }
+
   async function quitApp() {
     if (!isWailsRuntime()) return
     try {
@@ -987,6 +997,8 @@ export const useAppStore = defineStore('app', () => {
     defaultGitHubRepo,
     hasBuiltInOAuth,
     platform,
+    startupWarnings,
+    dismissStartupWarnings,
     updateInfo,
     checkingUpdate,
     updateModalOpen,

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 应用根组件：装配三栏工作台（左栏导航与自建分组树 + 中栏主视图 + 右侧悬浮详情抽屉）及全部模态弹窗。
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { AlertTriangle, FolderOpen, X } from 'lucide-vue-next'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import AccountsView from '@/views/AccountsView.vue'
 import TokenUsageView from '@/views/TokenUsageView.vue'
@@ -17,7 +18,7 @@ import ToastContainer from '@/components/common/ToastContainer.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTokenUsageStore } from '@/stores/tokenUsageStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
-import { extractErrorMessage, onWailsEvent } from '@/services/api'
+import { api, extractErrorMessage, onWailsEvent } from '@/services/api'
 import { maskEmail } from '@/utils/privacy'
 import type { Account, AccountGroup } from '@/types/models'
 
@@ -128,6 +129,13 @@ async function confirmDeleteGroup() {
     deleting.value = false
   }
 }
+async function openDataFolderFromBanner() {
+  try {
+    await api.openDataFolder()
+  } catch (err) {
+    appStore.notify(`打开数据目录失败：${extractErrorMessage(err)}`, 'error')
+  }
+}
 </script>
 
 <template>
@@ -140,28 +148,70 @@ async function confirmDeleteGroup() {
     />
 
     <!-- 中栏 + 右栏容器 -->
-    <main class="flex-1 min-w-0 h-full flex overflow-hidden">
-      <template v-if="appStore.activeSection === 'accounts'">
-        <AccountsView
-          @open-add="addModalOpen = true"
-          @open-export="openExportModal"
-          @request-delete="requestDeleteAccounts"
-        />
+    <main class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
+      <!-- 启动容错恢复告警横幅：仅在本地 JSON 损坏并自动备份恢复时显示，不打扰正常启动 -->
+      <div
+        v-if="appStore.startupWarnings.length > 0"
+        role="alert"
+        class="shrink-0 px-4 py-2.5 border-b flex items-start justify-between gap-3 text-xs"
+        style="background-color: var(--warning-soft); border-color: var(--warning); color: var(--warning-text)"
+      >
+        <div class="flex items-start gap-2 min-w-0">
+          <AlertTriangle class="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+          <div class="space-y-1 min-w-0">
+            <div class="font-semibold">检测到本地数据文件异常，已自动隔离备份并恢复启动：</div>
+            <ul class="space-y-0.5 list-disc list-inside">
+              <li v-for="(warn, idx) in appStore.startupWarnings" :key="idx" class="break-words">
+                {{ warn }}
+              </li>
+            </ul>
+          </div>
+        </div>
+        <div class="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] font-medium cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+            style="border-color: var(--warning); background-color: var(--bg-surface); color: var(--text-primary)"
+            @click="openDataFolderFromBanner"
+          >
+            <FolderOpen class="w-3.5 h-3.5" aria-hidden="true" />
+            <span>查看备份目录</span>
+          </button>
+          <button
+            type="button"
+            title="关闭提示"
+            aria-label="关闭启动告警提示"
+            class="p-1 rounded-md cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+            @click="appStore.dismissStartupWarnings"
+          >
+            <X class="w-3.5 h-3.5" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
 
-        <!-- 右侧悬浮账号详情抽屉：脱离文档流覆盖在主视图上方，不挤压原有布局 -->
-        <AccountDetailDrawer
-          :account="appStore.activeDetailAccount"
-          @close="appStore.requestSelectDetailAccount(null)"
-          @export-account="(id) => openExportModal([id])"
-          @delete-account="requestDeleteSingleAccount"
-        />
-      </template>
+      <div class="flex-1 min-h-0 flex overflow-hidden">
+        <template v-if="appStore.activeSection === 'accounts'">
+          <AccountsView
+            @open-add="addModalOpen = true"
+            @open-export="openExportModal"
+            @request-delete="requestDeleteAccounts"
+          />
 
-      <TokenUsageView v-else-if="appStore.activeSection === 'usage'" />
+          <!-- 右侧悬浮账号详情抽屉：脱离文档流覆盖在主视图上方，不挤压原有布局 -->
+          <AccountDetailDrawer
+            :account="appStore.activeDetailAccount"
+            @close="appStore.requestSelectDetailAccount(null)"
+            @export-account="(id) => openExportModal([id])"
+            @delete-account="requestDeleteSingleAccount"
+          />
+        </template>
 
-      <WakeupView v-else-if="appStore.activeSection === 'wakeup'" />
+        <TokenUsageView v-else-if="appStore.activeSection === 'usage'" />
 
-      <SwitchHistoryView v-else-if="appStore.activeSection === 'history'" />
+        <WakeupView v-else-if="appStore.activeSection === 'wakeup'" />
+
+        <SwitchHistoryView v-else-if="appStore.activeSection === 'history'" />
+      </div>
     </main>
 
     <!-- 模态弹窗集合 -->

@@ -2,17 +2,32 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/binary"
+	"encoding/csv"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	_ "modernc.org/sqlite"
+
+	"more-account/internal/importer"
 	"more-account/internal/model"
+	"more-account/internal/oauth"
+	"more-account/internal/statusbar"
+	"more-account/internal/switcher"
 	"more-account/internal/updater"
 )
 
@@ -321,9 +336,11 @@ func TestProxySettingsValidationAndCSVExportFormat(t *testing.T) {
 					PrimaryModelDisplayName: "Gemini 4 Carbon",
 					TurnCount:               5,
 					Exact: model.ExactTokenTotals{
-						InputTokens:  1000,
-						OutputTokens: 400,
-						TotalTokens:  1400,
+						InputTokens:      1000,
+						OutputTokens:     400,
+						CacheReadTokens:  120,
+						CacheWriteTokens: 85,
+						TotalTokens:      1605,
 					},
 					LastModifiedTime: "2026-11-21T22:00:00Z",
 				},
@@ -336,6 +353,12 @@ func TestProxySettingsValidationAndCSVExportFormat(t *testing.T) {
 	}
 	if !strings.HasPrefix(csvOut, "\xEF\xBB\xBF") {
 		t.Fatal("导出 CSV 缺少 UTF-8 BOM 头")
+	}
+	if !strings.Contains(csvOut, "缓存读取Token,缓存写入Token,估算Token") {
+		t.Fatalf("导出 CSV 表头缺少紧跟缓存读取Token之后的缓存写入Token列: %s", csvOut)
+	}
+	if !strings.Contains(csvOut, ",120,85,0,") {
+		t.Fatalf("导出 CSV 行数据未写入 CacheWriteTokens=85: %s", csvOut)
 	}
 	if strings.Contains(csvOut, ",=CMD") {
 		t.Fatalf("导出 CSV 未对公式起始字符做转义防护: %s", csvOut)
@@ -432,8 +455,19 @@ func TestAppCloseBehaviorDecisionAndPlatformBootstrap(t *testing.T) {
 	if boot.Platform != runtime.GOOS {
 		t.Fatalf("期望 BootstrapState.Platform=%q，实际 %q", runtime.GOOS, boot.Platform)
 	}
-	if boot.Settings.CloseBehavior != model.CloseBehaviorBackground {
-		t.Fatalf("期望默认 CloseBehavior=%q，实际 %q", model.CloseBehaviorBackground, boot.Settings.CloseBehavior)
+	wantClose := model.DefaultCloseBehavior()
+	if boot.Settings.CloseBehavior != wantClose {
+		t.Fatalf("期望当前平台默认 CloseBehavior=%q，实际 %q", wantClose, boot.Settings.CloseBehavior)
+	}
+	// 跨平台默认关闭行为契约：仅 macOS 默认后台运行，Windows/Linux 默认直接退出
+	if got := model.DefaultCloseBehaviorForOS("darwin"); got != model.CloseBehaviorBackground {
+		t.Fatalf("期望 darwin 默认 CloseBehavior=%q，实际 %q", model.CloseBehaviorBackground, got)
+	}
+	if got := model.DefaultCloseBehaviorForOS("windows"); got != model.CloseBehaviorQuit {
+		t.Fatalf("期望 windows 默认 CloseBehavior=%q，实际 %q", model.CloseBehaviorQuit, got)
+	}
+	if got := model.DefaultCloseBehaviorForOS("linux"); got != model.CloseBehaviorQuit {
+		t.Fatalf("期望 linux 默认 CloseBehavior=%q，实际 %q", model.CloseBehaviorQuit, got)
 	}
 	if boot.Settings.MacStatusBarMode != model.MacStatusBarIconQuota {
 		t.Fatalf("期望默认 MacStatusBarMode=%q，实际 %q", model.MacStatusBarIconQuota, boot.Settings.MacStatusBarMode)
@@ -476,5 +510,615 @@ func TestAppCloseBehaviorDecisionAndPlatformBootstrap(t *testing.T) {
 	snapOff := app.buildStatusBarSnapshot()
 	if snapOff.Visible {
 		t.Fatal("切换为 off 模式后状态栏快照应不可见")
+	}
+}
+
+type fakeStatusBarController struct {
+	mu            sync.Mutex
+	started       bool
+	closeToBg     bool
+	preventAppNap []bool
+	snapshots     []statusbar.Snapshot
+	wakeCB        func()
+}
+
+func (f *fakeStatusBarController) Start(closeToBackground bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.started = true
+	f.closeToBg = closeToBackground
+}
+
+func (f *fakeStatusBarController) SetCloseToBackground(enabled bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closeToBg = enabled
+}
+
+func (f *fakeStatusBarController) SetSystemWakeCallback(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.wakeCB = fn
+}
+
+func (f *fakeStatusBarController) SetPreventAppNap(enabled bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.preventAppNap = append(f.preventAppNap, enabled)
+}
+
+func (f *fakeStatusBarController) Update(snap statusbar.Snapshot) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapshots = append(f.snapshots, snap)
+}
+
+func (f *fakeStatusBarController) Stop() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.started = false
+}
+
+func (f *fakeStatusBarController) lastPreventAppNap() (bool, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.preventAppNap) == 0 {
+		return false, false
+	}
+	return f.preventAppNap[len(f.preventAppNap)-1], true
+}
+
+func (f *fakeStatusBarController) snapshotCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.snapshots)
+}
+
+func TestTokenUsageCSVFullExportWithoutPaginationAndCacheWriteColumn(t *testing.T) {
+	t.Setenv("MORE_ACCOUNT_DATA_DIR", t.TempDir())
+	usageDir := t.TempDir()
+	convDir := filepath.Join(usageDir, "conversations")
+	if err := os.MkdirAll(convDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	nowRFC := now.Format(time.RFC3339)
+	const totalConvs = 125
+
+	// 1. 生成单份包含 cache_write (f4=250) 的模板 SQLite 会话文件并复制到 125 份（超过默认分页上限 100）
+	tplPath := filepath.Join(usageDir, "template.db")
+	cDB, err := sql.Open("sqlite", tplPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cDB.Exec(`CREATE TABLE steps (idx INTEGER, step_type INTEGER, status INTEGER, metadata BLOB, step_payload BLOB)`); err != nil {
+		t.Fatal(err)
+	}
+	var tsBuf []byte
+	tsBuf = append(tsBuf, switcher.EncodeVarintField(1, uint64(now.Unix()))...)
+	var usageBuf []byte
+	usageBuf = append(usageBuf, switcher.EncodeVarintField(1, 1427)...) // gemini-4-carbon-high
+	usageBuf = append(usageBuf, switcher.EncodeVarintField(2, 1000)...) // input
+	usageBuf = append(usageBuf, switcher.EncodeVarintField(4, 250)...)  // cache_write
+	usageBuf = append(usageBuf, switcher.EncodeVarintField(5, 300)...)  // cache_read
+	usageBuf = append(usageBuf, switcher.EncodeVarintField(9, 150)...)  // thinking
+	usageBuf = append(usageBuf, switcher.EncodeVarintField(10, 400)...) // output
+	var metaBuf []byte
+	metaBuf = append(metaBuf, switcher.EncodeLenDelimField(1, tsBuf)...)
+	metaBuf = append(metaBuf, switcher.EncodeLenDelimField(9, usageBuf)...)
+	if _, err := cDB.Exec(`INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (1, 15, 1, ?, NULL)`, metaBuf); err != nil {
+		t.Fatal(err)
+	}
+	_ = cDB.Close()
+
+	tplBytes, err := os.ReadFile(tplPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < totalConvs; i++ {
+		dst := filepath.Join(convDir, fmt.Sprintf("conv-%03d.db", i))
+		if err := os.WriteFile(dst, tplBytes, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 2. 写入 conversation_summaries.db
+	sumDB, err := sql.Open("sqlite", filepath.Join(usageDir, "conversation_summaries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sumDB.Exec(`CREATE TABLE conversation_summaries (
+		conversation_id TEXT,
+		title TEXT,
+		preview TEXT,
+		step_count INTEGER,
+		last_modified_time TEXT,
+		workspace_uris TEXT,
+		status TEXT,
+		project_id TEXT,
+		agent_name TEXT,
+		parent_conversation_id TEXT,
+		nesting_depth INTEGER
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := sumDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < totalConvs; i++ {
+		if _, err := stmt.Exec(
+			fmt.Sprintf("conv-%03d", i),
+			fmt.Sprintf("对话 %03d", i),
+			"测试全量 CSV 导出",
+			1,
+			nowRFC,
+			`["file:///Users/dev/more-account"]`,
+			"DONE",
+			"proj-1",
+			"",
+			"",
+			0,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = stmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	_ = sumDB.Close()
+
+	app := NewApp()
+	if _, err := app.SaveSettings(model.AppSettings{
+		Theme:             "light",
+		RuntimeTarget:     "desktop",
+		TokenUsageDataDir: usageDir,
+	}); err != nil {
+		t.Fatalf("保存 TokenUsageDataDir 失败: %v", err)
+	}
+
+	// 普通查询应保持分页（默认 20 条）
+	paged, err := app.QueryTokenUsage(model.TokenUsageQuery{Preset: "all", Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("QueryTokenUsage 失败: %v", err)
+	}
+	if len(paged.Conversations.Items) != 20 || paged.Conversations.Total != totalConvs {
+		t.Fatalf("期望普通查询返回 20/%d 条，实际 %d/%d", totalConvs, len(paged.Conversations.Items), paged.Conversations.Total)
+	}
+
+	// 导出路径通过 QueryForExport 跳过 100 条分页上限，导出全部 125 条且包含缓存写入Token列
+	exportBundle, err := app.usageService.QueryForExport(model.TokenUsageQuery{Preset: "all", Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("QueryForExport 失败: %v", err)
+	}
+	if len(exportBundle.Conversations.Items) != totalConvs {
+		t.Fatalf("期望 QueryForExport 返回全部 %d 条，实际 %d", totalConvs, len(exportBundle.Conversations.Items))
+	}
+
+	csvText, err := formatTokenUsageCSV(exportBundle)
+	if err != nil {
+		t.Fatalf("formatTokenUsageCSV 失败: %v", err)
+	}
+	records, err := csv.NewReader(strings.NewReader(strings.TrimPrefix(csvText, "\xEF\xBB\xBF"))).ReadAll()
+	if err != nil {
+		t.Fatalf("解析导出 CSV 失败: %v", err)
+	}
+	if len(records) != totalConvs+1 {
+		t.Fatalf("期望 CSV 含表头共 %d 行，实际 %d 行", totalConvs+1, len(records))
+	}
+	if records[0][9] != "缓存读取Token" || records[0][10] != "缓存写入Token" {
+		t.Fatalf("期望第 10/11 列为 缓存读取Token / 缓存写入Token，实际 %q / %q", records[0][9], records[0][10])
+	}
+	if records[1][9] != "300" || records[1][10] != "250" {
+		t.Fatalf("期望缓存读取=300、缓存写入=250，实际 %q / %q", records[1][9], records[1][10])
+	}
+}
+
+func TestOAuthEnsureSessionProcessingNoRedundantRefreshAndSettingsValidation(t *testing.T) {
+	t.Setenv("MORE_ACCOUNT_DATA_DIR", t.TempDir())
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_ID", "test-client-id.apps.googleusercontent.com")
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET", "test-client-secret-placeholder")
+
+	var authCodeHits atomic.Int32
+	var refreshTokenHits atomic.Int32
+	unblockExchange := make(chan struct{})
+	exchangeEntered := make(chan struct{}, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			_ = r.ParseForm()
+			grant := r.FormValue("grant_type")
+			if grant == "authorization_code" {
+				authCodeHits.Add(1)
+				select {
+				case exchangeEntered <- struct{}{}:
+				default:
+				}
+				<-unblockExchange
+			} else if grant == "refresh_token" {
+				refreshTokenHits.Add(1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token":  "ya29.fresh-access-token",
+				"refresh_token": "1//0g-fresh-refresh-token",
+				"expires_in":    3600,
+				"token_type":    "Bearer",
+				"id_token":      "mock-id-token",
+			})
+		case "/userinfo":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"email": "oauth-user@example.com",
+				"name":  "OAuth User",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	app := NewApp()
+	defer app.CancelOAuthLogin()
+	app.oauthClient.TokenURL = srv.URL + "/token"
+	app.oauthClient.UserInfoURL = srv.URL + "/userinfo"
+	// 测试期间隔离配额拉取外网请求，聚焦验证 OAuth 换取令牌与无冗余 RefreshAccessToken 入库链路
+	app.quotaService = nil
+	app.importerService = importer.NewService(app.store, app.oauthClient, nil)
+	app.openBrowserFn = func(string) error { return nil }
+
+	type emittedEvent struct {
+		name    string
+		payload map[string]any
+	}
+	var eventsMu sync.Mutex
+	var events []emittedEvent
+	completedCh := make(chan map[string]any, 1)
+	processingCh := make(chan map[string]any, 1)
+
+	app.eventEmitter = func(name string, data ...any) {
+		var m map[string]any
+		if len(data) > 0 {
+			m, _ = data[0].(map[string]any)
+		}
+		eventsMu.Lock()
+		events = append(events, emittedEvent{name: name, payload: m})
+		eventsMu.Unlock()
+		switch name {
+		case "oauth:processing":
+			select {
+			case processingCh <- m:
+			default:
+			}
+		case "oauth:completed":
+			select {
+			case completedCh <- m:
+			default:
+			}
+		}
+	}
+
+	// 1. 静默预监听可通过 CancelSilentOAuthLogin 安全释放
+	silentSess, err := app.PrepareOAuthLogin("grp-1")
+	if err != nil {
+		t.Fatalf("PrepareOAuthLogin 失败: %v", err)
+	}
+	if silentSess.Status != oauth.SessionStatusWaiting {
+		t.Fatalf("期望新建会话状态为 waiting，实际 %q", silentSess.Status)
+	}
+	if !app.CancelSilentOAuthLogin() {
+		t.Fatal("未主动发起授权的静默会话应允许 CancelSilentOAuthLogin 释放")
+	}
+	if active := app.GetActiveOAuthSession(); active != nil {
+		t.Fatalf("静默取消后应无活跃会话，实际 %+v", active)
+	}
+
+	// 2. Prepare -> Start 原子复用同一会话并升级为主动发起（不可被静默取消误杀）
+	preSess, err := app.PrepareOAuthLogin("grp-a")
+	if err != nil {
+		t.Fatalf("PrepareOAuthLogin 失败: %v", err)
+	}
+	startedSess, err := app.StartOAuthLogin("grp-b")
+	if err != nil {
+		t.Fatalf("StartOAuthLogin 复用失败: %v", err)
+	}
+	if startedSess.State != preSess.State || startedSess.RedirectURI != preSess.RedirectURI {
+		t.Fatalf("StartOAuthLogin 应复用同一会话，期望 state=%s，实际 %s", preSess.State, startedSess.State)
+	}
+	if app.CancelSilentOAuthLogin() {
+		t.Fatal("已通过 StartOAuthLogin 主动发起的会话绝不能被 CancelSilentOAuthLogin 误杀")
+	}
+
+	// 3. 提交手动回调 -> 触发 oauth:processing -> 二次提交返回 ErrOAuthProcessing -> 放行后入库且无冗余 RefreshAccessToken
+	manualCallback := fmt.Sprintf("127.0.0.1:9999/oauth-callback?code=code-abc&state=%s", startedSess.State)
+	if err := app.SubmitOAuthCallbackURL(manualCallback); err != nil {
+		t.Fatalf("SubmitOAuthCallbackURL 失败: %v", err)
+	}
+
+	select {
+	case procPayload := <-processingCh:
+		if procPayload["state"] != startedSess.State {
+			t.Fatalf("oauth:processing state 不匹配: %+v", procPayload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("超时未收到 oauth:processing 事件")
+	}
+
+	select {
+	case <-exchangeEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("超时未进入 /token 换取令牌流程")
+	}
+
+	// 处理中状态下再次提交必须返回 ErrOAuthProcessing，且静默取消不打断处理中会话
+	if err := app.SubmitOAuthCallbackURL(manualCallback); !errors.Is(err, oauth.ErrOAuthProcessing) {
+		t.Fatalf("处理中重复提交应返回 ErrOAuthProcessing，实际: %v", err)
+	}
+	if active := app.GetActiveOAuthSession(); active == nil || active.Status != oauth.SessionStatusProcessing {
+		t.Fatalf("处理中 GetActiveOAuthSession 应返回 status=processing，实际 %+v", active)
+	}
+	if app.CancelSilentOAuthLogin() {
+		t.Fatal("processing 阶段绝不能被静默取消")
+	}
+
+	close(unblockExchange)
+
+	select {
+	case compPayload := <-completedCh:
+		if compPayload["state"] != startedSess.State {
+			t.Fatalf("oauth:completed 缺少或错误 state: %+v", compPayload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("超时未收到 oauth:completed 事件")
+	}
+
+	// 等待 defer FinishProcessing 清理活跃会话
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if app.GetActiveOAuthSession() == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if active := app.GetActiveOAuthSession(); active != nil {
+		t.Fatalf("授权完成后应清理活跃会话，实际 %+v", active)
+	}
+
+	if gotAuth := authCodeHits.Load(); gotAuth != 1 {
+		t.Fatalf("期望 /token authorization_code 恰好请求 1 次，实际 %d", gotAuth)
+	}
+	if gotRef := refreshTokenHits.Load(); gotRef != 0 {
+		t.Fatalf("接入 AddByTokenResponse 后不应触发冗余 refresh_token 请求，实际 %d 次", gotRef)
+	}
+
+	accs := app.ListAccounts()
+	if len(accs) != 1 || accs[0].Email != "oauth-user@example.com" || accs[0].Token.AccessToken != "ya29.fresh-access-token" {
+		t.Fatalf("OAuth 入库账号与令牌不符合预期: %+v", accs)
+	}
+
+	// 4. 静默预监听超时后 IsSessionSilent 仍能正确返回 true，供 oauth:failed 附带 silent=true
+	timeoutMgr := oauth.NewLoginManager()
+	timeoutInfo, _, err := timeoutMgr.EnsureSession(oauth.SessionConfig{Silent: true})
+	if err != nil {
+		t.Fatalf("创建静默会话失败: %v", err)
+	}
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer shortCancel()
+	if _, waitErr := timeoutMgr.WaitForState(shortCtx, timeoutInfo.State); waitErr == nil {
+		t.Fatal("期望短超时返回超时错误")
+	}
+	if !timeoutMgr.IsSessionSilent(timeoutInfo.State) {
+		t.Fatal("静默预监听超时后 IsSessionSilent 应返回 true 以抑制前端误弹错误框")
+	}
+	timeoutMgr.FinishProcessing(timeoutInfo.State)
+	if timeoutMgr.IsSessionSilent(timeoutInfo.State) {
+		t.Fatal("FinishProcessing 清理后应释放 endedSilent 记录")
+	}
+
+	// 5. SaveSettings 成对凭据校验 & 合法凭据变更时自动取消进行中的旧 OAuth 会话
+	if _, err := app.SaveSettings(model.AppSettings{
+		Theme:         "light",
+		RuntimeTarget: "desktop",
+		OAuthClientID: "only-id-no-secret",
+	}); !errors.Is(err, oauth.ErrIncompleteCredentials) {
+		t.Fatalf("仅填写 OAuthClientID 应返回 ErrIncompleteCredentials，实际: %v", err)
+	}
+	if _, err := app.SaveSettings(model.AppSettings{
+		Theme:             "light",
+		RuntimeTarget:     "desktop",
+		OAuthClientSecret: "only-secret-no-id",
+	}); !errors.Is(err, oauth.ErrIncompleteCredentials) {
+		t.Fatalf("仅填写 OAuthClientSecret 应返回 ErrIncompleteCredentials，实际: %v", err)
+	}
+
+	if _, err := app.PrepareOAuthLogin(""); err != nil {
+		t.Fatalf("重新开启 OAuth 会话失败: %v", err)
+	}
+	if app.GetActiveOAuthSession() == nil {
+		t.Fatal("期望存在活跃 OAuth 会话")
+	}
+	if _, err := app.SaveSettings(model.AppSettings{
+		Theme:             "light",
+		RuntimeTarget:     "desktop",
+		OAuthClientID:     "custom-id-2.apps.googleusercontent.com",
+		OAuthClientSecret: "custom-secret-2",
+	}); err != nil {
+		t.Fatalf("保存合法成对自定义 OAuth 凭据失败: %v", err)
+	}
+	if active := app.GetActiveOAuthSession(); active != nil {
+		t.Fatalf("OAuth 凭据变更后应自动取消旧监听会话，实际仍存在: %+v", active)
+	}
+}
+
+func TestWakeupValidationAppNapSystemWakeAndStatusBarBusySync(t *testing.T) {
+	t.Setenv("MORE_ACCOUNT_DATA_DIR", t.TempDir())
+	app := NewApp()
+	fakeSB := &fakeStatusBarController{}
+	app.statusBar = fakeSB
+
+	// 1. SaveWakeupState 保存前严格校验：拒绝越界 Cron、倒置范围、空任务名与非法时间格式
+	invalidStates := []model.WakeupState{
+		{
+			Enabled: true,
+			Tasks: []model.WakeupTask{
+				{
+					ID:      "bad-cron-overflow",
+					Name:    "非法分钟越界",
+					Enabled: true,
+					Schedule: model.WakeupSchedule{
+						RepeatMode:       "crontab",
+						Crontab:          "65 * * * *",
+						SelectedModels:   []string{"gemini-3.8-flash-high"},
+						SelectedAccounts: []string{"acc-1"},
+					},
+				},
+			},
+		},
+		{
+			Enabled: true,
+			Tasks: []model.WakeupTask{
+				{
+					ID:      "bad-cron-inverted",
+					Name:    "倒置范围 Cron",
+					Enabled: true,
+					Schedule: model.WakeupSchedule{
+						RepeatMode:       "crontab",
+						Crontab:          "10-5 * * * *",
+						SelectedModels:   []string{"gemini-3.8-flash-high"},
+						SelectedAccounts: []string{"acc-1"},
+					},
+				},
+			},
+		},
+		{
+			Enabled: true,
+			Tasks: []model.WakeupTask{
+				{
+					ID:      "bad-daily-time",
+					Name:    "非法时间点",
+					Enabled: true,
+					Schedule: model.WakeupSchedule{
+						RepeatMode:       "daily",
+						DailyTimes:       []string{"25:99"},
+						SelectedModels:   []string{"gemini-3.8-flash-high"},
+						SelectedAccounts: []string{"acc-1"},
+					},
+				},
+			},
+		},
+	}
+	for _, st := range invalidStates {
+		if err := app.SaveWakeupState(st); err == nil {
+			t.Fatalf("非法唤醒配置应当被 SaveWakeupState 拦截: %+v", st)
+		}
+	}
+
+	// 2. 合法启用任务保存后联动开启防 App Nap；关闭总开关后联动释放防 App Nap
+	validState := model.WakeupState{
+		Enabled: true,
+		Tasks: []model.WakeupTask{
+			{
+				ID:      "task-ok",
+				Name:    "每日早高峰唤醒",
+				Enabled: true,
+				Schedule: model.WakeupSchedule{
+					RepeatMode:       "daily",
+					DailyTimes:       []string{"09:00"},
+					SelectedModels:   []string{"gemini-3.8-flash-high"},
+					SelectedAccounts: []string{"acc-1"},
+				},
+			},
+		},
+	}
+	if err := app.SaveWakeupState(validState); err != nil {
+		t.Fatalf("保存合法唤醒配置失败: %v", err)
+	}
+	if active, ok := fakeSB.lastPreventAppNap(); !ok || !active {
+		t.Fatalf("存在启用中的定时任务时应开启防 App Nap，实际 ok=%v active=%v", ok, active)
+	}
+
+	validState.Enabled = false
+	if err := app.SaveWakeupState(validState); err != nil {
+		t.Fatalf("暂停唤醒总开关失败: %v", err)
+	}
+	if active, ok := fakeSB.lastPreventAppNap(); !ok || active {
+		t.Fatalf("暂停唤醒总开关后应释放防 App Nap，实际 ok=%v active=%v", ok, active)
+	}
+
+	// 3. 验证系统休眠唤醒回调与 ShowMainWindow 均会安全触发检查并刷新状态栏
+	beforeSnaps := fakeSB.snapshotCount()
+	app.handleSystemWake()
+	app.ShowMainWindow()
+	if fakeSB.snapshotCount() < beforeSnaps+2 {
+		t.Fatalf("期望休眠唤醒与显示主窗口同步刷新状态栏，前后计数: %d -> %d", beforeSnaps, fakeSB.snapshotCount())
+	}
+
+	// 4. 验证主窗口刷新与切号操作同步状态栏忙碌态
+	app.activeRefreshOps.Add(1)
+	snapRefreshing := app.buildStatusBarSnapshot()
+	if !snapRefreshing.Refreshing || snapRefreshing.StatusHint != "正在刷新配额..." {
+		t.Fatalf("主窗口刷新期间状态栏快照应显示忙碌态，实际: %+v", snapRefreshing)
+	}
+	app.activeRefreshOps.Add(-1)
+
+	app.activeSwitchOps.Add(1)
+	snapSwitching := app.buildStatusBarSnapshot()
+	if !snapSwitching.Switching || snapSwitching.StatusHint != "正在切换账号..." {
+		t.Fatalf("主窗口切号期间状态栏快照应显示忙碌态，实际: %+v", snapSwitching)
+	}
+	app.activeSwitchOps.Add(-1)
+
+	snapIdle := app.buildStatusBarSnapshot()
+	if snapIdle.Refreshing || snapIdle.Switching {
+		t.Fatalf("操作结束后状态栏快照应恢复空闲，实际: %+v", snapIdle)
+	}
+}
+
+func TestCorruptJSONStartupRecoveryAndWarnings(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("MORE_ACCOUNT_DATA_DIR", dataDir)
+
+	if err := os.WriteFile(filepath.Join(dataDir, "accounts.json"), []byte("{corrupt-accounts"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "settings.json"), []byte("[bad-settings"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 损坏 JSON 不应导致 NewApp() panic，而应自动备份隔离并暴露启动告警
+	app := NewApp()
+	boot := app.GetBootstrapState()
+	if len(boot.StartupWarnings) != 2 {
+		t.Fatalf("期望收到 2 条启动恢复告警，实际 %d 条: %+v", len(boot.StartupWarnings), boot.StartupWarnings)
+	}
+
+	joined := strings.Join(boot.StartupWarnings, "\n")
+	if !strings.Contains(joined, "accounts.json") || !strings.Contains(joined, "settings.json") || !strings.Contains(joined, ".corrupt-") {
+		t.Fatalf("启动恢复告警缺少文件名或备份说明: %s", joined)
+	}
+
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accBackup, settingsBackup bool
+	for _, ent := range entries {
+		name := ent.Name()
+		if strings.HasPrefix(name, "accounts.json.corrupt-") {
+			accBackup = true
+		}
+		if strings.HasPrefix(name, "settings.json.corrupt-") {
+			settingsBackup = true
+		}
+	}
+	if !accBackup || !settingsBackup {
+		t.Fatalf("期望在数据目录生成损坏文件备份，实际文件: %+v", entries)
 	}
 }
