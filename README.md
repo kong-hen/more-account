@@ -41,8 +41,8 @@ go test -race ./...
 # 开发调试模式（热重载）
 wails dev
 
-# 编译原生桌面安装包（输出至 build/bin/）
-wails build
+# 一键打包 macOS (.dmg) 与 Windows (NSIS 安装程序)，输出至 build/bin/（不生成 zip，Windows 采用防杀软误报配置）
+./scripts/package.sh
 ```
 
 ## 数据目录

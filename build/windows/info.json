@@ -5,8 +5,11 @@
 	"info": {
 		"0000": {
 			"ProductVersion": "{{.Info.ProductVersion}}",
+			"FileVersion": "{{.Info.ProductVersion}}.0",
 			"CompanyName": "{{.Info.CompanyName}}",
-			"FileDescription": "{{.Info.Comments}}",
+			"FileDescription": "More Account - Antigravity Account Manager",
+			"InternalName": "MoreAccount",
+			"OriginalFilename": "MoreAccount.exe",
 			"LegalCopyright": "{{.Info.Copyright}}",
 			"ProductName": "{{.Info.ProductName}}",
 			"Comments": "{{.Info.Comments}}"

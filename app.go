@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -339,39 +337,6 @@ func (a *App) PickDirectory(title string) (string, error) {
 	return wailsRuntime.OpenDirectoryDialog(ctx, wailsRuntime.OpenDialogOptions{
 		Title: title,
 	})
-}
-
-func startAndReap(cmd *exec.Cmd) error {
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	go func(c *exec.Cmd) {
-		_ = c.Wait()
-	}(cmd)
-	return nil
-}
-
-func openExternalBrowserWithOS(safeURL string) error {
-	switch runtime.GOOS {
-	case "darwin":
-		return startAndReap(exec.Command("open", safeURL))
-	case "windows":
-		// 使用 rundll32 直接交由系统默认浏览器打开，避免经过 cmd.exe 解析 shell 元字符引发注入风险。
-		return startAndReap(exec.Command("rundll32", "url.dll,FileProtocolHandler", safeURL))
-	default:
-		return startAndReap(exec.Command("xdg-open", safeURL))
-	}
-}
-
-func openDirectoryWithOS(dir string) error {
-	switch runtime.GOOS {
-	case "darwin":
-		return startAndReap(exec.Command("open", dir))
-	case "windows":
-		return startAndReap(exec.Command("explorer", dir))
-	default:
-		return startAndReap(exec.Command("xdg-open", dir))
-	}
 }
 
 // ─── 账号管理 ─────────────────────────────────────────────────
