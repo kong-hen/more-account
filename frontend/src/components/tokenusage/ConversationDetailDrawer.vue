@@ -119,6 +119,9 @@ function formatStepStatus(status?: number): { label: string; isError: boolean } 
                 <span>输出：{{ formatTokenCount(sl.exact.outputTokens) }}</span>
                 <span>Thinking：{{ formatTokenCount(sl.exact.thinkingTokens) }}</span>
                 <span>缓存：{{ formatTokenCount(sl.exact.cacheReadTokens + sl.exact.cacheWriteTokens) }}</span>
+                <span v-if="sl.estimatedTotalTokens > 0" class="col-span-2">
+                  估算：{{ formatTokenCount(sl.estimatedTotalTokens) }}
+                </span>
               </div>
             </div>
           </div>

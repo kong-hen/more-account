@@ -39,11 +39,17 @@ const unitLabel = computed(() => {
   return '单日'
 })
 
+const MAX_VISIBLE_BUCKETS = 24
+
 const visibleBuckets = computed(() => {
   // 最多优雅展示最近 24 个时间桶，保证柱宽清晰不拥挤
-  if (props.buckets.length <= 24) return props.buckets
-  return props.buckets.slice(-24)
+  if (props.buckets.length <= MAX_VISIBLE_BUCKETS) return props.buckets
+  return props.buckets.slice(-MAX_VISIBLE_BUCKETS)
 })
+
+const truncatedBucketCount = computed(() =>
+  Math.max(0, props.buckets.length - MAX_VISIBLE_BUCKETS),
+)
 
 // 仅基于当前展示的最近 24 桶计算高度上限，避免更早的历史极端峰值把近期柱子压扁
 const maxTotal = computed(() => {
@@ -104,7 +110,16 @@ const hoveredBucket = computed(() => {
   >
     <div class="flex items-center justify-between gap-3 flex-wrap">
       <div>
-        <h3 class="text-xs font-semibold" style="color: var(--text-primary)">Token 消耗趋势</h3>
+        <div class="flex items-center gap-2 flex-wrap">
+          <h3 class="text-xs font-semibold" style="color: var(--text-primary)">Token 消耗趋势</h3>
+          <span
+            v-if="truncatedBucketCount > 0"
+            class="px-1.5 py-0.5 rounded text-[10.5px] font-mono-num"
+            style="background-color: var(--bg-subtle); color: var(--text-muted)"
+          >
+            仅展示最近 {{ MAX_VISIBLE_BUCKETS }} 桶（已省略更早 {{ truncatedBucketCount }} 桶）
+          </span>
+        </div>
         <p class="text-[11px] mt-0.5" style="color: var(--text-muted)">
           悬浮柱体可查看精确构成（Thinking 与纯输出分离计数）
         </p>

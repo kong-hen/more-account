@@ -27,36 +27,67 @@ var builtinEnumModels = map[string]string{
 	"1402":                   "claude-opus-5-5-high",
 	"MODEL_PLACEHOLDER_M402": "claude-opus-5-5-high",
 	"1417":                   "gemini-4-argon-high",
+	"1418":                   "gemini-4-argon-high",
+	"1419":                   "gemini-4-argon-high",
 	"MODEL_PLACEHOLDER_M417": "gemini-4-argon-high",
+	"MODEL_PLACEHOLDER_M418": "gemini-4-argon-high",
+	"MODEL_PLACEHOLDER_M419": "gemini-4-argon-high",
 	"1427":                   "gemini-4-carbon-high",
 	"MODEL_PLACEHOLDER_M427": "gemini-4-carbon-high",
+	"1526":                   "gemini-4-hydrogen",
+	"MODEL_PLACEHOLDER_M526": "gemini-4-hydrogen",
 	"1528":                   "gemini-4-hydrogen",
 	"MODEL_PLACEHOLDER_M528": "gemini-4-hydrogen",
+	"1530":                   "gemini-4-hydrogen-tiered-high",
+	"MODEL_PLACEHOLDER_M530": "gemini-4-hydrogen-tiered-high",
+	"1531":                   "gemini-4-hydrogen-tiered-xhigh",
+	"MODEL_PLACEHOLDER_M531": "gemini-4-hydrogen-tiered-xhigh",
+	"1535":                   "gemini-4-neon",
+	"MODEL_PLACEHOLDER_M535": "gemini-4-neon",
 	"1667":                   "gemini-pro-orchestrator",
 	"MODEL_PLACEHOLDER_M667": "gemini-pro-orchestrator",
+	"1668":                   "gemini-pro-orchestrator-g1-pro",
+	"MODEL_PLACEHOLDER_M668": "gemini-pro-orchestrator-g1-pro",
 	"1669":                   "gemini-flash-worker-agy",
 	"MODEL_PLACEHOLDER_M669": "gemini-flash-worker-agy",
 }
 
 var responseModelAliases = map[string]string{
-	"gemini-3.8-flash":         "gemini-3.8-flash-high",
-	"gemini-3.8-flash-n":       "gemini-3.8-flash-high",
-	"gemini-3.8-flash-control": "gemini-3.8-flash-high",
-	"gemini-3.8-flash-tiered":  "gemini-3.8-flash-tiered",
-	"gemini-4-argon":           "gemini-4-argon-high",
-	"gemini-4-carbon":          "gemini-4-carbon-high",
-	"claude-opus-5-5-medium":   "claude-opus-5-5-medium",
-	"claude-opus-5-5-high":     "claude-opus-5-5-high",
+	"gemini-3.8-flash":               "gemini-3.8-flash-high",
+	"gemini-3.8-flash-n":             "gemini-3.8-flash-high",
+	"gemini-3.8-flash-k":             "gemini-3.8-flash-high",
+	"gemini-3.8-flash-q":             "gemini-3.8-flash-high",
+	"gemini-3.8-flash-control":       "gemini-3.8-flash-high",
+	"gemini-3.8-flash-tiered":        "gemini-3.8-flash-tiered",
+	"gemini-4-argon":                 "gemini-4-argon-high",
+	"gemini-4-argon-trial":           "gemini-4-argon-high",
+	"gemini-4-carbon":                "gemini-4-carbon-high",
+	"gemini-4-hydrogen":              "gemini-4-hydrogen",
+	"gemini-4-hydrogen-tiered-high":  "gemini-4-hydrogen-tiered-high",
+	"gemini-4-hydrogen-tiered-xhigh": "gemini-4-hydrogen-tiered-xhigh",
+	"gemini-4-neon":                  "gemini-4-neon",
+	"gemini-pro-orchestrator":        "gemini-pro-orchestrator",
+	"gemini-pro-orchestrator-g1-pro": "gemini-pro-orchestrator-g1-pro",
+	"gemini-flash-worker-agy":        "gemini-flash-worker-agy",
+	"claude-opus-5-5-medium":         "claude-opus-5-5-medium",
+	"claude-opus-5-5-high":           "claude-opus-5-5-high",
 }
 
 var exactDisplayNames = map[string]string{
-	"gemini-3.8-flash-high":   "Gemini 3.8 Flash (High)",
-	"gemini-3.8-flash-tiered": "Gemini 3.8 Flash (Tiered)",
-	"gemini-4-argon-high":     "Gemini 4 Argon (High)",
-	"gemini-4-carbon-high":    "Gemini 4 Carbon (High)",
-	"claude-opus-5-5-high":    "Claude Opus 5.5 (High)",
-	"claude-opus-5-5-medium":  "Claude Opus 5.5 (Medium)",
-	"gpt-oss-120b-medium":     "GPT-OSS 120B (Medium)",
+	"gemini-3.8-flash-high":          "Gemini 3.8 Flash (High)",
+	"gemini-3.8-flash-tiered":        "Gemini 3.8 Flash (Tiered)",
+	"gemini-4-argon-high":            "Gemini 4 Argon (High)",
+	"gemini-4-carbon-high":           "Gemini 4 Carbon (High)",
+	"gemini-4-hydrogen":              "Gemini 4 Hydrogen",
+	"gemini-4-hydrogen-tiered-high":  "Gemini 4 Hydrogen Tiered (High)",
+	"gemini-4-hydrogen-tiered-xhigh": "Gemini 4 Hydrogen Tiered (XHigh)",
+	"gemini-4-neon":                  "Gemini 4 Neon",
+	"gemini-pro-orchestrator":        "Gemini Pro Orchestrator",
+	"gemini-pro-orchestrator-g1-pro": "Gemini Pro Orchestrator G1 Pro",
+	"gemini-flash-worker-agy":        "Gemini Flash Worker AGY",
+	"claude-opus-5-5-high":           "Claude Opus 5.5 (High)",
+	"claude-opus-5-5-medium":         "Claude Opus 5.5 (Medium)",
+	"gpt-oss-120b-medium":            "GPT-OSS 120B (Medium)",
 }
 
 func isPlaceholderOrNumeric(s string) bool {
@@ -81,7 +112,7 @@ func canonicalizeModelID(raw string) string {
 	if m, ok := responseModelAliases[strings.ToLower(trimmed)]; ok {
 		return m
 	}
-	if m, ok := builtinEnumModels[trimmed]; ok {
+	if m, ok := builtinEnumModels[strings.ToUpper(trimmed)]; ok {
 		return m
 	}
 	return strings.ToLower(trimmed)
@@ -115,12 +146,15 @@ func fallbackEnumSlug(rawEnum string) string {
 func ResolveModelInfo(rawEnum, responseModel, rawProvider string) ResolvedModelInfo {
 	var modelID string
 	rawEnum = strings.TrimSpace(rawEnum)
+	upperEnum := strings.ToUpper(rawEnum)
 	responseModel = strings.TrimSpace(responseModel)
 
-	if m, ok := builtinEnumModels[rawEnum]; ok {
+	if m, ok := builtinEnumModels[upperEnum]; ok {
 		modelID = m
 	} else if responseModel != "" {
 		if m, ok := responseModelAliases[strings.ToLower(responseModel)]; ok {
+			modelID = m
+		} else if m, ok := builtinEnumModels[strings.ToUpper(responseModel)]; ok {
 			modelID = m
 		} else if !isPlaceholderOrNumeric(responseModel) {
 			modelID = canonicalizeModelID(responseModel)

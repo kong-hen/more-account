@@ -27,7 +27,20 @@ import { useAppStore } from '@/stores/appStore'
 import { useTokenUsageStore } from '@/stores/tokenUsageStore'
 import { api, extractErrorMessage } from '@/services/api'
 import { formatDateTime, formatExactNumber, formatTokenCount } from '@/utils/quota'
-import type { TokenUsageQuery } from '@/types/models'
+import type { TokenUsageOverview, TokenUsageQuery, WorkspaceUsageSummary } from '@/types/models'
+
+// 兼容后端扩展返回的全量模型显示名映射与按路径区分的工作区筛选选项（阶段 2 将同步至 types/models.ts）
+interface WorkspaceFilterOption {
+  value: string
+  label: string
+  name: string
+  path?: string
+}
+
+type ExtendedTokenUsageOverview = TokenUsageOverview & {
+  availableModelNames?: Record<string, string>
+  availableWorkspaceOptions?: WorkspaceFilterOption[]
+}
 
 const appStore = useAppStore()
 const usageStore = useTokenUsageStore()
@@ -58,12 +71,18 @@ const presets: Array<{ id: TokenUsageQuery['preset']; label: string }> = [
   { id: 'all', label: '全部' },
 ]
 
-const overview = computed(() => usageStore.bundle?.overview ?? null)
+const overview = computed<ExtendedTokenUsageOverview | null>(
+  () => (usageStore.bundle?.overview as ExtendedTokenUsageOverview | undefined) ?? null,
+)
 const conversations = computed(() => usageStore.bundle?.conversations ?? null)
 const usageSettings = computed(() => usageStore.bundle?.settings ?? null)
 const totalAllTokens = computed(() => {
   if (!overview.value) return 0
   return overview.value.exact.totalTokens + overview.value.estimated.totalTokens
+})
+const totalIndexedFiles = computed(() => {
+  if (!overview.value) return 0
+  return (overview.value.scannedFiles ?? 0) + (overview.value.cachedFiles ?? 0)
 })
 
 const searchInput = ref(usageStore.query.search)
@@ -98,8 +117,17 @@ const kindOptions = [
 
 const modelFilterOptions = computed(() => {
   const displayById = new Map<string, string>()
+  // 优先读取后端全量模型显示名映射，避免切换时间范围或选中单个模型后其他选项退化为原始 slug
+  const allNames = overview.value?.availableModelNames
+  if (allNames) {
+    for (const [id, name] of Object.entries(allNames)) {
+      if (id && name) displayById.set(id, name)
+    }
+  }
   for (const m of overview.value?.models ?? []) {
-    if (m.modelId) displayById.set(m.modelId, m.modelDisplayName || m.modelId)
+    if (m.modelId && !displayById.has(m.modelId)) {
+      displayById.set(m.modelId, m.modelDisplayName || m.modelId)
+    }
   }
   const list = (overview.value?.availableModels ?? []).map((id) => ({
     value: id,
@@ -114,13 +142,74 @@ const modelFilterOptions = computed(() => {
   return [{ value: '', label: '全部模型' }, ...list]
 })
 
+function shortPathHint(rawPath?: string): string {
+  const cleaned = (rawPath ?? '').trim().replace(/\\/g, '/').replace(/\/+$/, '')
+  if (!cleaned) return ''
+  const parts = cleaned.split('/').filter(Boolean)
+  if (parts.length <= 2) return parts.join('/')
+  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`
+}
+
+function workspaceFilterKey(ws: WorkspaceUsageSummary): string {
+  return ws.workspacePath || ws.workspaceName
+}
+
+function isWorkspaceSelected(ws: WorkspaceUsageSummary): boolean {
+  const active = usageStore.query.workspace
+  if (!active) return false
+  return active === workspaceFilterKey(ws) || (!ws.workspacePath && active === ws.workspaceName)
+}
+
+const duplicateWorkspaceNames = computed(() => {
+  const counts = new Map<string, number>()
+  const opts = overview.value?.availableWorkspaceOptions
+  if (opts && opts.length > 0) {
+    for (const opt of opts) {
+      counts.set(opt.name, (counts.get(opt.name) ?? 0) + 1)
+    }
+  } else {
+    for (const ws of overview.value?.workspaces ?? []) {
+      counts.set(ws.workspaceName, (counts.get(ws.workspaceName) ?? 0) + 1)
+    }
+  }
+  const dup = new Set<string>()
+  for (const [name, cnt] of counts.entries()) {
+    if (cnt > 1) dup.add(name)
+  }
+  return dup
+})
+
+// 为同名工作区卡片构造清晰无碰撞的路径区分标签
+function workspaceCardHint(ws: WorkspaceUsageSummary): string {
+  if (!ws.workspacePath || !duplicateWorkspaceNames.value.has(ws.workspaceName)) return ''
+  const matchedOpt = overview.value?.availableWorkspaceOptions?.find(
+    (opt) => opt.value === workspaceFilterKey(ws),
+  )
+  if (matchedOpt && matchedOpt.label !== matchedOpt.name) {
+    const start = matchedOpt.label.indexOf('(')
+    const end = matchedOpt.label.lastIndexOf(')')
+    if (start >= 0 && end > start) {
+      return matchedOpt.label.slice(start + 1, end)
+    }
+  }
+  return shortPathHint(ws.workspacePath)
+}
+
 const workspaceFilterOptions = computed(() => {
-  const list = (overview.value?.availableWorkspaces ?? []).map((ws) => ({
-    value: ws,
-    label: ws,
-  }))
+  const opts = overview.value?.availableWorkspaceOptions
+  const list =
+    opts && opts.length > 0
+      ? opts.map((opt) => ({ value: opt.value, label: opt.label }))
+      : (overview.value?.availableWorkspaces ?? []).map((ws) => ({
+          value: ws,
+          label: ws,
+        }))
   if (usageStore.query.workspace && !list.some((opt) => opt.value === usageStore.query.workspace)) {
-    list.unshift({ value: usageStore.query.workspace, label: usageStore.query.workspace })
+    const active = usageStore.query.workspace
+    list.unshift({
+      value: active,
+      label: shortPathHint(active) || active,
+    })
   }
   return [{ value: '', label: '全部工作区' }, ...list]
 })
@@ -453,14 +542,27 @@ function kindLabel(kind: string): string {
             <div v-if="overview?.workspaces?.length" class="space-y-2.5">
               <button
                 v-for="ws in overview.workspaces.slice(0, 6)"
-                :key="ws.workspacePath || ws.workspaceName"
+                :key="workspaceFilterKey(ws)"
                 type="button"
                 class="w-full text-left p-1.5 -mx-1.5 rounded-lg space-y-1 cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
-                :style="usageStore.query.workspace === ws.workspaceName ? { backgroundColor: 'var(--success-soft)' } : undefined"
-                @click="setWorkspace(usageStore.query.workspace === ws.workspaceName ? '' : ws.workspaceName)"
+                :style="isWorkspaceSelected(ws) ? { backgroundColor: 'var(--success-soft)' } : undefined"
+                @click="setWorkspace(isWorkspaceSelected(ws) ? '' : workspaceFilterKey(ws))"
               >
                 <div class="flex items-center justify-between text-xs gap-2">
-                  <span class="truncate font-medium" :title="ws.workspacePath || ws.workspaceName" style="color: var(--text-primary)">{{ ws.workspaceName }}</span>
+                  <span
+                    class="truncate font-medium min-w-0"
+                    :title="ws.workspacePath || ws.workspaceName"
+                    style="color: var(--text-primary)"
+                  >
+                    {{ ws.workspaceName }}
+                    <span
+                      v-if="workspaceCardHint(ws)"
+                      class="ml-1 font-normal font-mono-num text-[10.5px]"
+                      style="color: var(--text-muted)"
+                    >
+                      ({{ workspaceCardHint(ws) }})
+                    </span>
+                  </span>
                   <span class="font-mono-num text-[11.5px] shrink-0" style="color: var(--text-secondary)">
                     {{ formatTokenCount(ws.exact.totalTokens + ws.estimatedTotalTokens) }}
                     <span class="ml-1" style="color: var(--text-muted)">({{ ws.conversationCount }})</span>
@@ -495,10 +597,11 @@ function kindLabel(kind: string): string {
               <h3 class="text-xs font-semibold shrink-0" style="color: var(--text-primary)">对话消耗明细</h3>
               <span
                 v-if="overview?.lastSyncedAt"
+                :title="`总索引 ${totalIndexedFiles} 个会话文件（本次新扫 ${overview.scannedFiles} · 缓存命中 ${overview.cachedFiles}）`"
                 class="text-[11px] font-mono-num truncate"
                 style="color: var(--text-muted)"
               >
-                索引 {{ overview.cachedFiles }} 文件 · 同步于 {{ formatDateTime(overview.lastSyncedAt) }}
+                索引 {{ totalIndexedFiles }} 文件 · 同步于 {{ formatDateTime(overview.lastSyncedAt) }}
               </span>
             </div>
 

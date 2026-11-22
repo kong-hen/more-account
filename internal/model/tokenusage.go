@@ -132,23 +132,33 @@ type TokenUsageQuery struct {
 	PageSize    int    `json:"pageSize"`
 }
 
+// WorkspaceFilterOption 表示工作区筛选下拉选项，支持同名不同路径目录按路径区分。
+type WorkspaceFilterOption struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+	Name  string `json:"name"`
+	Path  string `json:"path,omitempty"`
+}
+
 // TokenUsageOverview 表示顶部总览统计与多维图表数据。
 type TokenUsageOverview struct {
-	Exact              ExactTokenTotals        `json:"exact"`
-	Estimated          EstimatedTokenTotals    `json:"estimated"`
-	ConversationCount  int                     `json:"conversationCount"`
-	TurnCount          int                     `json:"turnCount"`
-	ExactTurnCount     int                     `json:"exactTurnCount"`
-	Trend              []UsageTrendBucket      `json:"trend"`
-	Models             []ModelUsageSummary     `json:"models"`
-	Workspaces         []WorkspaceUsageSummary `json:"workspaces"`
-	AvailableModels    []string                `json:"availableModels"`
-	AvailableWorkspace []string                `json:"availableWorkspaces"`
-	ScanDurationMs     int64                   `json:"scanDurationMs"`
-	ScannedFiles       int                     `json:"scannedFiles"`
-	CachedFiles        int                     `json:"cachedFiles"`
-	SkippedErrors      int                     `json:"skippedErrors"`
-	LastSyncedAt       string                  `json:"lastSyncedAt"`
+	Exact                     ExactTokenTotals        `json:"exact"`
+	Estimated                 EstimatedTokenTotals    `json:"estimated"`
+	ConversationCount         int                     `json:"conversationCount"`
+	TurnCount                 int                     `json:"turnCount"`
+	ExactTurnCount            int                     `json:"exactTurnCount"`
+	Trend                     []UsageTrendBucket      `json:"trend"`
+	Models                    []ModelUsageSummary     `json:"models"`
+	Workspaces                []WorkspaceUsageSummary `json:"workspaces"`
+	AvailableModels           []string                `json:"availableModels"`
+	AvailableModelNames       map[string]string       `json:"availableModelNames,omitempty"`
+	AvailableWorkspace        []string                `json:"availableWorkspaces"`
+	AvailableWorkspaceOptions []WorkspaceFilterOption `json:"availableWorkspaceOptions,omitempty"`
+	ScanDurationMs            int64                   `json:"scanDurationMs"`
+	ScannedFiles              int                     `json:"scannedFiles"`
+	CachedFiles               int                     `json:"cachedFiles"`
+	SkippedErrors             int                     `json:"skippedErrors"`
+	LastSyncedAt              string                  `json:"lastSyncedAt"`
 }
 
 // PaginatedConversations 表示分页后的对话消耗列表。

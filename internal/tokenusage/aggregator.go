@@ -11,6 +11,10 @@ import (
 )
 
 func (s *Service) buildBundle(snap *scanSnapshot, query model.TokenUsageQuery) *model.TokenUsageBundle {
+	return s.buildBundleWithOptions(snap, query, false)
+}
+
+func (s *Service) buildBundleWithOptions(snap *scanSnapshot, query model.TokenUsageQuery, unlimitedPage bool) *model.TokenUsageBundle {
 	customDir, effectiveDir, defaultDir := s.resolveDataDir()
 	_, statErr := os.Stat(effectiveDir)
 
@@ -23,29 +27,50 @@ func (s *Service) buildBundle(snap *scanSnapshot, query model.TokenUsageQuery) *
 		granularity = "day"
 	}
 	pageSize := query.PageSize
-	if pageSize <= 0 || pageSize > 100 {
+	if !unlimitedPage && (pageSize <= 0 || pageSize > 100) {
 		pageSize = 20
 	}
 	page := query.Page
-	if page <= 0 {
+	if unlimitedPage || page <= 0 {
 		page = 1
 	}
 
 	minDayKey := presetStartDayKey(preset, time.Now().Local())
 
-	// 收集可用模型与工作区列表
+	// 收集全量可用模型、模型显示名映射与工作区列表（不受当前筛选条件裁剪，防止切换筛选后下拉选项显示名退化）
 	availModelSet := make(map[string]struct{})
+	availModelNames := make(map[string]string)
 	availWSSet := make(map[string]struct{})
 	for _, c := range snap.Conversations {
 		for _, m := range c.Summary.Models {
 			availModelSet[m] = struct{}{}
+		}
+		if c.Summary.PrimaryModelID != "" && c.Summary.PrimaryModelDisplayName != "" {
+			if _, ok := availModelNames[c.Summary.PrimaryModelID]; !ok {
+				availModelNames[c.Summary.PrimaryModelID] = c.Summary.PrimaryModelDisplayName
+			}
+		}
+		for _, b := range c.Buckets {
+			if b.ModelID == "" {
+				continue
+			}
+			availModelSet[b.ModelID] = struct{}{}
+			if b.ModelDisplayName != "" {
+				availModelNames[b.ModelID] = b.ModelDisplayName
+			}
 		}
 		if c.Summary.WorkspaceName != "" {
 			availWSSet[c.Summary.WorkspaceName] = struct{}{}
 		}
 	}
 	availModels := mapKeysSorted(availModelSet)
+	for _, m := range availModels {
+		if strings.TrimSpace(availModelNames[m]) == "" {
+			availModelNames[m] = FormatModelDisplayName(m)
+		}
+	}
 	availWS := mapKeysSorted(availWSSet)
+	availWSOptions := buildWorkspaceFilterOptions(snap.Conversations)
 
 	var (
 		totalExact     model.ExactTokenTotals
@@ -69,20 +94,22 @@ func (s *Service) buildBundle(snap *scanSnapshot, query model.TokenUsageQuery) *
 		if kindFilter != "" && conv.Summary.Kind != kindFilter {
 			continue
 		}
-		if wsFilter != "" && conv.Summary.WorkspaceName != wsFilter {
+		if wsFilter != "" && conv.Summary.WorkspacePath != wsFilter && conv.Summary.WorkspaceName != wsFilter {
 			continue
 		}
 		if searchLower != "" {
-			haystack := strings.ToLower(conv.Summary.DisplayTitle + " " + conv.Summary.Preview + " " + conv.Summary.WorkspaceName + " " + conv.Summary.ConversationID)
+			haystack := strings.ToLower(conv.Summary.DisplayTitle + " " + conv.Summary.Preview + " " + conv.Summary.WorkspaceName + " " + conv.Summary.WorkspacePath + " " + conv.Summary.ConversationID)
 			if !strings.Contains(haystack, searchLower) {
 				continue
 			}
 		}
 
-		// 过滤命中的时间与模型桶
+		// 过滤命中的时间与模型桶，并同步按命中桶重算该对话在当前筛选窗口下的主力模型与模型列表
 		var convExact model.ExactTokenTotals
 		var convEst model.EstimatedTokenTotals
 		var convExactTurns int
+		convModelTotals := make(map[string]uint64)
+		convModelDisplay := make(map[string]string)
 		matchedAny := false
 
 		for _, b := range conv.Buckets {
@@ -104,6 +131,10 @@ func (s *Service) buildBundle(snap *scanSnapshot, query model.TokenUsageQuery) *
 			convEst.TotalTokens += b.EstInput + b.EstOutput
 			convEst.EstimatedTurnCount += b.EstimatedTurnCount
 			convExactTurns += b.ExactTurnCount
+			convModelTotals[b.ModelID] += b.Exact.TotalTokens + b.EstInput + b.EstOutput
+			if b.ModelDisplayName != "" {
+				convModelDisplay[b.ModelID] = b.ModelDisplayName
+			}
 
 			// 趋势桶聚合
 			tKey, tLabel := bucketKeyForGranularity(b.DayKey, granularity)
@@ -164,12 +195,31 @@ func (s *Service) buildBundle(snap *scanSnapshot, query model.TokenUsageQuery) *
 		wsSummary.Exact.Add(convExact)
 		wsSummary.EstimatedTotalTokens += convEst.TotalTokens
 
+		filteredModels := make([]string, 0, len(convModelTotals))
+		primaryModelID := "unknown"
+		var bestTok uint64
+		for mid, tot := range convModelTotals {
+			filteredModels = append(filteredModels, mid)
+			if tot > bestTok || (tot == bestTok && (primaryModelID == "unknown" || mid < primaryModelID)) {
+				bestTok = tot
+				primaryModelID = mid
+			}
+		}
+		sort.Strings(filteredModels)
+		primaryDisplay := convModelDisplay[primaryModelID]
+		if primaryDisplay == "" {
+			primaryDisplay = FormatModelDisplayName(primaryModelID)
+		}
+
 		item := conv.Summary
 		item.Exact = convExact
 		item.Estimated = convEst
 		item.ExactTurnCount = convExactTurns
 		item.EstimatedTurnCount = convEst.EstimatedTurnCount
 		item.TurnCount = convExactTurns + convEst.EstimatedTurnCount
+		item.PrimaryModelID = primaryModelID
+		item.PrimaryModelDisplayName = primaryDisplay
+		item.Models = filteredModels
 		filteredItems = append(filteredItems, item)
 	}
 
@@ -247,43 +297,57 @@ func (s *Service) buildBundle(snap *scanSnapshot, query model.TokenUsageQuery) *
 	})
 
 	totalItems := len(filteredItems)
-	totalPages := (totalItems + pageSize - 1) / pageSize
-	if totalPages == 0 {
+	var (
+		totalPages int
+		pagedItems []model.ConversationSummaryItem
+	)
+	if unlimitedPage {
+		// 导出场景不设 100 条分页上限，返回当前筛选条件下的完整对话列表
+		page = 1
 		totalPages = 1
+		pageSize = totalItems
+		pagedItems = filteredItems
+	} else {
+		totalPages = (totalItems + pageSize - 1) / pageSize
+		if totalPages == 0 {
+			totalPages = 1
+		}
+		if page > totalPages {
+			page = totalPages
+		}
+		startIdx := (page - 1) * pageSize
+		endIdx := startIdx + pageSize
+		if startIdx > totalItems {
+			startIdx = totalItems
+		}
+		if endIdx > totalItems {
+			endIdx = totalItems
+		}
+		pagedItems = filteredItems[startIdx:endIdx]
 	}
-	if page > totalPages {
-		page = totalPages
-	}
-	startIdx := (page - 1) * pageSize
-	endIdx := startIdx + pageSize
-	if startIdx > totalItems {
-		startIdx = totalItems
-	}
-	if endIdx > totalItems {
-		endIdx = totalItems
-	}
-	pagedItems := filteredItems[startIdx:endIdx]
 	if pagedItems == nil {
 		pagedItems = []model.ConversationSummaryItem{}
 	}
 
 	return &model.TokenUsageBundle{
 		Overview: model.TokenUsageOverview{
-			Exact:              totalExact,
-			Estimated:          totalEst,
-			ConversationCount:  totalItems,
-			TurnCount:          totalTurns,
-			ExactTurnCount:     totalExactTurn,
-			Trend:              trend,
-			Models:             models,
-			Workspaces:         workspaces,
-			AvailableModels:    availModels,
-			AvailableWorkspace: availWS,
-			ScanDurationMs:     snap.ScanDurationMs,
-			ScannedFiles:       snap.ScannedFiles,
-			CachedFiles:        snap.CachedFiles,
-			SkippedErrors:      snap.SkippedErrors,
-			LastSyncedAt:       snap.LastSyncedAt.Format(time.RFC3339),
+			Exact:                     totalExact,
+			Estimated:                 totalEst,
+			ConversationCount:         totalItems,
+			TurnCount:                 totalTurns,
+			ExactTurnCount:            totalExactTurn,
+			Trend:                     trend,
+			Models:                    models,
+			Workspaces:                workspaces,
+			AvailableModels:           availModels,
+			AvailableModelNames:       availModelNames,
+			AvailableWorkspace:        availWS,
+			AvailableWorkspaceOptions: availWSOptions,
+			ScanDurationMs:            snap.ScanDurationMs,
+			ScannedFiles:              snap.ScannedFiles,
+			CachedFiles:               snap.CachedFiles,
+			SkippedErrors:             snap.SkippedErrors,
+			LastSyncedAt:              snap.LastSyncedAt.Format(time.RFC3339),
 		},
 		Conversations: model.PaginatedConversations{
 			Items:      pagedItems,
@@ -340,4 +404,92 @@ func mapKeysSorted(m map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// shortWorkspacePathHint 提取路径末尾两级目录作为同名工作区的简洁区分提示。
+func shortWorkspacePathHint(rawPath string) string {
+	cleaned := strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(rawPath), `\`, "/"), "/")
+	if cleaned == "" {
+		return ""
+	}
+	parts := strings.Split(cleaned, "/")
+	nonEmpty := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			nonEmpty = append(nonEmpty, p)
+		}
+	}
+	if len(nonEmpty) <= 2 {
+		return strings.Join(nonEmpty, "/")
+	}
+	return nonEmpty[len(nonEmpty)-2] + "/" + nonEmpty[len(nonEmpty)-1]
+}
+
+// buildWorkspaceFilterOptions 构建全量工作区筛选选项，对同名不同路径的目录自动附带区分路径提示。
+func buildWorkspaceFilterOptions(convs []scannedConversation) []model.WorkspaceFilterOption {
+	type wsMeta struct {
+		name string
+		path string
+	}
+	byKey := make(map[string]wsMeta)
+	for _, c := range convs {
+		name := strings.TrimSpace(c.Summary.WorkspaceName)
+		path := strings.TrimSpace(c.Summary.WorkspacePath)
+		if name == "" && path == "" {
+			continue
+		}
+		key := path
+		if key == "" {
+			key = name
+		}
+		if _, exists := byKey[key]; !exists {
+			byKey[key] = wsMeta{name: name, path: path}
+		}
+	}
+	if len(byKey) == 0 {
+		return []model.WorkspaceFilterOption{}
+	}
+
+	nameCount := make(map[string]int, len(byKey))
+	for _, meta := range byKey {
+		nameCount[meta.name]++
+	}
+
+	// 检测两级路径简写是否在同名目录间仍发生冲突，冲突时回退展示完整路径
+	shortHintCount := make(map[string]int, len(byKey))
+	for _, meta := range byKey {
+		if nameCount[meta.name] > 1 && meta.path != "" {
+			hintKey := meta.name + "\x00" + shortWorkspacePathHint(meta.path)
+			shortHintCount[hintKey]++
+		}
+	}
+
+	opts := make([]model.WorkspaceFilterOption, 0, len(byKey))
+	for key, meta := range byKey {
+		label := meta.name
+		if nameCount[meta.name] > 1 && meta.path != "" {
+			hint := shortWorkspacePathHint(meta.path)
+			if shortHintCount[meta.name+"\x00"+hint] > 1 || hint == "" {
+				hint = meta.path
+			}
+			label = fmt.Sprintf("%s (%s)", meta.name, hint)
+		}
+		opts = append(opts, model.WorkspaceFilterOption{
+			Value: key,
+			Label: label,
+			Name:  meta.name,
+			Path:  meta.path,
+		})
+	}
+
+	sort.Slice(opts, func(i, j int) bool {
+		if opts[i].Name != opts[j].Name {
+			return opts[i].Name < opts[j].Name
+		}
+		if opts[i].Path != opts[j].Path {
+			return opts[i].Path < opts[j].Path
+		}
+		return opts[i].Value < opts[j].Value
+	})
+	return opts
 }

@@ -34,6 +34,9 @@ export const useTokenUsageStore = defineStore('tokenUsage', () => {
 
   let querySeq = 0
   let detailSeq = 0
+  // 独立追踪查询与同步的在途请求数，避免共享 querySeq 竞态导致 loading/syncing 永久锁死
+  let activeQueryCount = 0
+  let activeSyncCount = 0
 
   async function fetchQuery(patch?: Partial<TokenUsageQuery>) {
     if (patch) {
@@ -41,6 +44,7 @@ export const useTokenUsageStore = defineStore('tokenUsage', () => {
     }
     if (!isWailsRuntime()) return
     const seq = ++querySeq
+    activeQueryCount++
     loading.value = true
     error.value = ''
     try {
@@ -51,7 +55,8 @@ export const useTokenUsageStore = defineStore('tokenUsage', () => {
       if (seq !== querySeq) return
       error.value = extractErrorMessage(err)
     } finally {
-      if (seq === querySeq) {
+      activeQueryCount = Math.max(0, activeQueryCount - 1)
+      if (activeQueryCount === 0) {
         loading.value = false
       }
     }
@@ -61,6 +66,7 @@ export const useTokenUsageStore = defineStore('tokenUsage', () => {
     if (!isWailsRuntime()) return
     const appStore = useAppStore()
     const seq = ++querySeq
+    activeSyncCount++
     syncing.value = true
     error.value = ''
     try {
@@ -78,16 +84,19 @@ export const useTokenUsageStore = defineStore('tokenUsage', () => {
       error.value = extractErrorMessage(err)
       appStore.notify(`同步 Token 用量失败：${error.value}`, 'error')
     } finally {
-      if (seq === querySeq) {
+      activeSyncCount = Math.max(0, activeSyncCount - 1)
+      if (activeSyncCount === 0) {
         syncing.value = false
       }
     }
   }
 
-  // 当用户在设置中更改自定义扫描目录时清空旧缓存并按需刷新
+  // 当用户在设置中更改自定义扫描目录时清空旧缓存、复位页码与错误状态并按需刷新
   function invalidate(reloadNow = false) {
     querySeq++
     bundle.value = null
+    error.value = ''
+    query.value = { ...query.value, page: 1 }
     closeConversationDetail()
     if (reloadNow) {
       void fetchQuery({ page: 1 })
