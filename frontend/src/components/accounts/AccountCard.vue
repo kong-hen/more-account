@@ -304,28 +304,31 @@ async function handleCopyValidationUrl() {
         </div>
       </div>
 
-      <!-- 聚合配额面板：用单一柔和底板 + 细分割线取代卡中套卡，清晰高效且视觉轻盈 -->
+      <!-- 聚合配额面板：用单一柔和底板 + 细分割线取代卡中套卡，精巧展示模型名称与纤细额度进度条 -->
       <template v-if="quotaCategories.length > 0 || !validationUrl">
         <div
           v-if="quotaCategories.length > 0"
-          class="rounded-lg border px-2.5 py-1.5 divide-y divide-[var(--border-hairline)]"
+          class="rounded-lg border px-2 py-1 divide-y divide-[var(--border-hairline)]"
           style="background-color: var(--bg-app); border-color: var(--border-hairline)"
         >
           <div
             v-for="cat in quotaCategories"
             :key="cat.key"
-            class="py-1.5 first:pt-0.5 last:pb-0.5 space-y-1"
+            class="py-1 first:pt-0.5 last:pb-0.5 space-y-[3px]"
           >
             <!-- 双窗口：5 小时与周额度左右并列，中间以细竖线明确视觉分组 -->
             <template v-if="cat.fiveHour">
-              <div class="text-[0.6875rem] font-medium leading-tight truncate" style="color: var(--text-primary)">
+              <div
+                class="text-[0.625rem] font-medium leading-tight truncate"
+                style="color: var(--text-secondary)"
+              >
                 {{ cat.label }}
               </div>
               <div class="account-card__quota-split grid grid-cols-2">
-                <div class="space-y-1 min-w-0 pr-2">
-                  <div class="flex items-baseline justify-between gap-1 text-[0.6875rem] leading-none">
+                <div class="space-y-[3px] min-w-0 pr-1.5">
+                  <div class="flex items-baseline justify-between gap-1 text-[0.625rem] leading-none">
                     <span class="inline-flex items-baseline gap-1 min-w-0">
-                      <span class="text-[0.59375rem] font-medium shrink-0" style="color: var(--text-muted)">
+                      <span class="text-[0.5625rem] font-medium shrink-0" style="color: var(--text-muted)">
                         5h
                       </span>
                       <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.fiveHour.percentage)">
@@ -334,21 +337,21 @@ async function handleCopyValidationUrl() {
                     </span>
                     <span
                       v-if="cat.fiveHour.resetTime"
-                      class="account-card__quota-reset text-[0.59375rem] font-mono-num truncate"
+                      class="account-card__quota-reset text-[0.5625rem] font-mono-num truncate"
                       style="color: var(--text-muted)"
                       :title="`5小时额度重置：${formatResetCountdown(cat.fiveHour.resetTime, appStore.nowMs)}`"
                     >
                       {{ formatResetCountdown(cat.fiveHour.resetTime, appStore.nowMs) }}
                     </span>
                   </div>
-                  <QuotaBar :percentage="cat.fiveHour.percentage" height="h-1" />
+                  <QuotaBar :percentage="cat.fiveHour.percentage" height="h-[3px]" />
                 </div>
 
-                <div class="space-y-1 min-w-0 pl-2 border-l" style="border-color: var(--border-hairline)">
+                <div class="space-y-[3px] min-w-0 pl-1.5 border-l" style="border-color: var(--border-hairline)">
                   <template v-if="cat.weekly">
-                    <div class="flex items-baseline justify-between gap-1 text-[0.6875rem] leading-none">
+                    <div class="flex items-baseline justify-between gap-1 text-[0.625rem] leading-none">
                       <span class="inline-flex items-baseline gap-1 min-w-0">
-                        <span class="text-[0.59375rem] font-medium shrink-0" style="color: var(--text-muted)">
+                        <span class="text-[0.5625rem] font-medium shrink-0" style="color: var(--text-muted)">
                           周
                         </span>
                         <span class="font-mono-num font-semibold" :style="quotaValueStyle(cat.weekly.percentage)">
@@ -357,19 +360,19 @@ async function handleCopyValidationUrl() {
                       </span>
                       <span
                         v-if="cat.weekly.resetTime"
-                        class="account-card__quota-reset text-[0.59375rem] font-mono-num truncate"
+                        class="account-card__quota-reset text-[0.5625rem] font-mono-num truncate"
                         style="color: var(--text-muted)"
                         :title="`周额度重置：${formatResetCountdown(cat.weekly.resetTime, appStore.nowMs)}`"
                       >
                         {{ formatResetCountdown(cat.weekly.resetTime, appStore.nowMs) }}
                       </span>
                     </div>
-                    <QuotaBar :percentage="cat.weekly.percentage" height="h-1" />
+                    <QuotaBar :percentage="cat.weekly.percentage" height="h-[3px]" />
                   </template>
                   <template v-else>
-                    <div class="flex items-baseline justify-between gap-1 text-[0.6875rem] leading-none">
+                    <div class="flex items-baseline justify-between gap-1 text-[0.625rem] leading-none">
                       <span class="inline-flex items-baseline gap-1 min-w-0">
-                        <span class="text-[0.59375rem] font-medium shrink-0" style="color: var(--text-muted)">
+                        <span class="text-[0.5625rem] font-medium shrink-0" style="color: var(--text-muted)">
                           周
                         </span>
                         <span class="font-mono-num font-medium" style="color: var(--text-muted)">
@@ -378,7 +381,7 @@ async function handleCopyValidationUrl() {
                       </span>
                     </div>
                     <div
-                      class="w-full h-1 rounded-full overflow-clip"
+                      class="w-full h-[3px] rounded-full overflow-clip"
                       style="background-color: var(--bg-subtle)"
                       title="点击刷新获取云端周额度"
                     />
@@ -389,15 +392,15 @@ async function handleCopyValidationUrl() {
 
             <!-- 单窗口：仅有周额度 -->
             <template v-else-if="cat.weekly">
-              <div class="flex items-baseline justify-between gap-1.5 text-[0.6875rem] leading-tight">
+              <div class="flex items-baseline justify-between gap-1.5 text-[0.625rem] leading-tight">
                 <span class="inline-flex items-baseline gap-1 min-w-0">
-                  <span class="font-medium truncate" style="color: var(--text-primary)">{{ cat.label }}</span>
-                  <span class="text-[0.59375rem] font-medium shrink-0" style="color: var(--text-muted)">周</span>
+                  <span class="font-medium truncate" style="color: var(--text-secondary)">{{ cat.label }}</span>
+                  <span class="text-[0.5625rem] font-medium shrink-0" style="color: var(--text-muted)">周</span>
                 </span>
                 <span class="inline-flex items-baseline gap-1.5 shrink-0 font-mono-num">
                   <span
                     v-if="cat.weekly.resetTime"
-                    class="account-card__quota-reset text-[0.59375rem]"
+                    class="account-card__quota-reset text-[0.5625rem]"
                     style="color: var(--text-muted)"
                   >
                     {{ formatResetCountdown(cat.weekly.resetTime, appStore.nowMs) }}
@@ -407,7 +410,7 @@ async function handleCopyValidationUrl() {
                   </span>
                 </span>
               </div>
-              <QuotaBar :percentage="cat.weekly.percentage" height="h-1" />
+              <QuotaBar :percentage="cat.weekly.percentage" height="h-[3px]" />
             </template>
           </div>
         </div>
