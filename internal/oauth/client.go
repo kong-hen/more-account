@@ -44,6 +44,9 @@ const (
 // ErrInvalidGrant 表示 Google 返回 invalid_grant（Refresh Token 已被撤销或失效）。
 var ErrInvalidGrant = errors.New("invalid_grant")
 
+// ErrIncompleteCredentials 表示仅配置了 OAuth Client ID 或 Client Secret 中的一项，无法组成有效凭据对。
+var ErrIncompleteCredentials = errors.New("Google OAuth Client ID 与 Client Secret 必须成对填写或同时留空")
+
 var (
 	dotEnvOnce   sync.Once
 	dotEnvID     string
@@ -108,40 +111,67 @@ func parseDotEnvFile(path string) (string, string) {
 	return id, sec
 }
 
-// ResolveCredentials 按优先级解析 OAuth 客户端凭据：自定义参数 > 环境变量 > 编译期注入 > 本地 .env.local。
-func ResolveCredentials(customID, customSecret string) (clientID, clientSecret string) {
-	localID, localSec := loadDotEnvLocal()
-
-	for _, candidate := range []string{
-		customID,
-		os.Getenv("MORE_ACCOUNT_OAUTH_CLIENT_ID"),
-		DefaultClientID,
-		localID,
-	} {
-		if s := strings.TrimSpace(candidate); s != "" {
-			clientID = s
-			break
-		}
+// ValidateCustomCredentials 校验自定义 OAuth 凭据是否成对填写（同时填写或同时留空）。
+func ValidateCustomCredentials(customID, customSecret string) error {
+	id := strings.TrimSpace(customID)
+	sec := strings.TrimSpace(customSecret)
+	if (id == "") != (sec == "") {
+		return fmt.Errorf("%w，请补全另一项或同时留空以使用默认凭据", ErrIncompleteCredentials)
 	}
-
-	for _, candidate := range []string{
-		customSecret,
-		os.Getenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET"),
-		DefaultClientSecret,
-		localSec,
-	} {
-		if s := strings.TrimSpace(candidate); s != "" {
-			clientSecret = s
-			break
-		}
-	}
-	return clientID, clientSecret
+	return nil
 }
 
-// HasBuiltInCredentials 判断运行环境（环境变量、编译期 ldflags 或本地 .env.local）是否已具备默认 OAuth 凭据。
+// ResolveCredentials 按来源成对解析 OAuth 客户端凭据：自定义参数 > 环境变量 > 编译期注入 > 本地 .env.local。
+// 禁止单边填写与内置或环境变量凭据错配，遇到单边配置时返回明确错误。
+func ResolveCredentials(customID, customSecret string) (clientID, clientSecret string, err error) {
+	cid := strings.TrimSpace(customID)
+	csec := strings.TrimSpace(customSecret)
+	if err := ValidateCustomCredentials(cid, csec); err != nil {
+		return "", "", err
+	}
+	if cid != "" && csec != "" {
+		return cid, csec, nil
+	}
+
+	localID, localSec := loadDotEnvLocal()
+	sources := []struct {
+		name   string
+		id     string
+		secret string
+	}{
+		{
+			name:   "环境变量",
+			id:     strings.TrimSpace(os.Getenv("MORE_ACCOUNT_OAUTH_CLIENT_ID")),
+			secret: strings.TrimSpace(os.Getenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET")),
+		},
+		{
+			name:   "编译期注入",
+			id:     strings.TrimSpace(DefaultClientID),
+			secret: strings.TrimSpace(DefaultClientSecret),
+		},
+		{
+			name:   "本地 .env.local",
+			id:     strings.TrimSpace(localID),
+			secret: strings.TrimSpace(localSec),
+		},
+	}
+
+	for _, src := range sources {
+		if src.id == "" && src.secret == "" {
+			continue
+		}
+		if src.id != "" && src.secret != "" {
+			return src.id, src.secret, nil
+		}
+		return "", "", fmt.Errorf("%s中的 %w", src.name, ErrIncompleteCredentials)
+	}
+	return "", "", nil
+}
+
+// HasBuiltInCredentials 判断运行环境（环境变量、编译期 ldflags 或本地 .env.local）是否已具备完整的默认 OAuth 凭据。
 func HasBuiltInCredentials() bool {
-	id, sec := ResolveCredentials("", "")
-	return id != "" && sec != ""
+	id, sec, err := ResolveCredentials("", "")
+	return err == nil && id != "" && sec != ""
 }
 
 // TokenResponse 对应 Google OAuth2 Token 端点的响应体。
@@ -217,14 +247,15 @@ func (c *Client) userInfoURL() string {
 	return DefaultUserInfoURL
 }
 
-func (c *Client) resolveCredentials() (string, string) {
+func (c *Client) resolveCredentials() (string, string, error) {
 	customID, customSecret := c.ClientID, c.ClientSecret
 	if c.CredentialsProvider != nil {
 		pid, psec := c.CredentialsProvider()
-		if strings.TrimSpace(pid) != "" {
+		pid = strings.TrimSpace(pid)
+		psec = strings.TrimSpace(psec)
+		// 动态凭据提供器只要填写了任一项，即作为整体交由成对校验，避免与字段旧值或默认凭据混拼
+		if pid != "" || psec != "" {
 			customID = pid
-		}
-		if strings.TrimSpace(psec) != "" {
 			customSecret = psec
 		}
 	}
@@ -252,14 +283,14 @@ func BuildAuthURL(redirectURI, state string) string {
 
 // BuildAuthURLWithPKCE 生成带可选 S256 PKCE 参数的 Google OAuth2 授权页地址。
 func BuildAuthURLWithPKCE(redirectURI, state, codeChallenge string) string {
-	clientID, _ := ResolveCredentials("", "")
+	clientID, _, _ := ResolveCredentials("", "")
 	return BuildAuthURLWithClientAndPKCE(clientID, redirectURI, state, codeChallenge)
 }
 
 // BuildAuthURLWithClientAndPKCE 使用指定 ClientID 与可选 S256 PKCE 参数生成 Google OAuth2 授权页地址。
 func BuildAuthURLWithClientAndPKCE(clientID, redirectURI, state, codeChallenge string) string {
 	if strings.TrimSpace(clientID) == "" {
-		clientID, _ = ResolveCredentials("", "")
+		clientID, _, _ = ResolveCredentials("", "")
 	}
 	scopes := strings.Join([]string{
 		"openid",
@@ -277,7 +308,8 @@ func BuildAuthURLWithClientAndPKCE(clientID, redirectURI, state, codeChallenge s
 	params.Set("response_type", "code")
 	params.Set("scope", scopes)
 	params.Set("access_type", "offline")
-	params.Set("prompt", "consent")
+	// 同时请求账号选择与授权确认，方便多账号切换登录并确保稳定获取 refresh_token
+	params.Set("prompt", "select_account consent")
 	params.Set("include_granted_scopes", "true")
 	if strings.TrimSpace(state) != "" {
 		params.Set("state", strings.TrimSpace(state))
@@ -292,7 +324,10 @@ func BuildAuthURLWithClientAndPKCE(clientID, redirectURI, state, codeChallenge s
 
 // ExchangeCode 使用授权码（及可选 PKCE code_verifier）向 Google 换取 Access Token 和 Refresh Token。
 func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI string, codeVerifier ...string) (*TokenResponse, error) {
-	clientID, clientSecret := c.resolveCredentials()
+	clientID, clientSecret, credErr := c.resolveCredentials()
+	if credErr != nil {
+		return nil, credErr
+	}
 	if c.tokenURL() == DefaultTokenURL && (clientID == "" || clientSecret == "") {
 		return nil, fmt.Errorf("尚未配置 Google OAuth 客户端凭据（Client ID / Secret），请在「设置」或本地 .env.local 中配置")
 	}
@@ -329,6 +364,12 @@ func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI string, cod
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("解析 Token 响应失败: %w", err)
 	}
+	tokenResp.AccessToken = strings.TrimSpace(tokenResp.AccessToken)
+	if tokenResp.AccessToken == "" {
+		return nil, fmt.Errorf("Token 交换响应缺少有效的 access_token")
+	}
+	tokenResp.RefreshToken = strings.TrimSpace(tokenResp.RefreshToken)
+	tokenResp.IDToken = strings.TrimSpace(tokenResp.IDToken)
 	tokenResp.OAuthClientKey = DefaultOAuthClientKey
 	if tokenResp.TokenType == "" {
 		tokenResp.TokenType = "Bearer"
@@ -343,7 +384,10 @@ func (c *Client) RefreshAccessToken(ctx context.Context, refreshToken string) (*
 		return nil, fmt.Errorf("refresh_token 不能为空")
 	}
 
-	clientID, clientSecret := c.resolveCredentials()
+	clientID, clientSecret, credErr := c.resolveCredentials()
+	if credErr != nil {
+		return nil, credErr
+	}
 	if c.tokenURL() == DefaultTokenURL && (clientID == "" || clientSecret == "") {
 		return nil, fmt.Errorf("尚未配置 Google OAuth 客户端凭据（Client ID / Secret），请在「设置」或本地 .env.local 中配置")
 	}
@@ -374,6 +418,12 @@ func (c *Client) RefreshAccessToken(ctx context.Context, refreshToken string) (*
 			if err := json.Unmarshal(body, &tokenResp); err != nil {
 				return nil, fmt.Errorf("解析刷新令牌响应失败: %w", err)
 			}
+			tokenResp.AccessToken = strings.TrimSpace(tokenResp.AccessToken)
+			if tokenResp.AccessToken == "" {
+				return nil, fmt.Errorf("刷新令牌响应缺少有效的 access_token")
+			}
+			tokenResp.RefreshToken = strings.TrimSpace(tokenResp.RefreshToken)
+			tokenResp.IDToken = strings.TrimSpace(tokenResp.IDToken)
 			tokenResp.OAuthClientKey = DefaultOAuthClientKey
 			if tokenResp.TokenType == "" {
 				tokenResp.TokenType = "Bearer"

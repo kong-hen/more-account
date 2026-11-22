@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,22 +39,43 @@ func TestBuildAuthURLContainsRequiredScopes(t *testing.T) {
 	if !strings.Contains(q.Get("scope"), "https://www.googleapis.com/auth/aicode") {
 		t.Fatalf("scope 缺少 aicode: %s", q.Get("scope"))
 	}
+	if q.Get("prompt") != "select_account consent" {
+		t.Fatalf("期望 prompt 为 select_account consent，实际 %q", q.Get("prompt"))
+	}
 }
 
-func TestResolveCredentialsPriority(t *testing.T) {
+func TestResolveCredentialsPriorityAndPairValidation(t *testing.T) {
 	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_ID", "env-id")
 	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET", "env-sec")
 
-	// 自定义参数优先于环境变量
-	id, sec := ResolveCredentials("custom-id", "custom-sec")
-	if id != "custom-id" || sec != "custom-sec" {
-		t.Fatalf("自定义凭据优先级异常: (%q, %q)", id, sec)
+	// 自定义参数成对提供时优先于环境变量
+	id, sec, err := ResolveCredentials("custom-id", "custom-sec")
+	if err != nil || id != "custom-id" || sec != "custom-sec" {
+		t.Fatalf("自定义凭据优先级异常: (%q, %q, err=%v)", id, sec, err)
 	}
 
 	// 未传自定义参数时使用环境变量
-	id2, sec2 := ResolveCredentials("", "")
-	if id2 != "env-id" || sec2 != "env-sec" {
-		t.Fatalf("环境变量凭据解析异常: (%q, %q)", id2, sec2)
+	id2, sec2, err2 := ResolveCredentials("", "")
+	if err2 != nil || id2 != "env-id" || sec2 != "env-sec" {
+		t.Fatalf("环境变量凭据解析异常: (%q, %q, err=%v)", id2, sec2, err2)
+	}
+
+	// 单边自定义 ID 或 Secret 必须报错，严禁与环境变量另一边错配混拼
+	if _, _, err := ResolveCredentials("only-custom-id", ""); !errors.Is(err, ErrIncompleteCredentials) {
+		t.Fatalf("仅传自定义 ClientID 应返回 ErrIncompleteCredentials，实际 %v", err)
+	}
+	if _, _, err := ResolveCredentials("", "only-custom-secret"); !errors.Is(err, ErrIncompleteCredentials) {
+		t.Fatalf("仅传自定义 ClientSecret 应返回 ErrIncompleteCredentials，实际 %v", err)
+	}
+
+	// 环境变量单边配置同样必须报错
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_ID", "only-env-id")
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET", "")
+	if _, _, err := ResolveCredentials("", ""); !errors.Is(err, ErrIncompleteCredentials) {
+		t.Fatalf("环境变量单边配置应返回 ErrIncompleteCredentials，实际 %v", err)
+	}
+	if HasBuiltInCredentials() {
+		t.Fatal("环境变量仅配置单边凭据时 HasBuiltInCredentials 必须为 false")
 	}
 }
 
@@ -383,5 +405,238 @@ func TestLoginManagerSubmitCallbackURLFlexibleFormats(t *testing.T) {
 	got, err := mgr.WaitForState(ctx, session.State)
 	if err != nil || got != "query-only-code" {
 		t.Fatalf("期望收到 query-only-code，实际 code=%q err=%v", got, err)
+	}
+}
+
+func TestLoginManagerSubmitCallbackURLNormalizedVariants(t *testing.T) {
+	setupTestOAuthEnv(t)
+
+	cases := []struct {
+		name      string
+		buildRaw  func(sess LoginSession) string
+		wantCode  string
+	}{
+		{
+			name: "大写 HTTP scheme",
+			buildRaw: func(s LoginSession) string {
+				return "HTTP://127.0.0.1:54321/oauth-callback?state=" + url.QueryEscape(s.State) + "&code=upper-http"
+			},
+			wantCode: "upper-http",
+		},
+		{
+			name: "大写 HTTPS scheme",
+			buildRaw: func(s LoginSession) string {
+				return "HTTPS://localhost:54321/oauth-callback?state=" + url.QueryEscape(s.State) + "&code=upper-https"
+			},
+			wantCode: "upper-https",
+		},
+		{
+			name: "缺 scheme 的 127.0.0.1 完整地址",
+			buildRaw: func(s LoginSession) string {
+				return "127.0.0.1:54321/oauth-callback?state=" + url.QueryEscape(s.State) + "&code=no-scheme-ip"
+			},
+			wantCode: "no-scheme-ip",
+		},
+		{
+			name: "缺 scheme 的 localhost 完整地址",
+			buildRaw: func(s LoginSession) string {
+				return "localhost:54321/oauth-callback?state=" + url.QueryEscape(s.State) + "&code=no-scheme-local"
+			},
+			wantCode: "no-scheme-local",
+		},
+		{
+			name: "无前导斜杠的 oauth-callback 路径",
+			buildRaw: func(s LoginSession) string {
+				return "oauth-callback?state=" + url.QueryEscape(s.State) + "&code=rel-path"
+			},
+			wantCode: "rel-path",
+		},
+		{
+			name: "相对路径 /oauth-callback",
+			buildRaw: func(s LoginSession) string {
+				return "/oauth-callback?state=" + url.QueryEscape(s.State) + "&code=slash-path"
+			},
+			wantCode: "slash-path",
+		},
+		{
+			name: "无问号纯查询串",
+			buildRaw: func(s LoginSession) string {
+				return "state=" + url.QueryEscape(s.State) + "&code=raw-query"
+			},
+			wantCode: "raw-query",
+		},
+		{
+			name: "含折行回车换行制表符与缩进空格",
+			buildRaw: func(s LoginSession) string {
+				return "  http://127.0.0.1:54321/oauth-callback?\r\n\t  state=" + url.QueryEscape(s.State) + "&\n  code=multiline-code \r\n"
+			},
+			wantCode: "multiline-code",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewLoginManager()
+			mgr.PostCallbackGrace = 0
+			sess, err := mgr.StartSession()
+			if err != nil {
+				t.Fatalf("启动 OAuth 会话失败: %v", err)
+			}
+			defer mgr.Cancel()
+
+			if err := mgr.SubmitCallbackURL(tc.buildRaw(sess)); err != nil {
+				t.Fatalf("SubmitCallbackURL 失败: %v", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			got, err := mgr.WaitForState(ctx, sess.State)
+			if err != nil || got != tc.wantCode {
+				t.Fatalf("期望 code=%q，实际 code=%q err=%v", tc.wantCode, got, err)
+			}
+		})
+	}
+}
+
+func TestLoginManagerEnsureSessionProcessingAndSilentCancel(t *testing.T) {
+	setupTestOAuthEnv(t)
+	mgr := NewLoginManager()
+	mgr.PostCallbackGrace = 0
+	defer mgr.Cancel()
+
+	// 1. 并发 EnsureSession 只能创建一个会话，避免并发双监听
+	const goroutines = 6
+	var wg sync.WaitGroup
+	var createdCount atomic.Int32
+	states := make([]string, goroutines)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			info, created, err := mgr.EnsureSession(SessionConfig{Silent: true})
+			if err != nil {
+				t.Errorf("并发 EnsureSession 失败: %v", err)
+				return
+			}
+			if created {
+				createdCount.Add(1)
+			}
+			states[idx] = info.State
+		}(i)
+	}
+	wg.Wait()
+
+	if createdCount.Load() != 1 {
+		t.Fatalf("并发 EnsureSession 应仅创建 1 次，实际 created=%d", createdCount.Load())
+	}
+	firstState := states[0]
+	for i := 1; i < goroutines; i++ {
+		if states[i] != firstState {
+			t.Fatalf("并发 EnsureSession 应复用同一会话 state=%q，实际 %q", firstState, states[i])
+		}
+	}
+	if !mgr.IsSessionSilent(firstState) {
+		t.Fatal("自动预监听创建的会话应标记为 Silent=true")
+	}
+
+	// 2. 用户未主动发起时 CancelIfSilent 应静默取消
+	if !mgr.CancelIfSilent() {
+		t.Fatal("处于 waiting 且 Silent=true 的会话应可被 CancelIfSilent 取消")
+	}
+	if _, ok := mgr.CurrentSessionInfo(); ok {
+		t.Fatal("CancelIfSilent 后当前会话应为空")
+	}
+
+	// 3. 重新静默创建后升级为用户主动发起，CancelIfSilent 不得取消
+	info, created, err := mgr.EnsureSession(SessionConfig{Silent: true})
+	if err != nil || !created {
+		t.Fatalf("重新创建静默会话失败: created=%v err=%v", created, err)
+	}
+	reused, created2, err := mgr.EnsureSession(SessionConfig{Silent: false})
+	if err != nil || created2 || reused.State != info.State || reused.Silent {
+		t.Fatalf("非静默 EnsureSession 应复用会话并清除 Silent 标记: info=%+v created=%v err=%v", reused, created2, err)
+	}
+	if mgr.CancelIfSilent() {
+		t.Fatal("用户已主动发起的会话不应被 CancelIfSilent 取消")
+	}
+
+	// 4. 提交回调后会话进入 processing 状态且不置空 m.current，重复提交应返回 ErrOAuthProcessing
+	if err := mgr.SubmitCallbackURL(info.RedirectURI + "?code=code-proc&state=" + info.State); err != nil {
+		t.Fatalf("首次手动提交回调失败: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	gotCode, err := mgr.WaitForState(ctx, info.State)
+	if err != nil || gotCode != "code-proc" {
+		t.Fatalf("WaitForState 期望返回 code-proc，实际 code=%q err=%v", gotCode, err)
+	}
+
+	curInfo, ok := mgr.CurrentSessionInfo()
+	if !ok || curInfo.State != info.State || curInfo.Status != SessionStatusProcessing {
+		t.Fatalf("收到回调后会话应保留为 processing 状态，实际 ok=%v info=%+v", ok, curInfo)
+	}
+
+	// processing 期间二次提交应返回 ErrOAuthProcessing，不再误报“没有等待中的会话”
+	if err := mgr.SubmitCallbackURL(info.RedirectURI + "?code=code-proc&state=" + info.State); !errors.Is(err, ErrOAuthProcessing) {
+		t.Fatalf("processing 期间二次提交应返回 ErrOAuthProcessing，实际 %v", err)
+	}
+
+	// processing 期间重开弹窗调用 EnsureSession 应复用当前处理中会话，不得新建端口泄漏
+	reopenInfo, reopenCreated, err := mgr.EnsureSession(SessionConfig{Silent: true})
+	if err != nil || reopenCreated || reopenInfo.State != info.State || reopenInfo.Status != SessionStatusProcessing {
+		t.Fatalf("processing 期间 EnsureSession 应复用当前会话，实际 info=%+v created=%v err=%v", reopenInfo, reopenCreated, err)
+	}
+
+	// processing 期间 CancelSilent 不得打断正在换取令牌的会话
+	if mgr.CancelSilent() {
+		t.Fatal("processing 期间 CancelSilent 不应取消正在处理的会话")
+	}
+
+	// FinishProcessing 传入错误 state 不应误删当前会话；传入匹配 state 才清理
+	mgr.FinishProcessing("wrong-state")
+	if _, stillAlive := mgr.CurrentSessionInfo(); !stillAlive {
+		t.Fatal("FinishProcessing 传入不匹配 state 不应清理当前会话")
+	}
+	mgr.FinishProcessing(info.State)
+	if _, stillAlive := mgr.CurrentSessionInfo(); stillAlive {
+		t.Fatal("FinishProcessing 后当前会话应被清理")
+	}
+}
+
+func TestStartSessionAndEnsureSessionRequireCompleteCredentials(t *testing.T) {
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_ID", "env-id")
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET", "env-sec")
+
+	mgr := NewLoginManager()
+	mgr.CredentialsProvider = func() (string, string) {
+		return "only-id-in-settings", ""
+	}
+	if _, err := mgr.StartSession(); !errors.Is(err, ErrIncompleteCredentials) {
+		t.Fatalf("StartSession 遇单边自定义凭据应拒绝启动，实际 %v", err)
+	}
+	if _, _, err := mgr.EnsureSession(SessionConfig{}); !errors.Is(err, ErrIncompleteCredentials) {
+		t.Fatalf("EnsureSession 遇单边自定义凭据应拒绝启动，实际 %v", err)
+	}
+}
+
+func TestExchangeAndRefreshRejectEmptyAccessToken(t *testing.T) {
+	setupTestOAuthEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken:  "   ",
+			RefreshToken: "rt-1",
+			ExpiresIn:    3600,
+		})
+	}))
+	defer srv.Close()
+
+	client := &Client{
+		HTTPClient: srv.Client(),
+		TokenURL:   srv.URL,
+	}
+	if _, err := client.ExchangeCode(context.Background(), "code-1", "http://127.0.0.1:12345/oauth-callback"); err == nil {
+		t.Fatal("ExchangeCode 收到空 access_token 应返回错误")
+	}
+	if _, err := client.RefreshAccessToken(context.Background(), "rt-1"); err == nil {
+		t.Fatal("RefreshAccessToken 收到空 access_token 应返回错误")
 	}
 }

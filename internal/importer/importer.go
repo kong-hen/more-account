@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"more-account/internal/model"
@@ -14,6 +15,8 @@ import (
 	"more-account/internal/switcher"
 	"more-account/internal/totp"
 )
+
+const batchImportConcurrency = 4
 
 // ExportAccountItem 描述 JSON 导入导出用的标准轻量账号结构（不包含标签和辅助邮箱）。
 type ExportAccountItem struct {
@@ -57,10 +60,18 @@ func NewService(store *storage.Store, oauthClient *oauth.Client, quotaService *q
 	}
 }
 
-// AddByRefreshToken 通过单个 Refresh Token 换取用户信息并入库，随后尝试刷新配额。
-func (s *Service) AddByRefreshToken(ctx context.Context, refreshToken string, groupID string, meta *model.AccountDetailsUpdate) (model.Account, error) {
-	rt := strings.TrimSpace(refreshToken)
-	if rt == "" {
+// AddByTokenResponse 直接复用 OAuth 授权码交换得到的 TokenResponse 拉取用户信息、入库并刷新配额，
+// 避免丢弃全新的 AccessToken 后再次发起多余的 RefreshAccessToken 网络请求。
+func (s *Service) AddByTokenResponse(ctx context.Context, tokenResp *oauth.TokenResponse, groupID string, meta *model.AccountDetailsUpdate) (model.Account, error) {
+	if tokenResp == nil {
+		return model.Account{}, fmt.Errorf("OAuth 令牌响应不能为空")
+	}
+	accessToken := strings.TrimSpace(tokenResp.AccessToken)
+	if accessToken == "" {
+		return model.Account{}, fmt.Errorf("access_token 不能为空")
+	}
+	refreshToken := strings.TrimSpace(tokenResp.RefreshToken)
+	if refreshToken == "" {
 		return model.Account{}, fmt.Errorf("refresh_token 不能为空")
 	}
 
@@ -73,34 +84,38 @@ func (s *Service) AddByRefreshToken(ctx context.Context, refreshToken string, gr
 		normalizedSecret = norm
 	}
 
-	tokenResp, err := s.oauthClient.RefreshAccessToken(ctx, rt)
-	if err != nil {
-		return model.Account{}, fmt.Errorf("验证 Refresh Token 失败: %w", err)
-	}
-	userInfo, err := s.oauthClient.FetchUserInfo(ctx, tokenResp.AccessToken)
+	userInfo, err := s.oauthClient.FetchUserInfo(ctx, accessToken)
 	if err != nil {
 		return model.Account{}, fmt.Errorf("获取账号信息失败: %w", err)
 	}
 
-	finalRT := strings.TrimSpace(tokenResp.RefreshToken)
-	if finalRT == "" {
-		finalRT = rt
-	}
 	now := time.Now().Unix()
+	tokenType := strings.TrimSpace(tokenResp.TokenType)
+	if tokenType == "" {
+		tokenType = "Bearer"
+	}
+	clientKey := strings.TrimSpace(tokenResp.OAuthClientKey)
+	if clientKey == "" {
+		clientKey = oauth.DefaultOAuthClientKey
+	}
+	var expiryTS int64
+	if tokenResp.ExpiresIn > 0 {
+		expiryTS = now + tokenResp.ExpiresIn
+	}
 
 	candidate := model.Account{
 		Email:   userInfo.Email,
 		Name:    userInfo.DisplayName(),
 		GroupID: strings.TrimSpace(groupID),
 		Token: model.TokenData{
-			AccessToken:     tokenResp.AccessToken,
-			RefreshToken:    finalRT,
+			AccessToken:     accessToken,
+			RefreshToken:    refreshToken,
 			ExpiresIn:       tokenResp.ExpiresIn,
-			ExpiryTimestamp: now + tokenResp.ExpiresIn,
-			TokenType:       "Bearer",
+			ExpiryTimestamp: expiryTS,
+			TokenType:       tokenType,
 			Email:           userInfo.Email,
-			OAuthClientKey:  oauth.DefaultOAuthClientKey,
-			IDToken:         tokenResp.IDToken,
+			OAuthClientKey:  clientKey,
+			IDToken:         strings.TrimSpace(tokenResp.IDToken),
 		},
 	}
 	if meta != nil {
@@ -129,8 +144,37 @@ func (s *Service) AddByRefreshToken(ctx context.Context, refreshToken string, gr
 	return acc, nil
 }
 
-// ImportFromLocal 从本机已登录的反重力客户端自动提取当前账号（按当前目标客户端优先顺序探测凭据）。
+// AddByRefreshToken 通过单个 Refresh Token 换取用户信息并入库，随后尝试刷新配额。
+func (s *Service) AddByRefreshToken(ctx context.Context, refreshToken string, groupID string, meta *model.AccountDetailsUpdate) (model.Account, error) {
+	rt := strings.TrimSpace(refreshToken)
+	if rt == "" {
+		return model.Account{}, fmt.Errorf("refresh_token 不能为空")
+	}
+
+	// 在发网络请求前提前校验 2FA 密钥格式，避免无效条目白耗远程请求
+	if meta != nil && strings.TrimSpace(meta.TwoFactorSecret) != "" {
+		if _, err := totp.NormalizeSecret(meta.TwoFactorSecret); err != nil {
+			return model.Account{}, fmt.Errorf("2FA 密钥格式无效: %w", err)
+		}
+	}
+
+	tokenResp, err := s.oauthClient.RefreshAccessToken(ctx, rt)
+	if err != nil {
+		return model.Account{}, fmt.Errorf("验证 Refresh Token 失败: %w", err)
+	}
+
+	merged := *tokenResp
+	if strings.TrimSpace(merged.RefreshToken) == "" {
+		merged.RefreshToken = rt
+	}
+	return s.AddByTokenResponse(ctx, &merged, groupID, meta)
+}
+
+// ImportFromLocal 从本机已登录的反重力客户端自动提取当前账号（先刷新系统凭据缓存，再按目标客户端顺序与全量回退探测）。
 func (s *Service) ImportFromLocal(ctx context.Context, groupID string) (model.Account, error) {
+	// 主动失效系统凭据库内存缓存，防止用户刚刚登录客户端后点击导入命中旧负缓存
+	switcher.InvalidateSystemCredentialCache()
+
 	var refreshToken string
 
 	target := s.store.GetSettings().RuntimeTarget
@@ -138,7 +182,14 @@ func (s *Service) ImportFromLocal(ctx context.Context, groupID string) (model.Ac
 		refreshToken = cred.RefreshToken
 	}
 
-	// 若首选客户端未检测到有效凭据，回退扫描本机其余存在的 state.vscdb（兼容切换前曾在另一客户端登录）
+	// 若首选客户端（如 desktop/ide）未检测到有效凭据，补充回退读取 CLI 凭据文件
+	if refreshToken == "" && !strings.EqualFold(strings.TrimSpace(target), "cli") {
+		if cliCred, err := switcher.ReadCLICredential(); err == nil && cliCred != nil && strings.TrimSpace(cliCred.RefreshToken) != "" {
+			refreshToken = cliCred.RefreshToken
+		}
+	}
+
+	// 最后回退扫描本机其余存在的 state.vscdb（兼容切换前曾在另一客户端登录）
 	if refreshToken == "" {
 		for _, dbPath := range switcher.AllExistingStateDBPaths() {
 			if rt, err := switcher.ReadRefreshTokenFromStateDB(dbPath); err == nil && strings.TrimSpace(rt) != "" {
@@ -164,7 +215,7 @@ func (s *Service) ImportFromLocal(ctx context.Context, groupID string) (model.Ac
 	return acc, nil
 }
 
-// ImportRefreshTokens 批量导入多行 Refresh Token（支持每行一个 Token，或 JSON 数组/对象）。
+// ImportRefreshTokens 批量导入多行 Refresh Token（支持每行一个 Token，或 JSON 数组/对象），采用可控并发提升大批量导入速度并保持原始顺序。
 func (s *Service) ImportRefreshTokens(ctx context.Context, rawInput string, groupID string) (*BatchImportResult, error) {
 	trimmed := strings.TrimSpace(rawInput)
 	if trimmed == "" {
@@ -177,39 +228,79 @@ func (s *Service) ImportRefreshTokens(ctx context.Context, rawInput string, grou
 	}
 
 	lines := strings.Split(trimmed, "\n")
-	res := &BatchImportResult{
-		Imported: []model.Account{},
-		Failed:   []BatchImportFailed{},
-	}
-
+	tokens := make([]string, 0, len(lines))
 	for _, line := range lines {
 		token := strings.TrimSpace(line)
 		if token == "" || strings.HasPrefix(token, "#") {
 			continue
 		}
-		acc, err := s.AddByRefreshToken(ctx, token, groupID, nil)
-		if err != nil {
+		tokens = append(tokens, token)
+	}
+
+	res := &BatchImportResult{
+		Imported: []model.Account{},
+		Failed:   []BatchImportFailed{},
+	}
+	if len(tokens) == 0 {
+		return res, nil
+	}
+
+	type tokenOutcome struct {
+		acc model.Account
+		err error
+	}
+	outcomes := make([]tokenOutcome, len(tokens))
+
+	workers := batchImportConcurrency
+	if len(tokens) < workers {
+		workers = len(tokens)
+	}
+	jobs := make(chan int, len(tokens))
+	for idx := range tokens {
+		jobs <- idx
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if err := ctx.Err(); err != nil {
+					outcomes[idx] = tokenOutcome{err: err}
+					continue
+				}
+				acc, err := s.AddByRefreshToken(ctx, tokens[idx], groupID, nil)
+				outcomes[idx] = tokenOutcome{acc: acc, err: err}
+			}
+		}()
+	}
+	wg.Wait()
+
+	for idx, out := range outcomes {
+		if out.err != nil {
 			res.Failed = append(res.Failed, BatchImportFailed{
-				Source: truncateLabelRunes(token, 12),
-				Error:  err.Error(),
+				Source: truncateLabelRunes(tokens[idx], 12),
+				Error:  out.err.Error(),
 			})
 			continue
 		}
-		res.Imported = append(res.Imported, acc)
+		res.Imported = append(res.Imported, out.acc)
 	}
 	return res, nil
 }
 
-// ImportJSON 解析标准账号 JSON（兼容数组与单对象、camelCase 与 snake_case 字段），仅在账号导入成功后按需创建缺失分组。
+// ImportJSON 解析标准账号 JSON（兼容数组与单对象、camelCase 与 snake_case 字段），采用可控并发验证，并仅在账号导入成功后按需创建缺失分组。
 func (s *Service) ImportJSON(ctx context.Context, jsonContent string, defaultGroupID string) (*BatchImportResult, error) {
 	trimmed := strings.TrimSpace(jsonContent)
 	if trimmed == "" {
 		return nil, fmt.Errorf("JSON 内容不能为空")
 	}
 
-	var rawItems []map[string]any
+	var rawElements []any
 	if strings.HasPrefix(trimmed, "[") {
-		if err := json.Unmarshal([]byte(trimmed), &rawItems); err != nil {
+		if err := json.Unmarshal([]byte(trimmed), &rawElements); err != nil {
 			return nil, fmt.Errorf("解析 JSON 数组失败: %w", err)
 		}
 	} else {
@@ -217,15 +308,15 @@ func (s *Service) ImportJSON(ctx context.Context, jsonContent string, defaultGro
 		if err := json.Unmarshal([]byte(trimmed), &single); err != nil {
 			return nil, fmt.Errorf("解析 JSON 对象失败: %w", err)
 		}
-		// 兼容 { "accounts": [...] } 包装格式
-		if nested, ok := single["accounts"].([]any); ok {
-			for _, elem := range nested {
-				if m, ok := elem.(map[string]any); ok {
-					rawItems = append(rawItems, m)
-				}
+		// 兼容 { "accounts": [...] } 包装格式；若 accounts 字段存在但非数组则明确报错
+		if nestedRaw, hasAccounts := single["accounts"]; hasAccounts {
+			nested, ok := nestedRaw.([]any)
+			if !ok {
+				return nil, fmt.Errorf("解析 JSON 对象失败: accounts 字段必须为数组")
 			}
+			rawElements = nested
 		} else {
-			rawItems = []map[string]any{single}
+			rawElements = []any{single}
 		}
 	}
 
@@ -234,12 +325,29 @@ func (s *Service) ImportJSON(ctx context.Context, jsonContent string, defaultGro
 		groupByName[strings.ToLower(strings.TrimSpace(g.Name))] = g.ID
 	}
 
-	res := &BatchImportResult{
-		Imported: []model.Account{},
-		Failed:   []BatchImportFailed{},
+	type parsedJob struct {
+		source           string
+		staticErr        string
+		refreshToken     string
+		targetGroupID    string
+		pendingGroupName string
+		meta             *model.AccountDetailsUpdate
 	}
 
-	for idx, item := range rawItems {
+	jobs := make([]parsedJob, len(rawElements))
+	runnableIndices := make([]int, 0, len(rawElements))
+
+	for idx, elem := range rawElements {
+		fallbackSource := fmt.Sprintf("第 %d 项", idx+1)
+		item, ok := elem.(map[string]any)
+		if !ok || item == nil {
+			jobs[idx] = parsedJob{
+				source:    fallbackSource,
+				staticErr: "条目格式无效，必须为 JSON 对象",
+			}
+			continue
+		}
+
 		rt := pickString(item, "refresh_token", "refreshToken")
 		if rt == "" {
 			if tokObj, ok := item["token"].(map[string]any); ok {
@@ -248,13 +356,13 @@ func (s *Service) ImportJSON(ctx context.Context, jsonContent string, defaultGro
 		}
 		emailHint := pickString(item, "email")
 		if emailHint == "" {
-			emailHint = fmt.Sprintf("第 %d 项", idx+1)
+			emailHint = fallbackSource
 		}
 		if rt == "" {
-			res.Failed = append(res.Failed, BatchImportFailed{
-				Source: emailHint,
-				Error:  "缺少 refresh_token",
-			})
+			jobs[idx] = parsedJob{
+				source:    emailHint,
+				staticErr: "缺少 refresh_token",
+			}
 			continue
 		}
 
@@ -277,21 +385,81 @@ func (s *Service) ImportJSON(ctx context.Context, jsonContent string, defaultGro
 			GroupID:         targetGroupID,
 		}
 
-		acc, err := s.AddByRefreshToken(ctx, rt, targetGroupID, meta)
-		if err != nil {
+		jobs[idx] = parsedJob{
+			source:           emailHint,
+			refreshToken:     rt,
+			targetGroupID:    targetGroupID,
+			pendingGroupName: pendingGroupName,
+			meta:             meta,
+		}
+		runnableIndices = append(runnableIndices, idx)
+	}
+
+	type jsonOutcome struct {
+		acc model.Account
+		err error
+	}
+	outcomes := make([]jsonOutcome, len(rawElements))
+
+	if len(runnableIndices) > 0 {
+		workers := batchImportConcurrency
+		if len(runnableIndices) < workers {
+			workers = len(runnableIndices)
+		}
+		workCh := make(chan int, len(runnableIndices))
+		for _, idx := range runnableIndices {
+			workCh <- idx
+		}
+		close(workCh)
+
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for idx := range workCh {
+					if err := ctx.Err(); err != nil {
+						outcomes[idx] = jsonOutcome{err: err}
+						continue
+					}
+					job := jobs[idx]
+					acc, err := s.AddByRefreshToken(ctx, job.refreshToken, job.targetGroupID, job.meta)
+					outcomes[idx] = jsonOutcome{acc: acc, err: err}
+				}
+			}()
+		}
+		wg.Wait()
+	}
+
+	res := &BatchImportResult{
+		Imported: []model.Account{},
+		Failed:   []BatchImportFailed{},
+	}
+
+	// 按输入顺序统一归集结果，并在主协程中按需串行创建缺失分组，防止并发重复建组。
+	for idx, job := range jobs {
+		if job.staticErr != "" {
 			res.Failed = append(res.Failed, BatchImportFailed{
-				Source: emailHint,
-				Error:  err.Error(),
+				Source: job.source,
+				Error:  job.staticErr,
+			})
+			continue
+		}
+		out := outcomes[idx]
+		if out.err != nil {
+			res.Failed = append(res.Failed, BatchImportFailed{
+				Source: job.source,
+				Error:  out.err.Error(),
 			})
 			continue
 		}
 
-		// 仅在账号验证并入库成功后，才创建 JSON 中声明的缺失分组，避免导入失败残留空分组。
-		if pendingGroupName != "" {
-			key := strings.ToLower(pendingGroupName)
+		acc := out.acc
+		if job.pendingGroupName != "" {
+			key := strings.ToLower(job.pendingGroupName)
 			gid, exists := groupByName[key]
 			if !exists {
-				if created, gErr := s.store.SaveGroup(model.AccountGroup{Name: pendingGroupName}); gErr == nil {
+				if created, gErr := s.store.SaveGroup(model.AccountGroup{Name: job.pendingGroupName}); gErr == nil {
 					gid = created.ID
 					groupByName[key] = gid
 				}

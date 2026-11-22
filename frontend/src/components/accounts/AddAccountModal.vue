@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 三入口添加账号弹窗：1) Google OAuth 授权（支持直接跳转网页验证或仅复制授权链接，含手动回调兜底）2) 读取本机已登录账号 3) Refresh Token / JSON 批量导入，并内置需网页验证账号直达操作。
-import { computed, ref, watch } from 'vue'
+// 三入口添加账号弹窗：1) Google OAuth 授权（支持直接跳转网页验证或仅复制授权链接，含手动回调兜底与处理中状态反馈）2) 读取本机已登录账号 3) Refresh Token / JSON 批量导入，并内置需网页验证账号直达操作。
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Globe,
   HardDriveDownload,
@@ -15,10 +15,12 @@ import {
 import BaseModal from '@/components/common/BaseModal.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
 import { useAppStore } from '@/stores/appStore'
-import { api, extractErrorMessage, isWailsRuntime } from '@/services/api'
+import { api, extractErrorMessage, isWailsRuntime, onWailsEvent } from '@/services/api'
 import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
 import { getAccountValidationUrl, isAccountValidationRequired } from '@/utils/quota'
-import type { Account } from '@/types/models'
+import type { Account, OAuthLoginSession } from '@/types/models'
+
+type OAuthSessionWithStatus = OAuthLoginSession & { status?: string }
 
 const props = defineProps<{
   open: boolean
@@ -38,14 +40,22 @@ const groupOptions = computed(() => [
   ...appStore.groups.map((g) => ({ value: g.id, label: g.name })),
 ])
 
-// OAuth 状态
+// OAuth 状态（区分等待回调、提交中与后台换取令牌处理中，防止首次提交无反馈导致重复点击）
 const oauthWaiting = ref(false)
 const oauthStartingMode = ref<'init' | 'open' | 'copy' | 'reset' | null>(null)
+const oauthSubmitting = ref(false)
+const oauthProcessing = ref(false)
+const userInitiatedOAuth = ref(false)
+const oauthState = ref('')
 const oauthAuthUrl = ref('')
 const oauthRedirectUri = ref('')
 const oauthCallbackInput = ref('')
 const oauthUrlCopied = ref(false)
 const oauthError = ref('')
+const oauthBusy = computed(() => oauthSubmitting.value || oauthProcessing.value)
+
+let pendingInitPromise: Promise<OAuthSessionWithStatus | null> | null = null
+let eventCleanups: Array<() => void> = []
 
 // 本机导入状态
 const localImporting = ref(false)
@@ -59,9 +69,79 @@ const tokenImporting = ref(false)
 const tokenError = ref('')
 const tokenSummary = ref('')
 
-// 导入后检测到需要网页验证的账号列表（支持在弹窗内直接复制链接或打开网页验证）
+// 导入后检测到需要网页验证的账号列表（按 Tab 隔离，避免跨 Tab 串台）
 const pendingVerifyAccounts = ref<Account[]>([])
+const pendingVerifyTab = ref<AddTab | null>(null)
 const copiedVerifyId = ref('')
+
+function clearOAuthSessionState(clearCallbackInput = true) {
+  oauthWaiting.value = false
+  oauthStartingMode.value = null
+  oauthSubmitting.value = false
+  oauthProcessing.value = false
+  userInitiatedOAuth.value = false
+  oauthState.value = ''
+  oauthAuthUrl.value = ''
+  oauthRedirectUri.value = ''
+  if (clearCallbackInput) {
+    oauthCallbackInput.value = ''
+  }
+}
+
+function isMatchingOAuthEvent(eventState?: string): boolean {
+  if (!eventState || !oauthState.value) return true
+  return eventState === oauthState.value
+}
+
+// 绑定后端 OAuth 生命周期事件（支持按 state 精确匹配，避免旧会话事件误关或打断新会话）
+function ensureOAuthEventsBound() {
+  if (!isWailsRuntime() || eventCleanups.length > 0) return
+
+  eventCleanups.push(
+    onWailsEvent('oauth:processing', (payload: unknown) => {
+      const p = payload as { state?: string } | null
+      if (!isMatchingOAuthEvent(p?.state)) return
+      oauthSubmitting.value = false
+      oauthProcessing.value = true
+      oauthWaiting.value = true
+      userInitiatedOAuth.value = true
+      oauthError.value = ''
+    }),
+  )
+
+  eventCleanups.push(
+    onWailsEvent('oauth:completed', (payload: unknown) => {
+      const p = payload as { account?: Account; state?: string } | null
+      if (!isMatchingOAuthEvent(p?.state)) return
+      clearOAuthSessionState(true)
+      oauthError.value = ''
+      if (props.open) {
+        emit('close')
+      }
+    }),
+  )
+
+  eventCleanups.push(
+    onWailsEvent('oauth:failed', (payload: unknown) => {
+      const p = payload as { error?: string; state?: string; silent?: boolean } | null
+      if (!isMatchingOAuthEvent(p?.state)) return
+      clearOAuthSessionState(false)
+      if (!p?.silent) {
+        oauthError.value = p?.error || appStore.oauthLastError || 'OAuth 授权失败'
+      }
+    }),
+  )
+}
+
+onMounted(() => {
+  ensureOAuthEventsBound()
+})
+
+onBeforeUnmount(() => {
+  while (eventCleanups.length > 0) {
+    eventCleanups.pop()?.()
+  }
+})
 
 // 等待 OAuth 回调期间若用户切换了目标分组，实时同步至后端会话
 watch(targetGroupId, (nextGroupId) => {
@@ -70,70 +150,102 @@ watch(targetGroupId, (nextGroupId) => {
   }
 })
 
-// 接收 appStore 全局 OAuth 入库完成通知，自动收起弹窗并清理本地临时状态
-watch(
-  () => appStore.oauthCompletedSeq,
-  () => {
-    oauthWaiting.value = false
-    oauthStartingMode.value = null
-    oauthAuthUrl.value = ''
-    oauthRedirectUri.value = ''
-    oauthCallbackInput.value = ''
-    oauthError.value = ''
-    if (props.open) {
-      emit('close')
-    }
-  },
-)
+// 若用户尚未主动发起授权（未点打开网页、未复制链接、未提交回调），关闭弹窗或切走 Tab 时静默取消自动预监听，
+// 防止 10 分钟后后台预监听超时误弹错误提示。
+async function cancelUninitiatedOAuthSilently() {
+  if (!isWailsRuntime()) return
+  if (userInitiatedOAuth.value || oauthBusy.value) return
+  if (!oauthWaiting.value && !oauthStartingMode.value) return
+  clearOAuthSessionState(true)
+  oauthError.value = ''
+  await api.cancelOAuthLogin().catch(() => {})
+}
 
-// 接收 appStore 全局 OAuth 失败/超时通知，同步复位等待态并展示错误详情
-watch(
-  () => appStore.oauthFailedSeq,
-  () => {
-    oauthWaiting.value = false
-    oauthStartingMode.value = null
-    oauthAuthUrl.value = ''
-    oauthRedirectUri.value = ''
-    oauthError.value = appStore.oauthLastError || 'OAuth 授权失败'
-  },
-)
-
-// 确保本地 OAuth 回调监听已开启（优先复用后台仍在运行中的监听端口，避免重复生成使旧链接失效）
+// 确保本地 OAuth 回调监听已开启（优先复用后台仍在运行中的监听端口或处理中会话，避免重复生成使旧链接失效）
 async function ensureOAuthListening(mode: 'init' | 'open' | 'copy' = 'init') {
   if (!isWailsRuntime()) return null
+  ensureOAuthEventsBound()
+
+  if (mode === 'open' || mode === 'copy') {
+    userInitiatedOAuth.value = true
+  }
+
+  // 若自动预监听正在进行中而用户立即点击了操作按钮，等待预监听完成再按需执行打开/复制，避免吞掉用户点击
+  if (oauthStartingMode.value === 'init' && mode !== 'init' && pendingInitPromise) {
+    const existing = await pendingInitPromise
+    if (existing) {
+      if (mode === 'open' && existing.authUrl && !oauthBusy.value) {
+        try {
+          await api.openExternalURL(existing.authUrl)
+        } catch (err) {
+          oauthError.value = extractErrorMessage(err)
+        }
+      }
+      return existing
+    }
+  }
+
   if (oauthStartingMode.value) return null
   oauthError.value = ''
   oauthStartingMode.value = mode
-  try {
-    const sess =
-      mode === 'open'
-        ? await api.startOAuthLogin(targetGroupId.value)
-        : await api.prepareOAuthLogin(targetGroupId.value)
-    oauthAuthUrl.value = sess.authUrl
-    oauthRedirectUri.value = sess.redirectUri
-    oauthWaiting.value = true
-    return sess
-  } catch (err) {
-    oauthWaiting.value = false
-    oauthAuthUrl.value = ''
-    oauthRedirectUri.value = ''
-    oauthError.value = extractErrorMessage(err)
-    return null
-  } finally {
-    oauthStartingMode.value = null
+
+  const run = async (): Promise<OAuthSessionWithStatus | null> => {
+    try {
+      const sess = (
+        mode === 'open'
+          ? await api.startOAuthLogin(targetGroupId.value)
+          : await api.prepareOAuthLogin(targetGroupId.value)
+      ) as OAuthSessionWithStatus
+
+      const isProcessing = sess.status === 'processing'
+      // 若自动预监听返回时弹窗已关闭或已切到其他标签页，且用户未主动发起授权也未处于处理中，立即静默释放监听
+      if (mode === 'init' && !isProcessing && !userInitiatedOAuth.value && (!props.open || activeTab.value !== 'oauth')) {
+        await api.cancelOAuthLogin().catch(() => {})
+        return null
+      }
+
+      oauthState.value = sess.state ?? ''
+      oauthAuthUrl.value = sess.authUrl
+      oauthRedirectUri.value = sess.redirectUri
+      oauthWaiting.value = true
+      if (isProcessing) {
+        oauthProcessing.value = true
+        userInitiatedOAuth.value = true
+      }
+      return sess
+    } catch (err) {
+      clearOAuthSessionState(false)
+      oauthError.value = extractErrorMessage(err)
+      return null
+    } finally {
+      oauthStartingMode.value = null
+      if (mode === 'init') {
+        pendingInitPromise = null
+      }
+    }
   }
+
+  const promise = run()
+  if (mode === 'init') {
+    pendingInitPromise = promise
+  }
+  return promise
 }
 
 watch(
   () => props.open,
   (isOpen) => {
     if (isOpen) {
+      ensureOAuthEventsBound()
       oauthError.value = ''
       localError.value = ''
       tokenError.value = ''
       tokenSummary.value = ''
-      oauthCallbackInput.value = ''
+      if (!oauthBusy.value) {
+        oauthCallbackInput.value = ''
+      }
       pendingVerifyAccounts.value = []
+      pendingVerifyTab.value = null
       copiedVerifyId.value = ''
       // 若当前正筛选某个自定义分组，默认归入该分组
       if (
@@ -144,28 +256,39 @@ watch(
       } else {
         targetGroupId.value = ''
       }
-      // 打开弹窗并处于 OAuth 标签页时立即同步或预开启本地回调监听，确保复制/跳转前端口已就绪
+      // 打开弹窗并处于 OAuth 标签页时同步或预开启本地回调监听，确保复制/跳转前端口已就绪
       if (activeTab.value === 'oauth') {
         void ensureOAuthListening('init')
       }
+    } else {
+      // 用户未主动发起授权即关闭弹窗时静默释放自动预监听；已主动授权或正在处理中则保持后台保活
+      void cancelUninitiatedOAuthSilently()
     }
-    // 注意：关闭弹窗时不再调用 cancelOAuthLogin()，让本地回调监听在后台继续保持活跃直至完成、超时或用户主动停止
   },
 )
 
 watch(activeTab, (tab) => {
-  if (props.open && tab === 'oauth' && !oauthWaiting.value && !oauthStartingMode.value) {
-    void ensureOAuthListening('init')
+  if (!props.open) return
+  if (tab === 'oauth') {
+    if (!oauthWaiting.value && !oauthStartingMode.value) {
+      void ensureOAuthListening('init')
+    }
+  } else {
+    // 切换至本机读取或 Token 导入时，如用户未主动发起 OAuth 授权则静默关闭后台预监听
+    void cancelUninitiatedOAuthSilently()
   }
 })
 
 // 方式 A：确保本地回调监听开启并直接打开系统默认浏览器跳转网页验证
 async function startOAuthAndOpen() {
+  if (oauthBusy.value) return
   await ensureOAuthListening('open')
 }
 
 // 方式 B：确保本地回调监听开启并复制授权链接（不自动弹系统浏览器，便于粘贴到指纹浏览器或无痕窗口）
 async function prepareAndCopyOAuthUrl() {
+  if (oauthBusy.value) return
+  userInitiatedOAuth.value = true
   const sess = oauthWaiting.value && oauthAuthUrl.value
     ? { authUrl: oauthAuthUrl.value }
     : await ensureOAuthListening('copy')
@@ -183,21 +306,22 @@ async function prepareAndCopyOAuthUrl() {
 
 // 显式重置并重新生成全新的本地回调监听端口与授权链接
 async function resetOAuthSession() {
-  if (!isWailsRuntime() || oauthStartingMode.value) return
+  if (!isWailsRuntime() || oauthStartingMode.value || oauthBusy.value) return
   oauthError.value = ''
   oauthStartingMode.value = 'reset'
   try {
     await api.cancelOAuthLogin().catch(() => {})
-    const sess = await api.prepareOAuthLogin(targetGroupId.value)
+    const sess = (await api.prepareOAuthLogin(targetGroupId.value)) as OAuthSessionWithStatus
+    oauthState.value = sess.state ?? ''
     oauthAuthUrl.value = sess.authUrl
     oauthRedirectUri.value = sess.redirectUri
     oauthCallbackInput.value = ''
     oauthWaiting.value = true
+    oauthProcessing.value = false
+    userInitiatedOAuth.value = true
     appStore.notify('已重新生成授权链接并刷新本地回调端口', 'info', 2200)
   } catch (err) {
-    oauthWaiting.value = false
-    oauthAuthUrl.value = ''
-    oauthRedirectUri.value = ''
+    clearOAuthSessionState(false)
     oauthError.value = extractErrorMessage(err)
   } finally {
     oauthStartingMode.value = null
@@ -206,6 +330,8 @@ async function resetOAuthSession() {
 
 // 在等待回调期间直接打开当前会话的授权链接（复用当前监听端口，不重新生成覆盖已复制的链接）
 async function openCurrentOAuthUrl() {
+  if (oauthBusy.value) return
+  userInitiatedOAuth.value = true
   if (!oauthAuthUrl.value) {
     await startOAuthAndOpen()
     return
@@ -218,29 +344,46 @@ async function openCurrentOAuthUrl() {
 }
 
 async function cancelOAuth() {
-  oauthWaiting.value = false
-  oauthStartingMode.value = null
-  oauthAuthUrl.value = ''
-  oauthRedirectUri.value = ''
-  oauthCallbackInput.value = ''
+  if (oauthBusy.value) return
+  clearOAuthSessionState(true)
+  oauthError.value = ''
   await api.cancelOAuthLogin().catch(() => {})
 }
 
+// 手动提交回调 URL：提交瞬间立即锁定按钮与输入框并切入验证处理态，避免后端换取令牌期间界面无反馈
 async function submitManualCallback() {
-  if (!oauthCallbackInput.value.trim()) {
+  if (oauthBusy.value) return
+  const raw = oauthCallbackInput.value.trim()
+  if (!raw) {
     oauthError.value = '请粘贴浏览器地址栏中的回调链接'
     return
   }
   oauthError.value = ''
+  userInitiatedOAuth.value = true
+  oauthSubmitting.value = true
+  const submittedState = oauthState.value
   try {
-    await api.submitOAuthCallbackURL(oauthCallbackInput.value.trim())
+    await api.submitOAuthCallbackURL(raw)
+    // 若回调在请求返回前尚未结束当前会话，立即切入后台处理中状态并给出清晰视觉反馈
+    if (oauthWaiting.value && (!submittedState || oauthState.value === submittedState)) {
+      oauthProcessing.value = true
+    }
   } catch (err) {
+    oauthProcessing.value = false
     oauthError.value = extractErrorMessage(err)
+  } finally {
+    oauthSubmitting.value = false
   }
 }
 
+function handleSelectAuthUrl(event: Event) {
+  userInitiatedOAuth.value = true
+  ;(event.target as HTMLInputElement).select()
+}
+
 async function copyAuthUrl() {
-  if (!oauthAuthUrl.value) return
+  if (!oauthAuthUrl.value || oauthBusy.value) return
+  userInitiatedOAuth.value = true
   if (await copyToClipboard(oauthAuthUrl.value)) {
     oauthUrlCopied.value = true
     appStore.notify('已复制授权链接', 'success', 2000)
@@ -276,6 +419,7 @@ async function handleImportLocal() {
   localImporting.value = true
   localError.value = ''
   pendingVerifyAccounts.value = []
+  pendingVerifyTab.value = null
   try {
     const acc = await api.importFromLocal(targetGroupId.value)
     await appStore.reloadAccounts()
@@ -293,6 +437,7 @@ async function handleImportLocal() {
     const emailLabel = maskEmail(acc.email, appStore.settings.privacyMode)
     if (isAccountValidationRequired(acc)) {
       pendingVerifyAccounts.value = [acc]
+      pendingVerifyTab.value = 'local'
       appStore.notify(`已导入账号 ${emailLabel}，该账号需完成网页验证`, 'warning', 4500)
     } else {
       appStore.notify(`已从本机导入账号 ${emailLabel}`, 'success')
@@ -321,6 +466,7 @@ async function handleImportTokens() {
   tokenError.value = ''
   tokenSummary.value = ''
   pendingVerifyAccounts.value = []
+  pendingVerifyTab.value = null
   try {
     const res = await api.importRefreshTokens(tokenInput.value.trim(), targetGroupId.value)
     await appStore.reloadAccounts()
@@ -329,6 +475,7 @@ async function handleImportTokens() {
     const failCount = res.failed?.length ?? 0
     const verifyList = importedList.filter((acc) => isAccountValidationRequired(acc))
     pendingVerifyAccounts.value = verifyList
+    pendingVerifyTab.value = verifyList.length > 0 ? 'token' : null
 
     if (failCount === 0 && okCount > 0) {
       tokenInput.value = ''
@@ -362,8 +509,8 @@ async function handleImportTokens() {
     title="添加反重力账号"
     subtitle="支持网页验证授权 / 复制授权链接、读取本机账号或批量导入 Refresh Token / JSON"
     width-class="w-[548px]"
-    :prevent-close="localImporting || tokenImporting"
-    :close-on-outside="!(localImporting || tokenImporting)"
+    :prevent-close="localImporting || tokenImporting || oauthSubmitting"
+    :close-on-outside="!(localImporting || tokenImporting || oauthSubmitting)"
     @close="emit('close')"
   >
     <div class="space-y-4">
@@ -441,8 +588,8 @@ async function handleImportTokens() {
           <div v-if="!oauthWaiting" class="flex items-center flex-wrap gap-2.5">
             <button
               type="button"
-              :disabled="Boolean(oauthStartingMode)"
-              class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium text-white cursor-pointer transition-opacity hover:opacity-95 disabled:opacity-60"
+              :disabled="Boolean(oauthStartingMode) || oauthBusy"
+              class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium text-white cursor-pointer transition-opacity hover:opacity-95 disabled:opacity-60 disabled:cursor-not-allowed"
               style="background-color: var(--accent)"
               @click="startOAuthAndOpen"
             >
@@ -453,8 +600,8 @@ async function handleImportTokens() {
 
             <button
               type="button"
-              :disabled="Boolean(oauthStartingMode)"
-              class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-60"
+              :disabled="Boolean(oauthStartingMode) || oauthBusy"
+              class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
               style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
               @click="prepareAndCopyOAuthUrl"
             >
@@ -466,7 +613,19 @@ async function handleImportTokens() {
 
           <div v-else class="space-y-3">
             <div class="flex items-center justify-between flex-wrap gap-2">
-              <span class="inline-flex items-center gap-2 text-xs font-medium" style="color: var(--success-text)">
+              <span
+                v-if="oauthBusy"
+                class="inline-flex items-center gap-2 text-xs font-medium"
+                style="color: var(--accent)"
+              >
+                <Loader2 class="w-3.5 h-3.5 animate-spin shrink-0" />
+                已收到回调，正在换取令牌并同步账号信息...
+              </span>
+              <span
+                v-else
+                class="inline-flex items-center gap-2 text-xs font-medium"
+                style="color: var(--success-text)"
+              >
                 <span class="relative flex w-2 h-2 shrink-0">
                   <span
                     class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
@@ -482,7 +641,8 @@ async function handleImportTokens() {
               <div class="flex items-center flex-wrap gap-1.5">
                 <button
                   type="button"
-                  class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium text-white cursor-pointer transition-opacity hover:opacity-95"
+                  :disabled="oauthBusy"
+                  class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium text-white cursor-pointer transition-opacity hover:opacity-95 disabled:opacity-50 disabled:cursor-not-allowed"
                   style="background-color: var(--accent)"
                   @click="openCurrentOAuthUrl"
                 >
@@ -491,7 +651,8 @@ async function handleImportTokens() {
                 </button>
                 <button
                   type="button"
-                  class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+                  :disabled="oauthBusy"
+                  class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
                   style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
                   @click="copyAuthUrl"
                 >
@@ -502,8 +663,8 @@ async function handleImportTokens() {
                 <button
                   type="button"
                   title="重新生成授权链接与本地监听端口"
-                  :disabled="Boolean(oauthStartingMode)"
-                  class="inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+                  :disabled="Boolean(oauthStartingMode) || oauthBusy"
+                  class="inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
                   style="border-color: var(--border-strong); color: var(--text-secondary); background-color: var(--bg-surface)"
                   @click="resetOAuthSession"
                 >
@@ -512,7 +673,8 @@ async function handleImportTokens() {
                 </button>
                 <button
                   type="button"
-                  class="px-2.5 py-1 rounded-md border text-[11px] cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+                  :disabled="oauthBusy"
+                  class="px-2.5 py-1 rounded-md border text-[11px] cursor-pointer transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
                   style="border-color: var(--border-strong); color: var(--text-secondary); background-color: var(--bg-surface)"
                   @click="cancelOAuth"
                 >
@@ -521,7 +683,7 @@ async function handleImportTokens() {
               </div>
             </div>
 
-            <!-- 当前实时监听的回调地址提示，关闭弹窗后后台仍保持监听 -->
+            <!-- 当前实时监听的回调地址提示，关闭弹窗后后台仍保持监听或处理 -->
             <div
               v-if="oauthRedirectUri"
               class="px-2.5 py-1.5 rounded-lg border text-[11px] flex items-center justify-between gap-2"
@@ -530,7 +692,9 @@ async function handleImportTokens() {
               <span class="truncate font-mono-num" :title="oauthRedirectUri">
                 监听地址：{{ oauthRedirectUri }}
               </span>
-              <span class="shrink-0">关闭弹窗不影响后台监听</span>
+              <span class="shrink-0">
+                {{ oauthBusy ? '正在后台换取令牌与同步配额' : '关闭弹窗不影响后台监听' }}
+              </span>
             </div>
 
             <!-- 授权链接只读预览栏，方便确认或直接复制 -->
@@ -542,7 +706,8 @@ async function handleImportTokens() {
                 aria-label="当前生成的 OAuth 授权链接"
                 class="w-full px-2.5 py-1.5 text-[11px] rounded-lg border font-mono-num select-all"
                 style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-secondary)"
-                @click="($event.target as HTMLInputElement).select()"
+                @click="handleSelectAuthUrl"
+                @copy="userInitiatedOAuth = true"
               />
             </div>
 
@@ -556,17 +721,21 @@ async function handleImportTokens() {
                   id="manual-callback-url"
                   v-model="oauthCallbackInput"
                   type="text"
+                  :disabled="oauthBusy"
                   :placeholder="oauthRedirectUri ? `${oauthRedirectUri}?code=...` : 'http://127.0.0.1:xxxxx/oauth-callback?code=...'"
-                  class="flex-1 px-2.5 py-1.5 text-xs rounded-lg border font-mono-num"
+                  class="flex-1 px-2.5 py-1.5 text-xs rounded-lg border font-mono-num disabled:opacity-60 disabled:cursor-not-allowed"
                   style="border-color: var(--border-strong); background-color: var(--bg-surface); color: var(--text-primary)"
+                  @keydown.enter.prevent="submitManualCallback"
                 />
                 <button
                   type="button"
-                  class="px-3 py-1.5 text-xs font-medium rounded-lg text-white cursor-pointer shrink-0"
+                  :disabled="oauthBusy"
+                  class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-white cursor-pointer shrink-0 transition-opacity hover:opacity-95 disabled:opacity-60 disabled:cursor-not-allowed"
                   style="background-color: var(--accent)"
                   @click="submitManualCallback"
                 >
-                  提交回调
+                  <Loader2 v-if="oauthBusy" class="w-3.5 h-3.5 animate-spin" />
+                  <span>{{ oauthBusy ? '验证并导入中...' : '提交回调' }}</span>
                 </button>
               </div>
             </div>
@@ -585,7 +754,7 @@ async function handleImportTokens() {
           style="border-color: var(--border-subtle); background-color: var(--bg-app)"
         >
           <p class="text-xs leading-relaxed" style="color: var(--text-secondary)">
-            自动从本机当前正在使用的 Antigravity 客户端读取登录态（优先读取 2.0 系统凭据库与桌面回退文件，其次兼容旧版 / IDE 的
+            自动从本机当前正在使用的 Antigravity 客户端读取登录态（按当前目标客户端优先顺序读取系统凭据库、桌面回退文件与 CLI 凭据，并兼容回退读取
             <code class="font-mono-num">state.vscdb</code>），校验并同步最新配额。
           </p>
           <button
@@ -631,7 +800,7 @@ async function handleImportTokens() {
 
         <div class="flex justify-end gap-2">
           <button
-            v-if="pendingVerifyAccounts.length > 0"
+            v-if="pendingVerifyAccounts.length > 0 && pendingVerifyTab === 'token'"
             type="button"
             class="px-3.5 py-2 rounded-lg border text-xs font-medium cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
             style="border-color: var(--border-strong); color: var(--text-primary); background-color: var(--bg-surface)"
@@ -652,9 +821,9 @@ async function handleImportTokens() {
         </div>
       </div>
 
-      <!-- 导入后检测到需网页验证的账号快捷处理面板 -->
+      <!-- 导入后检测到需网页验证的账号快捷处理面板（按来源 Tab 隔离，避免跨 Tab 串台） -->
       <div
-        v-if="pendingVerifyAccounts.length > 0 && activeTab !== 'oauth'"
+        v-if="pendingVerifyAccounts.length > 0 && pendingVerifyTab === activeTab"
         class="p-3.5 rounded-xl border space-y-2.5"
         style="background-color: var(--danger-soft); border-color: rgba(239, 68, 68, 0.3)"
       >
