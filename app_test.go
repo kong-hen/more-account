@@ -159,6 +159,28 @@ func TestPrepareOAuthLoginAndDynamicGroupUpdate(t *testing.T) {
 	if got := app.getOAuthTargetGroup(); got != "grp-test-1" {
 		t.Fatalf("期望更新 OAuth 目标分组为 grp-test-1，实际 %q", got)
 	}
+
+	// 验证 GetActiveOAuthSession 返回当前活跃监听，且重复 PrepareOAuthLogin 复用同一端口与会话
+	active := app.GetActiveOAuthSession()
+	if active == nil || active.RedirectURI != sess.RedirectURI || active.State != sess.State {
+		t.Fatalf("GetActiveOAuthSession 未返回当前活跃监听会话: %+v", active)
+	}
+	reused, err := app.PrepareOAuthLogin("grp-test-2")
+	if err != nil {
+		t.Fatalf("复用 OAuth 监听失败: %v", err)
+	}
+	if reused.RedirectURI != sess.RedirectURI || reused.State != sess.State {
+		t.Fatalf("重复 PrepareOAuthLogin 应复用当前监听端口，期望 %s，实际 %s", sess.RedirectURI, reused.RedirectURI)
+	}
+	if got := app.getOAuthTargetGroup(); got != "grp-test-2" {
+		t.Fatalf("复用会话时应同步更新目标分组为 grp-test-2，实际 %q", got)
+	}
+
+	// 验证显式取消后 GetActiveOAuthSession 返回 nil
+	app.CancelOAuthLogin()
+	if after := app.GetActiveOAuthSession(); after != nil {
+		t.Fatalf("取消 OAuth 监听后应返回 nil，实际 %+v", after)
+	}
 }
 
 func TestCrossPlatformAppIconsCompliance(t *testing.T) {

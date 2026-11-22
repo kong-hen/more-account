@@ -87,6 +87,8 @@ export const useAppStore = defineStore('app', () => {
   const pendingDetailTargetId = ref<string | null | undefined>(undefined)
   const hasPendingUnsavedDetail = computed(() => pendingDetailTargetId.value !== undefined)
   const oauthCompletedSeq = ref(0)
+  const oauthFailedSeq = ref(0)
+  const oauthLastError = ref('')
 
   // 运行态状态
   const refreshingIds = ref<Record<string, boolean>>({})
@@ -279,6 +281,16 @@ export const useAppStore = defineStore('app', () => {
             notify('OAuth 授权成功', 'success')
           }
           oauthCompletedSeq.value += 1
+        }),
+      )
+      // 全局监听 OAuth 授权失败或超时事件：即使关闭了添加弹窗也能收到明确的错误通知
+      cleanups.push(
+        onWailsEvent('oauth:failed', (payload: unknown) => {
+          const p = payload as { error?: string } | null
+          const message = p?.error || 'OAuth 授权失败'
+          oauthLastError.value = message
+          oauthFailedSeq.value += 1
+          notify(`OAuth 授权失败：${message}`, 'error', 4800)
         }),
       )
 
@@ -881,6 +893,8 @@ export const useAppStore = defineStore('app', () => {
     detailDrawerDirty,
     hasPendingUnsavedDetail,
     oauthCompletedSeq,
+    oauthFailedSeq,
+    oauthLastError,
     filteredAccounts,
     refreshingIds,
     switchingId,

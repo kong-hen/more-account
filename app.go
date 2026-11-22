@@ -510,8 +510,26 @@ func (a *App) getOAuthTargetGroup() string {
 	return a.oauthTargetGroupID
 }
 
+// GetActiveOAuthSession 返回当前仍在监听回调中的 OAuth 会话；若无活跃监听则返回 nil。
+func (a *App) GetActiveOAuthSession() *oauth.LoginSession {
+	sess, ok := a.oauthManager.CurrentSession()
+	if !ok {
+		return nil
+	}
+	return &sess
+}
+
 func (a *App) beginOAuthSession(groupID string, openBrowser bool) (oauth.LoginSession, error) {
 	a.SetOAuthTargetGroup(groupID)
+
+	// 若当前已有存活中的本地回调监听，直接复用同一端口与会话，避免重复点击或复制后误杀已发出的回调监听
+	if existing, ok := a.oauthManager.CurrentSession(); ok {
+		if openBrowser {
+			_ = a.OpenExternalURL(existing.AuthURL)
+		}
+		return existing, nil
+	}
+
 	sess, err := a.oauthManager.StartSession()
 	if err != nil {
 		return oauth.LoginSession{}, err
@@ -522,7 +540,7 @@ func (a *App) beginOAuthSession(groupID string, openBrowser bool) (oauth.LoginSe
 	}
 
 	go func(sessionState, redirectURI, codeVerifier string) {
-		ctx, cancel := context.WithTimeout(a.baseCtx(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(a.baseCtx(), 10*time.Minute)
 		defer cancel()
 
 		code, waitErr := a.oauthManager.WaitForState(ctx, sessionState)

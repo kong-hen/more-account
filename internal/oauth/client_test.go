@@ -271,3 +271,117 @@ func TestLoginManagerWaitForStateDoesNotCancelNewerSession(t *testing.T) {
 		t.Fatalf("会话 2 期望收到 code-from-s2，实际 code=%q err=%v", gotCode, err)
 	}
 }
+
+func TestLoginManagerRootAndTrailingSlashCallbackNo404(t *testing.T) {
+	setupTestOAuthEnv(t)
+	mgr := NewLoginManager()
+	mgr.PostCallbackGrace = 300 * time.Millisecond
+	session, err := mgr.StartSession()
+	if err != nil {
+		t.Fatalf("启动 OAuth 会话失败: %v", err)
+	}
+	defer mgr.Cancel()
+
+	// CurrentSession 应反映活跃监听会话
+	cur, ok := mgr.CurrentSession()
+	if !ok || cur.RedirectURI != session.RedirectURI || cur.State != session.State {
+		t.Fatalf("CurrentSession 返回异常: ok=%v cur=%+v", ok, cur)
+	}
+
+	parsed, err := url.Parse(session.RedirectURI)
+	if err != nil {
+		t.Fatalf("解析 RedirectURI 失败: %v", err)
+	}
+	baseOrigin := parsed.Scheme + "://" + parsed.Host
+
+	// 1. 访问根路径应返回 200 状态提示页，而非 404
+	rootResp, err := http.Get(baseOrigin + "/")
+	if err != nil {
+		t.Fatalf("访问本地监听根路径失败: %v", err)
+	}
+	_ = rootResp.Body.Close()
+	if rootResp.StatusCode != http.StatusOK {
+		t.Fatalf("根路径应返回 200，实际 %d", rootResp.StatusCode)
+	}
+
+	// 2. OPTIONS 预检应返回 200
+	optReq, _ := http.NewRequest(http.MethodOptions, session.RedirectURI, nil)
+	optResp, err := http.DefaultClient.Do(optReq)
+	if err != nil {
+		t.Fatalf("OPTIONS 预检失败: %v", err)
+	}
+	_ = optResp.Body.Close()
+	if optResp.StatusCode != http.StatusOK {
+		t.Fatalf("OPTIONS 应返回 200，实际 %d", optResp.StatusCode)
+	}
+
+	// 3. favicon 请求应返回 204
+	favResp, err := http.Get(baseOrigin + "/favicon.ico")
+	if err != nil {
+		t.Fatalf("favicon 请求失败: %v", err)
+	}
+	_ = favResp.Body.Close()
+	if favResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("favicon 应返回 204，实际 %d", favResp.StatusCode)
+	}
+
+	// 4. 带尾斜杠的 /oauth-callback/ 也能成功接收合法回调
+	waitDone := make(chan string, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if code, wErr := mgr.WaitForState(ctx, session.State); wErr == nil {
+			waitDone <- code
+		}
+	}()
+
+	cbURL := session.RedirectURI + "/?code=trailing-ok-123&state=" + url.QueryEscape(session.State)
+	cbResp, err := http.Get(cbURL)
+	if err != nil {
+		t.Fatalf("发送带尾斜杠回调失败: %v", err)
+	}
+	_ = cbResp.Body.Close()
+	if cbResp.StatusCode != http.StatusOK {
+		t.Fatalf("带尾斜杠合法回调应返回 200，实际 %d", cbResp.StatusCode)
+	}
+
+	select {
+	case got := <-waitDone:
+		if got != "trailing-ok-123" {
+			t.Fatalf("期望收到授权码 trailing-ok-123，实际 %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("等待回调授权码超时")
+	}
+
+	// 5. 在缓冲期内浏览器再次刷新回调页仍应返回 200，不立即断开连接
+	retryResp, err := http.Get(cbURL)
+	if err != nil {
+		t.Fatalf("缓冲期内二次刷新回调页失败: %v", err)
+	}
+	_ = retryResp.Body.Close()
+	if retryResp.StatusCode != http.StatusOK {
+		t.Fatalf("缓冲期内二次刷新应返回 200，实际 %d", retryResp.StatusCode)
+	}
+}
+
+func TestLoginManagerSubmitCallbackURLFlexibleFormats(t *testing.T) {
+	setupTestOAuthEnv(t)
+	mgr := NewLoginManager()
+	session, err := mgr.StartSession()
+	if err != nil {
+		t.Fatalf("启动 OAuth 会话失败: %v", err)
+	}
+	defer mgr.Cancel()
+
+	// 支持仅粘贴查询参数部分
+	if err := mgr.SubmitCallbackURL("?code=query-only-code&state=" + url.QueryEscape(session.State)); err != nil {
+		t.Fatalf("提交纯查询参数回调失败: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	got, err := mgr.WaitForState(ctx, session.State)
+	if err != nil || got != "query-only-code" {
+		t.Fatalf("期望收到 query-only-code，实际 code=%q err=%v", got, err)
+	}
+}

@@ -48,6 +48,7 @@ interface WailsAppBridge {
 
   StartOAuthLogin(groupId: string): Promise<OAuthLoginSession>
   PrepareOAuthLogin(groupId: string): Promise<OAuthLoginSession>
+  GetActiveOAuthSession(): Promise<OAuthLoginSession | null>
   SetOAuthTargetGroup(groupId: string): Promise<void>
   SubmitOAuthCallbackURL(rawURL: string): Promise<void>
   CancelOAuthLogin(): Promise<void>
@@ -151,6 +152,7 @@ export const api = {
 
   startOAuthLogin: (groupId: string) => getBridge().StartOAuthLogin(groupId),
   prepareOAuthLogin: (groupId: string) => getBridge().PrepareOAuthLogin(groupId),
+  getActiveOAuthSession: () => getBridge().GetActiveOAuthSession(),
   setOAuthTargetGroup: (groupId: string) => getBridge().SetOAuthTargetGroup(groupId),
   submitOAuthCallbackURL: (rawURL: string) => getBridge().SubmitOAuthCallbackURL(rawURL),
   cancelOAuthLogin: () => getBridge().CancelOAuthLogin(),
