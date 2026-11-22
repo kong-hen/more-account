@@ -17,35 +17,54 @@ export const useWakeupStore = defineStore('wakeup', () => {
   })
   const history = ref<WakeupHistoryItem[]>([])
   const loading = ref(false)
+  const savingState = ref(false)
   const runningTaskId = ref<string | null>(null)
   const testingScopeId = ref<string | null>(null)
   const testingAccountId = ref<string | null>(null)
 
+  // 请求序号守卫：防止较早发起的慢拉取响应覆盖较新的配置与历史快照
+  let loadSeq = 0
+
   async function loadAll() {
     if (!isWailsRuntime()) return
+    const seq = ++loadSeq
     loading.value = true
     try {
       const [s, h] = await Promise.all([api.getWakeupState(), api.listWakeupHistory()])
+      if (seq !== loadSeq) return
       state.value = s ?? { enabled: false, tasks: [] }
       history.value = h ?? []
     } finally {
-      loading.value = false
+      if (seq === loadSeq) {
+        loading.value = false
+      }
     }
   }
 
   async function saveState(next: WakeupState) {
     const appStore = useAppStore()
+    if (savingState.value) {
+      throw new Error('正在保存配置，请稍候')
+    }
+    savingState.value = true
     try {
       await api.saveWakeupState(next)
-      state.value = await api.getWakeupState()
+      const seq = ++loadSeq
+      const latest = await api.getWakeupState()
+      if (seq === loadSeq) {
+        state.value = latest ?? { enabled: false, tasks: [] }
+      }
       appStore.notify('定时唤醒配置已保存', 'success')
     } catch (err) {
       appStore.notify(`保存唤醒配置失败：${extractErrorMessage(err)}`, 'error')
       throw err
+    } finally {
+      savingState.value = false
     }
   }
 
   async function toggleGlobalEnabled() {
+    if (savingState.value) return
     await saveState({
       ...state.value,
       enabled: !state.value.enabled,
@@ -69,6 +88,7 @@ export const useWakeupStore = defineStore('wakeup', () => {
   }
 
   async function toggleTaskEnabled(taskId: string) {
+    if (savingState.value) return
     const tasks = state.value.tasks.map((t) =>
       t.id === taskId ? { ...t, enabled: !t.enabled } : t,
     )
@@ -80,16 +100,21 @@ export const useWakeupStore = defineStore('wakeup', () => {
     if (runningTaskId.value) return
     runningTaskId.value = taskId
     try {
-      const items = await api.runWakeupTaskNow(taskId)
+      const items = (await api.runWakeupTaskNow(taskId)) ?? []
       await loadAll()
-      const okCount = (items ?? []).filter((i) => i.success).length
-      const failCount = (items ?? []).length - okCount
+      if (items.length === 0) {
+        appStore.notify('当前任务无可用账号可唤醒（账号可能已被删除或不可用）', 'warning')
+        return
+      }
+      const okCount = items.filter((i) => i.success).length
+      const failCount = items.length - okCount
       if (failCount > 0) {
         appStore.notify(`唤醒执行完毕：成功 ${okCount}，失败 ${failCount}`, 'warning')
       } else {
         appStore.notify(`唤醒任务执行成功（共 ${okCount} 次请求）`, 'success')
       }
     } catch (err) {
+      await loadAll().catch(() => {})
       appStore.notify(`唤醒任务执行失败：${extractErrorMessage(err)}`, 'error')
     } finally {
       runningTaskId.value = null
@@ -107,14 +132,13 @@ export const useWakeupStore = defineStore('wakeup', () => {
     try {
       const result = await api.runWakeupTest({ ...req, scopeId })
       await loadAll()
-      if (result.success) {
+      if (result) {
         appStore.notify(`唤醒测试成功（${result.durationMs}ms，回复：${result.reply || 'OK'}）`, 'success')
-      } else {
-        appStore.notify(`唤醒测试失败：${result.errorMessage || '未知错误'}`, 'warning', 4500)
       }
       return result
     } catch (err) {
-      // 用户主动取消后 testingScopeId 已被置空，不再弹出冗余错误提示
+      // 失败记录已由后端写入执行历史，主动刷新以确保界面实时同步；用户主动取消时不再弹红错
+      await loadAll().catch(() => {})
       if (testingScopeId.value === scopeId) {
         appStore.notify(`唤醒测试失败：${extractErrorMessage(err)}`, 'error', 4500)
       }
@@ -157,6 +181,7 @@ export const useWakeupStore = defineStore('wakeup', () => {
     state,
     history,
     loading,
+    savingState,
     runningTaskId,
     testingScopeId,
     testingAccountId,

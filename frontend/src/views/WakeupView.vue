@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 定时唤醒主视图：全局调度开关、任务列表卡片（新建/编辑/启停/立即执行/删除）与唤醒历史记录双分段。
+// 定时唤醒主视图：全局调度开关、暂停警示横幅、任务列表卡片（新建/编辑/受控启停/立即执行/删除）与唤醒历史记录双分段。
 import { computed, onMounted, ref } from 'vue'
 import {
   Plus,
@@ -17,6 +17,7 @@ import {
   Loader2,
   History,
   ListChecks,
+  AlertTriangle,
 } from 'lucide-vue-next'
 import WakeupTaskModal from '@/components/wakeup/WakeupTaskModal.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -24,8 +25,8 @@ import { useAppStore } from '@/stores/appStore'
 import { useWakeupStore } from '@/stores/wakeupStore'
 import { api, extractErrorMessage } from '@/services/api'
 import { copyToClipboard, maskEmail } from '@/utils/privacy'
-import { formatDateTime } from '@/utils/quota'
-import type { WakeupHistoryItem, WakeupTask } from '@/types/models'
+import { formatDateTime, mergeModelList } from '@/utils/quota'
+import type { ModelQuota, WakeupHistoryItem, WakeupTask } from '@/types/models'
 
 const appStore = useAppStore()
 const wakeupStore = useWakeupStore()
@@ -38,10 +39,67 @@ const deleting = ref(false)
 const clearHistoryConfirm = ref(false)
 const clearingHistory = ref(false)
 const copiedHistoryId = ref('')
+
 const validAccountIdSet = computed(() => new Set(appStore.accounts.map((a) => a.id)))
+
+// 全局调度器处于暂停态且存在已启用任务时，提示用户一键开启总开关，避免误以为定时任务已生效
+const hasEnabledTasksWhileGlobalPaused = computed(
+  () => !wakeupStore.state.enabled && wakeupStore.state.tasks.some((t) => t.enabled),
+)
+
+// 汇总账号池中全部模型的友好显示名称（覆盖合并模型与 MODEL_PLACEHOLDER_* 占位 ID）
+const modelDisplayNameMap = computed(() => {
+  const rawModels: ModelQuota[] = []
+  const direct = new Map<string, string>()
+  for (const acc of appStore.accounts) {
+    for (const m of acc.quota?.models ?? []) {
+      if (!m.name) continue
+      rawModels.push(m)
+      if (m.displayName && !direct.has(m.name)) {
+        direct.set(m.name, m.displayName)
+      }
+    }
+  }
+  const merged = mergeModelList(rawModels)
+  const map = new Map<string, string>(direct)
+  for (const group of merged) {
+    if (group.canonicalModelId && group.displayName) {
+      map.set(group.canonicalModelId, group.displayName)
+    }
+    for (const v of group.variants) {
+      if (v.name && !map.has(v.name)) {
+        map.set(v.name, v.displayName || group.displayName)
+      }
+    }
+  }
+  return map
+})
+
+function resolveModelLabel(modelId: string): string {
+  return modelDisplayNameMap.value.get(modelId) || modelId
+}
 
 function validTaskAccountCount(task: WakeupTask): number {
   return (task.schedule.selectedAccounts ?? []).filter((id) => validAccountIdSet.value.has(id)).length
+}
+
+function taskStatusBadge(task: WakeupTask): { text: string; style: Record<string, string> } {
+  if (!task.enabled) {
+    return {
+      text: '已停用',
+      style: { backgroundColor: 'var(--bg-subtle)', color: 'var(--text-muted)' },
+    }
+  }
+  if (!wakeupStore.state.enabled) {
+    return {
+      text: '待总开关启用',
+      style: { backgroundColor: 'var(--warning-soft)', color: 'var(--warning-text)' },
+    }
+  }
+  return {
+    text: '启用中',
+    style: { backgroundColor: 'var(--success-soft)', color: 'var(--success-text)' },
+  }
 }
 
 onMounted(() => {
@@ -58,6 +116,11 @@ function openEditTask(task: WakeupTask) {
   taskModalOpen.value = true
 }
 
+function sortWeekdaysMonToSun(days: number[]): number[] {
+  const unique = Array.from(new Set(days.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)))
+  return unique.sort((a, b) => (a === 0 ? 7 : a) - (b === 0 ? 7 : b))
+}
+
 function describeSchedule(task: WakeupTask): string {
   const s = task.schedule
   switch (s.repeatMode) {
@@ -65,11 +128,20 @@ function describeSchedule(task: WakeupTask): string {
       return `每日 ${(s.dailyTimes ?? []).join(' / ') || '未设定时间'}`
     case 'weekly': {
       const names = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-      const days = (s.weeklyDays ?? []).map((d) => names[d] ?? '').filter(Boolean).join('、')
+      const days = sortWeekdaysMonToSun(s.weeklyDays ?? [])
+        .map((d) => names[d] ?? '')
+        .filter(Boolean)
+        .join('、')
       return `${days || '每周'} ${(s.weeklyTimes ?? []).join(' / ')}`
     }
-    case 'interval':
-      return `每 ${s.intervalHours || 4} 小时（${s.intervalStartTime || '00:00'}–${s.intervalEndTime || '23:59'}）`
+    case 'interval': {
+      const start = (s.intervalStartTime ?? '').trim()
+      const end = (s.intervalEndTime ?? '').trim()
+      if (!start && !end) {
+        return `每 ${s.intervalHours || 4} 小时（全天）`
+      }
+      return `每 ${s.intervalHours || 4} 小时（${start || '00:00'}–${end || '23:59'}）`
+    }
     case 'crontab':
       return `Cron: ${s.crontab || '未配置'}`
     case 'quota_reset':
@@ -194,7 +266,8 @@ async function copyHistoryUrl(itemId: string, url: string) {
         <!-- 调度器总开关 -->
         <button
           type="button"
-          class="h-8 inline-flex items-center gap-1.5 px-3 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+          :disabled="wakeupStore.savingState"
+          class="h-8 inline-flex items-center gap-1.5 px-3 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors disabled:opacity-60"
           :style="
             wakeupStore.state.enabled
               ? { borderColor: 'var(--success)', backgroundColor: 'var(--success-soft)', color: 'var(--success-text)' }
@@ -202,7 +275,8 @@ async function copyHistoryUrl(itemId: string, url: string) {
           "
           @click="wakeupStore.toggleGlobalEnabled"
         >
-          <Power class="w-3.5 h-3.5" />
+          <Loader2 v-if="wakeupStore.savingState" class="w-3.5 h-3.5 animate-spin" />
+          <Power v-else class="w-3.5 h-3.5" />
           <span>{{ wakeupStore.state.enabled ? '调度器已启用' : '调度器已暂停' }}</span>
         </button>
 
@@ -234,6 +308,28 @@ async function copyHistoryUrl(itemId: string, url: string) {
     <div class="flex-1 min-h-0 overflow-y-auto custom-scroll p-6">
       <!-- 任务列表 Tab -->
       <template v-if="activeTab === 'tasks'">
+        <!-- 全局调度器暂停警示横幅 -->
+        <div
+          v-if="hasEnabledTasksWhileGlobalPaused"
+          class="mb-4 px-4 py-3 rounded-xl border flex items-center justify-between gap-3 flex-wrap"
+          style="background-color: var(--warning-soft); border-color: var(--warning); color: var(--warning-text)"
+        >
+          <div class="flex items-center gap-2 text-xs font-medium min-w-0">
+            <AlertTriangle class="w-4 h-4 shrink-0" style="color: var(--warning)" />
+            <span>全局调度器当前已暂停，以下已启用任务不会按计划自动执行，请先开启调度器总开关。</span>
+          </div>
+          <button
+            type="button"
+            :disabled="wakeupStore.savingState"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white whitespace-nowrap shrink-0 cursor-pointer hover:opacity-90 disabled:opacity-60"
+            style="background-color: var(--warning)"
+            @click="wakeupStore.toggleGlobalEnabled"
+          >
+            <Power class="w-3.5 h-3.5" />
+            <span>一键启用调度器</span>
+          </button>
+        </div>
+
         <div
           v-if="wakeupStore.state.tasks.length === 0"
           class="h-full min-h-[320px] flex flex-col items-center justify-center text-center"
@@ -275,13 +371,9 @@ async function copyHistoryUrl(itemId: string, url: string) {
                     </h3>
                     <span
                       class="px-2 py-0.5 rounded-full text-[10.5px] font-medium shrink-0"
-                      :style="
-                        task.enabled
-                          ? { backgroundColor: 'var(--success-soft)', color: 'var(--success-text)' }
-                          : { backgroundColor: 'var(--bg-subtle)', color: 'var(--text-muted)' }
-                      "
+                      :style="taskStatusBadge(task).style"
                     >
-                      {{ task.enabled ? '启用中' : '已停用' }}
+                      {{ taskStatusBadge(task).text }}
                     </span>
                   </div>
                   <p class="mt-1 text-xs" style="color: var(--text-secondary)">
@@ -289,15 +381,24 @@ async function copyHistoryUrl(itemId: string, url: string) {
                   </p>
                 </div>
 
-                <label class="inline-flex items-center cursor-pointer shrink-0">
-                  <input
-                    type="checkbox"
-                    :checked="task.enabled"
-                    class="rounded accent-[var(--accent)] w-4 h-4"
-                    :aria-label="`切换任务 ${task.name} 启停`"
-                    @change="wakeupStore.toggleTaskEnabled(task.id)"
+                <!-- 受控启停开关：状态完全由 store 驱动，落盘失败时不会发生 DOM 视觉错位 -->
+                <button
+                  type="button"
+                  role="switch"
+                  :aria-checked="task.enabled"
+                  :aria-label="`切换任务 ${task.name} 启停`"
+                  :disabled="wakeupStore.savingState"
+                  class="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50"
+                  :style="{
+                    backgroundColor: task.enabled ? 'var(--accent)' : 'var(--border-strong)',
+                  }"
+                  @click="wakeupStore.toggleTaskEnabled(task.id)"
+                >
+                  <span
+                    class="inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform shadow-sm"
+                    :class="task.enabled ? 'translate-x-[18px]' : 'translate-x-[3px]'"
                   />
-                </label>
+                </button>
               </div>
 
               <div class="flex flex-wrap gap-1.5 text-[11px]">
@@ -310,10 +411,11 @@ async function copyHistoryUrl(itemId: string, url: string) {
                 <span
                   v-for="m in task.schedule.selectedModels"
                   :key="m"
-                  class="px-2 py-0.5 rounded-md font-mono-num"
+                  :title="m"
+                  class="px-2 py-0.5 rounded-md font-medium"
                   style="background-color: var(--accent-soft); color: var(--accent)"
                 >
-                  {{ m }}
+                  {{ resolveModelLabel(m) }}
                 </span>
               </div>
             </div>
@@ -323,7 +425,7 @@ async function copyHistoryUrl(itemId: string, url: string) {
               style="border-color: var(--border-subtle)"
             >
               <span class="text-[11px] font-mono-num truncate min-w-0" style="color: var(--text-muted)">
-                {{ task.lastRunAt ? `上次运行：${formatDateTime(task.lastRunAt)}` : '尚未执行过' }}
+                {{ task.lastRunAt ? `上次定时运行：${formatDateTime(task.lastRunAt)}` : '尚未定时执行过' }}
               </span>
 
               <div class="flex items-center gap-1.5 shrink-0">
@@ -398,16 +500,24 @@ async function copyHistoryUrl(itemId: string, url: string) {
                       {{ formatHistorySource(item) }}
                     </span>
                   </td>
-                  <td class="py-3 px-3 font-medium max-w-[200px] truncate whitespace-nowrap" style="color: var(--text-primary)">
+                  <td
+                    class="py-3 px-3 font-medium max-w-[200px] truncate whitespace-nowrap"
+                    style="color: var(--text-primary)"
+                    :title="maskEmail(item.accountEmail, appStore.settings.privacyMode)"
+                  >
                     {{ maskEmail(item.accountEmail, appStore.settings.privacyMode) }}
                   </td>
-                  <td class="py-3 px-3 font-mono-num text-[11.5px] whitespace-nowrap" style="color: var(--text-secondary)">
-                    {{ item.model }}
+                  <td
+                    class="py-3 px-3 font-mono-num text-[11.5px] whitespace-nowrap"
+                    style="color: var(--text-secondary)"
+                    :title="item.model"
+                  >
+                    {{ resolveModelLabel(item.model) }}
                   </td>
                   <td class="py-3 px-3 max-w-[280px]">
                     <div v-if="item.success" class="flex items-center gap-1.5" style="color: var(--success-text)">
                       <CheckCircle2 class="w-3.5 h-3.5 shrink-0" />
-                      <span class="truncate">{{ item.reply || '唤醒成功' }}</span>
+                      <span class="truncate" :title="item.reply || '唤醒成功'">{{ item.reply || '唤醒成功' }}</span>
                       <span
                         v-if="item.totalTokens"
                         :title="`输入 ${item.promptTokens ?? 0} / 输出 ${item.completionTokens ?? 0}`"
@@ -420,7 +530,9 @@ async function copyHistoryUrl(itemId: string, url: string) {
                     <div v-else class="space-y-1">
                       <div class="flex items-center gap-1.5" style="color: var(--danger-text)">
                         <XCircle class="w-3.5 h-3.5 shrink-0" />
-                        <span class="truncate">{{ item.errorMessage || '执行失败' }}</span>
+                        <span class="truncate" :title="item.errorMessage || '执行失败'">
+                          {{ item.errorMessage || '执行失败' }}
+                        </span>
                       </div>
                       <div v-if="item.validationUrl" class="flex items-center gap-2.5 pt-0.5">
                         <button
