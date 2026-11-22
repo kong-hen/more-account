@@ -349,3 +349,59 @@ func TestWriteBytesAtomicTightensPermissionsAndExpandHome(t *testing.T) {
 		t.Fatalf("ExpandHomePath 未展开波浪号路径: %q", expanded)
 	}
 }
+
+func TestStoreSettingsCloseBehaviorAndStatusBarMigration(t *testing.T) {
+	dir := t.TempDir()
+	// 模拟历史版本仅含旧字段的 settings.json（缺少 closeBehavior 和 macStatusBarMode）
+	legacyJSON := `{"theme":"dark","runtimeTarget":"ide","lowQuotaThreshold":15,"autoRefreshMinutes":5,"inactiveAutoRefreshMinutes":60}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(legacyJSON), 0600); err != nil {
+		t.Fatalf("写入旧配置失败: %v", err)
+	}
+
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("加载旧配置失败: %v", err)
+	}
+	got := store.GetSettings()
+	if got.CloseBehavior != model.CloseBehaviorBackground {
+		t.Fatalf("旧配置升级后期望默认 closeBehavior=%q，实际 %q", model.CloseBehaviorBackground, got.CloseBehavior)
+	}
+	if got.MacStatusBarMode != model.MacStatusBarIconQuota {
+		t.Fatalf("旧配置升级后期望默认 macStatusBarMode=%q，实际 %q", model.MacStatusBarIconQuota, got.MacStatusBarMode)
+	}
+
+	// 验证合法值保存与持久化
+	got.CloseBehavior = model.CloseBehaviorQuit
+	got.MacStatusBarMode = model.MacStatusBarIconOnly
+	saved, err := store.SaveSettings(got)
+	if err != nil {
+		t.Fatalf("保存合法设置失败: %v", err)
+	}
+	if saved.CloseBehavior != model.CloseBehaviorQuit || saved.MacStatusBarMode != model.MacStatusBarIconOnly {
+		t.Fatalf("保存后设置不符合预期: %+v", saved)
+	}
+
+	// 验证关闭状态栏模式
+	saved.MacStatusBarMode = model.MacStatusBarOff
+	savedOff, err := store.SaveSettings(saved)
+	if err != nil {
+		t.Fatalf("保存 off 模式失败: %v", err)
+	}
+	if savedOff.MacStatusBarMode != model.MacStatusBarOff {
+		t.Fatalf("期望 macStatusBarMode=%q，实际 %q", model.MacStatusBarOff, savedOff.MacStatusBarMode)
+	}
+
+	// 验证非法枚举自动归一化回默认值
+	savedOff.CloseBehavior = "invalid"
+	savedOff.MacStatusBarMode = "unknown"
+	normalized, err := store.SaveSettings(savedOff)
+	if err != nil {
+		t.Fatalf("保存非法枚举测试失败: %v", err)
+	}
+	if normalized.CloseBehavior != model.CloseBehaviorBackground {
+		t.Fatalf("非法 closeBehavior 应回退为 %q，实际 %q", model.CloseBehaviorBackground, normalized.CloseBehavior)
+	}
+	if normalized.MacStatusBarMode != model.MacStatusBarIconQuota {
+		t.Fatalf("非法 macStatusBarMode 应回退为 %q，实际 %q", model.MacStatusBarIconQuota, normalized.MacStatusBarMode)
+	}
+}

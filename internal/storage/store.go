@@ -200,6 +200,22 @@ func normalizeSettings(in model.AppSettings) model.AppSettings {
 	} else if in.InactiveAutoRefreshMinutes > 1440 {
 		in.InactiveAutoRefreshMinutes = 1440
 	}
+	// CloseBehavior: 缺省或非法值均默认归为后台运行，保障旧配置平滑升级。
+	switch strings.TrimSpace(in.CloseBehavior) {
+	case model.CloseBehaviorQuit:
+		in.CloseBehavior = model.CloseBehaviorQuit
+	default:
+		in.CloseBehavior = model.CloseBehaviorBackground
+	}
+	// MacStatusBarMode: 缺省或非法值默认归为图标+额度百分比。
+	switch strings.TrimSpace(in.MacStatusBarMode) {
+	case model.MacStatusBarIconOnly:
+		in.MacStatusBarMode = model.MacStatusBarIconOnly
+	case model.MacStatusBarOff:
+		in.MacStatusBarMode = model.MacStatusBarOff
+	default:
+		in.MacStatusBarMode = model.MacStatusBarIconQuota
+	}
 	in.DesktopAppPath = strings.TrimSpace(in.DesktopAppPath)
 	in.IdeAppPath = strings.TrimSpace(in.IdeAppPath)
 	in.TokenUsageDataDir = strings.TrimSpace(in.TokenUsageDataDir)
