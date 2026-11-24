@@ -518,6 +518,7 @@ type fakeStatusBarController struct {
 	started       bool
 	closeToBg     bool
 	preventAppNap []bool
+	showMainCalls int
 	snapshots     []statusbar.Snapshot
 	wakeCB        func()
 }
@@ -547,6 +548,12 @@ func (f *fakeStatusBarController) SetPreventAppNap(enabled bool) {
 	f.preventAppNap = append(f.preventAppNap, enabled)
 }
 
+func (f *fakeStatusBarController) ShowMainWindow() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.showMainCalls++
+}
+
 func (f *fakeStatusBarController) Update(snap statusbar.Snapshot) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -572,6 +579,12 @@ func (f *fakeStatusBarController) snapshotCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.snapshots)
+}
+
+func (f *fakeStatusBarController) showMainCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.showMainCalls
 }
 
 func TestTokenUsageCSVFullExportWithoutPaginationAndCacheWriteColumn(t *testing.T) {
@@ -1052,12 +1065,16 @@ func TestWakeupValidationAppNapSystemWakeAndStatusBarBusySync(t *testing.T) {
 		t.Fatalf("暂停唤醒总开关后应释放防 App Nap，实际 ok=%v active=%v", ok, active)
 	}
 
-	// 3. 验证系统休眠唤醒回调与 ShowMainWindow 均会安全触发检查并刷新状态栏
+	// 3. 验证系统休眠唤醒回调与 ShowMainWindow 均会安全触发检查并刷新状态栏，且调用原生层主窗口前置恢复
 	beforeSnaps := fakeSB.snapshotCount()
+	beforeShowCalls := fakeSB.showMainCallCount()
 	app.handleSystemWake()
 	app.ShowMainWindow()
 	if fakeSB.snapshotCount() < beforeSnaps+2 {
 		t.Fatalf("期望休眠唤醒与显示主窗口同步刷新状态栏，前后计数: %d -> %d", beforeSnaps, fakeSB.snapshotCount())
+	}
+	if fakeSB.showMainCallCount() != beforeShowCalls+1 {
+		t.Fatalf("期望 ShowMainWindow 调用原生状态栏前置接口 1 次，实际新增 %d 次", fakeSB.showMainCallCount()-beforeShowCalls)
 	}
 
 	// 4. 验证主窗口刷新与切号操作同步状态栏忙碌态

@@ -10,6 +10,7 @@
 void MAStatusBarStart(const void *iconBytes, int iconLen, bool closeToBackground);
 void MAStatusBarSetCloseToBackground(bool enabled);
 void MAStatusBarSetPreventAppNap(bool enabled);
+void MAStatusBarShowMainWindow(void);
 void MAStatusBarUpdateJSON(const char *snapshotJSON);
 void MAStatusBarStop(void);
 

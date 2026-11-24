@@ -247,9 +247,13 @@ func (a *App) handleSystemWake() {
 func (a *App) ShowMainWindow() {
 	a.setStatusBarError("")
 	if ctx := a.getCtx(); ctx != nil {
+		// macOS 下须先解除应用隐藏态（如 Cmd+H），再取消最小化并前置窗口，避免隐藏态下 orderFront 失效
+		wailsRuntime.Show(ctx)
 		wailsRuntime.WindowUnminimise(ctx)
 		wailsRuntime.WindowShow(ctx)
-		wailsRuntime.Show(ctx)
+	}
+	if a.statusBar != nil {
+		a.statusBar.ShowMainWindow()
 	}
 	a.TriggerActiveDetect()
 	a.TriggerAutoRefreshIfDue()

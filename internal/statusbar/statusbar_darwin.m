@@ -3,6 +3,7 @@
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #import "statusbar_darwin.h"
 
@@ -18,19 +19,120 @@ static inline void MARunOnMainThread(dispatch_block_t block) {
 // ─── 窗口关闭拦截与 Dock 重开钩子 ───────────────────────────────
 
 static atomic_bool gCloseToBackground = true;
+static atomic_bool gShuttingDown = false;
 static BOOL gWindowHookInstalled = NO;
 static BOOL gAppHookInstalled = NO;
 static IMP gOrigWindowShouldClose = NULL;
 static IMP gOrigAppShouldHandleReopen = NULL;
+static __weak NSWindow *gMainWindow = nil;
+static id gLaunchObserver = nil;
+
+static void MATryInstallWindowHooks(int attemptsLeft);
+
+static BOOL MAIsAuxiliaryWindow(NSWindow *win) {
+    if (win == nil) {
+        return YES;
+    }
+    NSString *clsName = NSStringFromClass([win class]);
+    if ([clsName isEqualToString:@"NSStatusBarWindow"] ||
+        [clsName hasPrefix:@"TUINS"] ||
+        [clsName isEqualToString:@"NSCarbonMenuWindow"] ||
+        [clsName isEqualToString:@"NSPopupMenuWindow"]) {
+        return YES;
+    }
+    if ([win isKindOfClass:[NSPanel class]]) {
+        return YES;
+    }
+    return NO;
+}
+
+static NSWindow *MAFindMainWindow(NSApplication *app) {
+    NSWindow *cached = gMainWindow;
+    if (cached != nil) {
+        return cached;
+    }
+    if (app == nil) {
+        return nil;
+    }
+    // 1. 优先直接匹配 Wails 主窗口类 WailsWindow
+    Class wailsWinCls = NSClassFromString(@"WailsWindow");
+    NSArray<NSWindow *> *windows = [app windows];
+    for (NSWindow *win in windows) {
+        if (wailsWinCls != Nil && [win isKindOfClass:wailsWinCls]) {
+            gMainWindow = win;
+            return win;
+        }
+    }
+    // 2. 次优从 Wails AppDelegate.mainWindow 属性获取主窗口引用
+    id appDel = [app delegate];
+    SEL mainWinSel = NSSelectorFromString(@"mainWindow");
+    if (appDel != nil && [appDel respondsToSelector:mainWinSel]) {
+        typedef id (*MainWinGetter)(id, SEL);
+        id candidate = ((MainWinGetter)[appDel methodForSelector:mainWinSel])(appDel, mainWinSel);
+        if ([candidate isKindOfClass:[NSWindow class]] && !MAIsAuxiliaryWindow((NSWindow *)candidate)) {
+            gMainWindow = (NSWindow *)candidate;
+            return (NSWindow *)candidate;
+        }
+    }
+    // 3. 兜底匹配普通层级且具备关闭能力的非辅助窗口（兼容单元测试场景）
+    for (NSWindow *win in windows) {
+        if (MAIsAuxiliaryWindow(win)) {
+            continue;
+        }
+        if ([win level] == NSNormalWindowLevel &&
+            (([win styleMask] & NSWindowStyleMaskClosable) != 0 ||
+             [[win delegate] respondsToSelector:@selector(windowShouldClose:)])) {
+            gMainWindow = win;
+            return win;
+        }
+    }
+    return nil;
+}
+
+static void MAShowMainWindowOnMainThread(void) {
+    NSApplication *app = [NSApplication sharedApplication];
+    if (app == nil) {
+        return;
+    }
+    // 兜底确保窗口关闭拦截与 Dock 重开钩子均已安装
+    if (!gWindowHookInstalled || !gAppHookInstalled) {
+        MATryInstallWindowHooks(0);
+    }
+    // 若应用此前通过 Cmd+H 整体隐藏，须先解除隐藏态再操作窗口可见性与前置顺序
+    if ([app isHidden]) {
+        [app unhide:nil];
+    }
+    NSWindow *win = MAFindMainWindow(app);
+    if (win != nil) {
+        if ([win isMiniaturized]) {
+            [win deminiaturize:nil];
+        }
+        [win makeKeyAndOrderFront:nil];
+    }
+    // 必须使用 activateIgnoringOtherApps:YES 才能在后台跨越其他前台应用恢复焦点；
+    // macOS 14+ 上仅调用 [NSApp activate] 在无合作激活令牌时会被系统静默忽略。
+    [app activateIgnoringOtherApps:YES];
+    if (win != nil) {
+        [win makeKeyAndOrderFront:nil];
+    }
+    NSWindow *modalWin = [app modalWindow];
+    if (modalWin != nil && modalWin != win) {
+        [modalWin makeKeyAndOrderFront:nil];
+    }
+}
 
 static BOOL MAWindowShouldCloseIMP(id self, SEL _cmd, id sender) {
     if (atomic_load(&gCloseToBackground)) {
         if ([sender isKindOfClass:[NSWindow class]]) {
-            [(NSWindow *)sender orderOut:nil];
+            NSWindow *win = (NSWindow *)sender;
+            if (gMainWindow == nil && !MAIsAuxiliaryWindow(win)) {
+                gMainWindow = win;
+            }
+            [win orderOut:nil];
         }
         return NO;
     }
-    if (gOrigWindowShouldClose != NULL) {
+    if (gOrigWindowShouldClose != NULL && gOrigWindowShouldClose != (IMP)MAWindowShouldCloseIMP) {
         typedef BOOL (*OrigCloseFn)(id, SEL, id);
         return ((OrigCloseFn)gOrigWindowShouldClose)(self, _cmd, sender);
     }
@@ -38,14 +140,20 @@ static BOOL MAWindowShouldCloseIMP(id self, SEL _cmd, id sender) {
 }
 
 static BOOL MAAppShouldHandleReopenIMP(id self, SEL _cmd, NSApplication *sender, BOOL hasVisibleWindows) {
-    if (!hasVisibleWindows) {
+    if (!atomic_load(&gShuttingDown)) {
+        // 绝不使用 `if (!hasVisibleWindows)` 守卫：
+        // 1) 当存在状态栏图标、辅助窗口、最小化窗口或应用被 Cmd+H 隐藏时，hasVisibleWindows 可能为 YES；
+        // 2) 只要用户点击 Dock 图标触发 reopen，就必须在主线程同步恢复并前置主窗口，再通知 Go 层刷新业务状态。
+        MAShowMainWindowOnMainThread();
         maStatusBarOnShowWindow();
     }
-    if (gOrigAppShouldHandleReopen != NULL) {
+    if (gOrigAppShouldHandleReopen != NULL && gOrigAppShouldHandleReopen != (IMP)MAAppShouldHandleReopenIMP) {
         typedef BOOL (*OrigReopenFn)(id, SEL, NSApplication *, BOOL);
         return ((OrigReopenFn)gOrigAppShouldHandleReopen)(self, _cmd, sender, hasVisibleWindows);
     }
-    return YES;
+    // 已由当前钩子同步完成主窗口恢复与激活，返回 NO 阻止 AppKit 再执行冗余的 _doOpenUntitled 等默认动作；
+    // AppKit 仍会在返回后继续执行 _switchToSpaceIfNeeded 切回窗口所在桌面空间。
+    return NO;
 }
 
 static void MATryInstallWindowHooks(int attemptsLeft) {
@@ -53,16 +161,21 @@ static void MATryInstallWindowHooks(int attemptsLeft) {
 
     // 1. 包装主窗口 delegate 的 windowShouldClose:（仅作用于窗口红叉与 performClose，不拦截 Cmd+Q）
     if (!gWindowHookInstalled && app != nil) {
-        NSArray<NSWindow *> *windows = [app windows];
-        for (NSWindow *win in windows) {
-            id del = [win delegate];
-            if (del != nil && [del respondsToSelector:@selector(windowShouldClose:)]) {
-                Class delCls = object_getClass(del);
-                Method m = class_getInstanceMethod(delCls, @selector(windowShouldClose:));
-                if (m != NULL) {
-                    gOrigWindowShouldClose = method_setImplementation(m, (IMP)MAWindowShouldCloseIMP);
+        NSWindow *win = MAFindMainWindow(app);
+        id del = [win delegate];
+        if (del != nil && [del respondsToSelector:@selector(windowShouldClose:)]) {
+            Class delCls = object_getClass(del);
+            SEL closeSel = @selector(windowShouldClose:);
+            Method m = class_getInstanceMethod(delCls, closeSel);
+            if (m != NULL) {
+                IMP currentIMP = method_getImplementation(m);
+                if (currentIMP == (IMP)MAWindowShouldCloseIMP) {
                     gWindowHookInstalled = YES;
-                    break;
+                } else {
+                    const char *types = method_getTypeEncoding(m);
+                    gOrigWindowShouldClose = currentIMP;
+                    class_replaceMethod(delCls, closeSel, (IMP)MAWindowShouldCloseIMP, types != NULL ? types : "c@:@");
+                    gWindowHookInstalled = YES;
                 }
             }
         }
@@ -76,22 +189,59 @@ static void MATryInstallWindowHooks(int attemptsLeft) {
             SEL reopenSel = @selector(applicationShouldHandleReopen:hasVisibleWindows:);
             Method existing = class_getInstanceMethod(appDelCls, reopenSel);
             if (existing != NULL) {
-                gOrigAppShouldHandleReopen = method_setImplementation(existing, (IMP)MAAppShouldHandleReopenIMP);
-                gAppHookInstalled = YES;
-            } else {
-                // ObjC 类型编码："c@:@c" 对应 BOOL(id, SEL, id, BOOL)
-                if (class_addMethod(appDelCls, reopenSel, (IMP)MAAppShouldHandleReopenIMP, "c@:@c")) {
+                IMP currentIMP = method_getImplementation(existing);
+                if (currentIMP == (IMP)MAAppShouldHandleReopenIMP) {
                     gAppHookInstalled = YES;
+                } else {
+                    const char *types = method_getTypeEncoding(existing);
+                    gOrigAppShouldHandleReopen = currentIMP;
+                    class_replaceMethod(appDelCls, reopenSel, (IMP)MAAppShouldHandleReopenIMP, types != NULL ? types : "c@:@c");
+                    gAppHookInstalled = YES;
+                }
+            } else {
+                char typeEnc[16];
+                snprintf(typeEnc, sizeof(typeEnc), "%s@:@%s", @encode(BOOL), @encode(BOOL));
+                if (class_addMethod(appDelCls, reopenSel, (IMP)MAAppShouldHandleReopenIMP, typeEnc)) {
+                    gAppHookInstalled = YES;
+                    // AppKit 在 setDelegate: 时可能缓存 delegate 方法响应位与通知表；
+                    // 在 setDelegate: 之后动态注入方法，须持强引用先清空再重设以强制刷新 AppKit 内部缓存。
+                    id strongDelegate = appDel;
+                    [app setDelegate:nil];
+                    [app setDelegate:strongDelegate];
                 }
             }
         }
     }
 
+    if (gWindowHookInstalled && gAppHookInstalled) {
+        if (gLaunchObserver != nil) {
+            [[NSNotificationCenter defaultCenter] removeObserver:gLaunchObserver];
+            gLaunchObserver = nil;
+        }
+        return;
+    }
+
+    // 注册应用启动完成通知作为兜底，防止启动较慢时错过重试窗口
+    if (gLaunchObserver == nil && app != nil) {
+        gLaunchObserver = [[NSNotificationCenter defaultCenter]
+            addObserverForName:NSApplicationDidFinishLaunchingNotification
+                        object:app
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification * _Nonnull note) {
+            (void)note;
+            if (!atomic_load(&gShuttingDown)) {
+                MATryInstallWindowHooks(0);
+            }
+        }];
+    }
+
     // Wails OnStartup 并发于主循环启动，若窗口或 delegate 尚未挂载则短暂重试
-    if ((!gWindowHookInstalled || !gAppHookInstalled) && attemptsLeft > 0) {
+    if (attemptsLeft > 0) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(50 * NSEC_PER_MSEC)),
                        dispatch_get_main_queue(), ^{
-            MATryInstallWindowHooks(attemptsLeft - 1);
+            if (!atomic_load(&gShuttingDown)) {
+                MATryInstallWindowHooks(attemptsLeft - 1);
+            }
         });
     }
 }
@@ -476,12 +626,13 @@ static id gAppNapActivity = nil;
 
 void MAStatusBarStart(const void *iconBytes, int iconLen, bool closeToBackground) {
     atomic_store(&gCloseToBackground, closeToBackground);
+    atomic_store(&gShuttingDown, false);
     NSData *iconData = nil;
     if (iconBytes != NULL && iconLen > 0) {
         iconData = [NSData dataWithBytes:iconBytes length:(NSUInteger)iconLen];
     }
     MARunOnMainThread(^{
-        MATryInstallWindowHooks(20);
+        MATryInstallWindowHooks(60);
         if (gController == nil) {
             gController = [[MAStatusBarController alloc] initWithIconData:iconData];
         } else {
@@ -523,6 +674,17 @@ void MAStatusBarSetPreventAppNap(bool enabled) {
     });
 }
 
+void MAStatusBarShowMainWindow(void) {
+    if (atomic_load(&gShuttingDown)) {
+        return;
+    }
+    MARunOnMainThread(^{
+        if (!atomic_load(&gShuttingDown)) {
+            MAShowMainWindowOnMainThread();
+        }
+    });
+}
+
 void MAStatusBarUpdateJSON(const char *snapshotJSON) {
     if (snapshotJSON == NULL) {
         return;
@@ -539,7 +701,12 @@ void MAStatusBarUpdateJSON(const char *snapshotJSON) {
 }
 
 void MAStatusBarStop(void) {
+    atomic_store(&gShuttingDown, true);
     MARunOnMainThread(^{
+        if (gLaunchObserver != nil) {
+            [[NSNotificationCenter defaultCenter] removeObserver:gLaunchObserver];
+            gLaunchObserver = nil;
+        }
         if (gWakeObserver != nil) {
             [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:gWakeObserver];
             gWakeObserver = nil;

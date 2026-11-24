@@ -59,6 +59,7 @@ type Controller interface {
 	SetCloseToBackground(enabled bool)
 	SetSystemWakeCallback(fn func())
 	SetPreventAppNap(enabled bool)
+	ShowMainWindow()
 	Update(snap Snapshot)
 	Stop()
 }

@@ -3,7 +3,7 @@
 package statusbar
 
 /*
-#cgo darwin CFLAGS: -x objective-c -fobjc-arc
+#cgo darwin CFLAGS: -x objective-c -fobjc-arc -Wall
 #cgo darwin LDFLAGS: -framework Cocoa
 #include <stdlib.h>
 #include "statusbar_darwin.h"
@@ -76,6 +76,10 @@ func (c *darwinController) SetSystemWakeCallback(fn func()) {
 
 func (c *darwinController) SetPreventAppNap(enabled bool) {
 	SetPreventAppNap(enabled)
+}
+
+func (c *darwinController) ShowMainWindow() {
+	C.MAStatusBarShowMainWindow()
 }
 
 func (c *darwinController) Update(snap Snapshot) {

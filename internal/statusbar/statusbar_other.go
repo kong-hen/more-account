@@ -19,5 +19,6 @@ func (noopController) Start(_ bool)                   {}
 func (noopController) SetCloseToBackground(_ bool)    {}
 func (noopController) SetSystemWakeCallback(_ func()) {}
 func (noopController) SetPreventAppNap(_ bool)        {}
+func (noopController) ShowMainWindow()                {}
 func (noopController) Update(_ Snapshot)              {}
 func (noopController) Stop()                          {}
