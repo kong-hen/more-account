@@ -44,7 +44,7 @@ export const useAppStore = defineStore('app', () => {
   const groups = ref<AccountGroup[]>([])
   const switchHistory = ref<SwitchHistoryItem[]>([])
   const dataDir = ref('')
-  const appVersion = ref('1.0.0')
+  const appVersion = ref('1.0.1')
   const defaultGitHubRepo = ref('kong-hen/more-account')
   const hasBuiltInOAuth = ref(false)
   const platform = ref<string>('darwin')

@@ -16,7 +16,7 @@ import (
 
 var (
 	// AppVersion 当前客户端语义化版本号（可通过 -ldflags "-X more-account/internal/updater.AppVersion=x.y.z" 覆盖）。
-	AppVersion = "1.0.0"
+	AppVersion = "1.0.1"
 
 	// DefaultGitHubRepo 默认检查更新的 GitHub 仓库（格式 "owner/repo"）。
 	// 支持在客户端「设置」中覆盖，或在构建时通过 -ldflags "-X more-account/internal/updater.DefaultGitHubRepo=owner/repo" 注入。
