@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"image/png"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1229,5 +1231,137 @@ func TestOAuthSilentFailureSemanticsEndToEnd(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("超时未收到静默超时的 oauth:failed 事件")
+	}
+}
+
+func TestAppOAuthHostSwitchTLSDetectionAndRealHTTPCallbackEndToEnd(t *testing.T) {
+	t.Setenv("MORE_ACCOUNT_DATA_DIR", t.TempDir())
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_ID", "test-client-id.apps.googleusercontent.com")
+	t.Setenv("MORE_ACCOUNT_OAUTH_CLIENT_SECRET", "test-client-secret-placeholder")
+
+	var gotTokenRedirectURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			_ = r.ParseForm()
+			gotTokenRedirectURI = r.FormValue("redirect_uri")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token":  "ya29.e2e-access",
+				"refresh_token": "1//0g-e2e-refresh",
+				"expires_in":    3600,
+				"token_type":    "Bearer",
+			})
+		case "/userinfo":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"email": "e2e-callback@example.com",
+				"name":  "E2E Callback",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	app := NewApp()
+	defer app.CancelOAuthLogin()
+	app.oauthClient.TokenURL = srv.URL + "/token"
+	app.oauthClient.UserInfoURL = srv.URL + "/userinfo"
+	app.quotaService = nil
+	app.importerService = importer.NewService(app.store, app.oauthClient, nil)
+	app.openBrowserFn = func(string) error { return nil }
+
+	tlsCh := make(chan map[string]any, 2)
+	completedCh := make(chan map[string]any, 2)
+	failedCh := make(chan map[string]any, 4)
+
+	app.eventEmitter = func(name string, data ...any) {
+		var m map[string]any
+		if len(data) > 0 {
+			m, _ = data[0].(map[string]any)
+		}
+		switch name {
+		case "oauth:tls_detected":
+			tlsCh <- m
+		case "oauth:completed":
+			completedCh <- m
+		case "oauth:failed":
+			failedCh <- m
+		}
+	}
+
+	// 1. 打开弹窗预监听，再显式切换为 127.0.0.1 回调地址，旧会话静默取消不得误发 oauth:failed
+	grp, err := app.SaveGroup(model.AccountGroup{Name: "E2E分组", Color: "#2563EB"})
+	if err != nil {
+		t.Fatalf("SaveGroup 失败: %v", err)
+	}
+	preSess, err := app.PrepareOAuthLogin("")
+	if err != nil {
+		t.Fatalf("PrepareOAuthLogin 失败: %v", err)
+	}
+	switchedSess, err := app.SwitchOAuthCallbackHost(grp.ID, oauth.CallbackHostLoopback)
+	if err != nil {
+		t.Fatalf("SwitchOAuthCallbackHost 失败: %v", err)
+	}
+	if switchedSess.State == preSess.State || switchedSess.CallbackHost != oauth.CallbackHostLoopback || !strings.HasPrefix(switchedSess.RedirectURI, "http://127.0.0.1:") {
+		t.Fatalf("切换回调主机结果异常: pre=%+v switched=%+v", preSess, switchedSess)
+	}
+	app.MarkOAuthUserInitiated(switchedSess.State)
+
+	// 2. 模拟浏览器对本地端口发起意外 HTTPS TLS 握手，验证推送 oauth:tls_detected 且不阻塞原会话
+	parsed, err := url.Parse(switchedSess.RedirectURI)
+	if err != nil {
+		t.Fatalf("解析 RedirectURI 失败: %v", err)
+	}
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:"+parsed.Port(), time.Second)
+	if err != nil {
+		t.Fatalf("连接本地监听失败: %v", err)
+	}
+	_, _ = conn.Write([]byte{0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00})
+	_ = conn.Close()
+
+	select {
+	case tlsPayload := <-tlsCh:
+		if tlsPayload["state"] != switchedSess.State || tlsPayload["callbackHost"] != oauth.CallbackHostLoopback {
+			t.Fatalf("oauth:tls_detected 载荷不匹配: %+v", tlsPayload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("超时未收到 oauth:tls_detected 事件")
+	}
+
+	// 3. 模拟浏览器完成登录后重定向到真实 HTTP 回调地址，验证端到端换取令牌与入库
+	cbURL := fmt.Sprintf("%s?state=%s&code=e2e-real-http-code", switchedSess.RedirectURI, url.QueryEscape(switchedSess.State))
+	cbResp, err := http.Get(cbURL) //nolint:gosec // 本地测试回环地址
+	if err != nil {
+		t.Fatalf("发起真实本地回调请求失败: %v", err)
+	}
+	_ = cbResp.Body.Close()
+	if cbResp.StatusCode != http.StatusOK {
+		t.Fatalf("期望回调页返回 200，实际 %d", cbResp.StatusCode)
+	}
+
+	select {
+	case comp := <-completedCh:
+		if comp["state"] != switchedSess.State {
+			t.Fatalf("oauth:completed state 不匹配: %+v", comp)
+		}
+	case errPayload := <-failedCh:
+		t.Fatalf("不应收到 oauth:failed: %+v", errPayload)
+	case <-time.After(5 * time.Second):
+		t.Fatal("超时未收到 oauth:completed 事件")
+	}
+
+	if gotTokenRedirectURI != switchedSess.RedirectURI {
+		t.Fatalf("ExchangeCode 传入的 redirect_uri (%q) 与回调监听地址 (%q) 不一致", gotTokenRedirectURI, switchedSess.RedirectURI)
+	}
+	accs := app.ListAccounts()
+	if len(accs) != 1 || accs[0].Email != "e2e-callback@example.com" || accs[0].GroupID != grp.ID {
+		t.Fatalf("端到端入库账号异常: %+v", accs)
+	}
+	select {
+	case extraErr := <-failedCh:
+		t.Fatalf("切换主机取消旧会话不应产生 oauth:failed: %+v", extraErr)
+	default:
 	}
 }

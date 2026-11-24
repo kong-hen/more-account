@@ -18,7 +18,7 @@ import { useAppStore } from '@/stores/appStore'
 import { api, extractErrorMessage, isWailsRuntime, onWailsEvent } from '@/services/api'
 import { copyToClipboard, maskEmail, maskToken } from '@/utils/privacy'
 import { getAccountValidationUrl, isAccountValidationRequired } from '@/utils/quota'
-import type { Account, OAuthLoginSession } from '@/types/models'
+import type { Account, OAuthCallbackHost, OAuthLoginSession } from '@/types/models'
 
 const props = defineProps<{
   open: boolean
@@ -47,6 +47,9 @@ const userInitiatedOAuth = ref(false)
 const oauthState = ref('')
 const oauthAuthUrl = ref('')
 const oauthRedirectUri = ref('')
+const oauthCallbackHost = ref<OAuthCallbackHost>('localhost')
+const preferredCallbackHost = ref<OAuthCallbackHost | ''>('')
+const oauthTlsDetected = ref(false)
 const oauthCallbackInput = ref('')
 const oauthUrlCopied = ref(false)
 const oauthError = ref('')
@@ -72,6 +75,21 @@ const pendingVerifyAccounts = ref<Account[]>([])
 const pendingVerifyTab = ref<AddTab | null>(null)
 const copiedVerifyId = ref('')
 
+function resolveHostFromSession(sess: OAuthLoginSession): OAuthCallbackHost {
+  if (sess.callbackHost === '127.0.0.1' || sess.callbackHost === 'localhost') {
+    return sess.callbackHost
+  }
+  return sess.redirectUri.includes('127.0.0.1') ? '127.0.0.1' : 'localhost'
+}
+
+function applyOAuthSession(sess: OAuthLoginSession) {
+  oauthState.value = sess.state ?? ''
+  oauthAuthUrl.value = sess.authUrl
+  oauthRedirectUri.value = sess.redirectUri
+  oauthCallbackHost.value = resolveHostFromSession(sess)
+  oauthWaiting.value = true
+}
+
 function clearOAuthSessionState(clearCallbackInput = true) {
   oauthWaiting.value = false
   oauthStartingMode.value = null
@@ -81,6 +99,7 @@ function clearOAuthSessionState(clearCallbackInput = true) {
   oauthState.value = ''
   oauthAuthUrl.value = ''
   oauthRedirectUri.value = ''
+  oauthTlsDetected.value = false
   if (clearCallbackInput) {
     oauthCallbackInput.value = ''
   }
@@ -93,7 +112,7 @@ function isMatchingOAuthEvent(eventState?: string): boolean {
 
 // 绑定后端 OAuth 生命周期事件（支持按 state 精确匹配，避免旧会话事件误关或打断新会话）
 function ensureOAuthEventsBound() {
-  if (!isWailsRuntime() || eventCleanups.length > 0) return
+  if (!isWailsRuntime() || !window.runtime?.EventsOn || eventCleanups.length > 0) return
 
   eventCleanups.push(
     onWailsEvent('oauth:processing', (payload: unknown) => {
@@ -104,6 +123,15 @@ function ensureOAuthEventsBound() {
       oauthWaiting.value = true
       userInitiatedOAuth.value = true
       oauthError.value = ''
+      oauthTlsDetected.value = false
+    }),
+  )
+
+  eventCleanups.push(
+    onWailsEvent('oauth:tls_detected', (payload: unknown) => {
+      const p = payload as { state?: string } | null
+      if (!isMatchingOAuthEvent(p?.state)) return
+      oauthTlsDetected.value = true
     }),
   )
 
@@ -199,10 +227,15 @@ async function ensureOAuthListening(mode: 'init' | 'open' | 'copy' = 'init') {
 
   const run = async (): Promise<OAuthLoginSession | null> => {
     try {
+      const host = preferredCallbackHost.value
       const sess =
         mode === 'open'
-          ? await api.startOAuthLogin(targetGroupId.value)
-          : await api.prepareOAuthLogin(targetGroupId.value)
+          ? host
+            ? await api.startOAuthLoginWithHost(targetGroupId.value, host)
+            : await api.startOAuthLogin(targetGroupId.value)
+          : host
+            ? await api.prepareOAuthLoginWithHost(targetGroupId.value, host)
+            : await api.prepareOAuthLogin(targetGroupId.value)
 
       const isProcessing = sess.status === 'processing'
       // 若自动预监听返回时弹窗已关闭或已切到其他标签页，且用户未主动发起授权也未处于处理中，立即静默释放监听
@@ -211,10 +244,7 @@ async function ensureOAuthListening(mode: 'init' | 'open' | 'copy' = 'init') {
         return null
       }
 
-      oauthState.value = sess.state ?? ''
-      oauthAuthUrl.value = sess.authUrl
-      oauthRedirectUri.value = sess.redirectUri
-      oauthWaiting.value = true
+      applyOAuthSession(sess)
       if (isProcessing) {
         oauthProcessing.value = true
         userInitiatedOAuth.value = true
@@ -315,28 +345,51 @@ async function prepareAndCopyOAuthUrl() {
   }
 }
 
-// 显式重置并重新生成全新的本地回调监听端口与授权链接
-async function resetOAuthSession() {
+// 原子重建等待中的 OAuth 会话（用于「换新」或切换 localhost / 127.0.0.1 回调地址）
+async function restartOAuthSession(
+  hostOverride: OAuthCallbackHost | '',
+  notifyText: string,
+  forceUserInitiated: boolean,
+) {
   if (!isWailsRuntime() || oauthStartingMode.value || oauthBusy.value) return
+  const keepInitiated = forceUserInitiated || userInitiatedOAuth.value
   oauthError.value = ''
+  oauthTlsDetected.value = false
   oauthStartingMode.value = 'reset'
   try {
-    await api.cancelOAuthLogin().catch(() => {})
-    const sess = await api.prepareOAuthLogin(targetGroupId.value)
-    oauthState.value = sess.state ?? ''
-    oauthAuthUrl.value = sess.authUrl
-    oauthRedirectUri.value = sess.redirectUri
+    const sess = await api.switchOAuthCallbackHost(targetGroupId.value, hostOverride)
+    applyOAuthSession(sess)
     oauthCallbackInput.value = ''
-    oauthWaiting.value = true
     oauthProcessing.value = false
-    markOAuthUserInitiated(sess.state ?? '')
-    appStore.notify('已重新生成授权链接并刷新本地回调端口', 'info', 2200)
+    if (keepInitiated) {
+      markOAuthUserInitiated(sess.state ?? '')
+    }
+    appStore.notify(notifyText, 'info', 2600)
   } catch (err) {
-    clearOAuthSessionState(false)
     oauthError.value = extractErrorMessage(err)
   } finally {
     oauthStartingMode.value = null
   }
+}
+
+// 显式重置并重新生成全新的本地回调监听端口与授权链接
+async function resetOAuthSession() {
+  await restartOAuthSession(
+    preferredCallbackHost.value,
+    '已重新生成授权链接并刷新本地回调端口',
+    true,
+  )
+}
+
+// 切换本地回调主机（localhost / 127.0.0.1），兼容不同代理 PAC、Fake-IP TUN 或浏览器 HSTS 规则
+async function switchCallbackHost(nextHost: OAuthCallbackHost) {
+  if (oauthCallbackHost.value === nextHost && oauthWaiting.value) return
+  preferredCallbackHost.value = nextHost
+  await restartOAuthSession(
+    nextHost,
+    `回调地址已切换为 ${nextHost}，请重新点击「网页验证」或复制新链接`,
+    false,
+  )
 }
 
 // 在等待回调期间直接打开当前会话的授权链接（复用当前监听端口并通知后端升级为主动授权）
@@ -696,18 +749,59 @@ async function handleImportTokens() {
               </div>
             </div>
 
-            <!-- 当前实时监听的回调地址提示，关闭弹窗后后台仍保持监听或处理 -->
+            <!-- 当前实时监听的回调地址与主机切换（localhost / 127.0.0.1），关闭弹窗后后台仍保持监听或处理 -->
             <div
               v-if="oauthRedirectUri"
               class="px-2.5 py-1.5 rounded-lg border text-[11px] flex items-center justify-between gap-2"
               style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-muted)"
             >
-              <span class="truncate font-mono-num" :title="oauthRedirectUri">
+              <span class="truncate font-mono-num min-w-0" :title="oauthRedirectUri">
                 监听地址：{{ oauthRedirectUri }}
               </span>
-              <span class="shrink-0">
-                {{ oauthBusy ? '正在后台换取令牌与同步配额' : '关闭弹窗不影响后台监听' }}
+              <div
+                class="inline-flex items-center p-0.5 rounded-md border shrink-0"
+                style="border-color: var(--border-subtle); background-color: var(--bg-app)"
+                role="group"
+                aria-label="切换本地回调地址主机"
+              >
+                <button
+                  v-for="host in (['localhost', '127.0.0.1'] as const)"
+                  :key="host"
+                  type="button"
+                  :disabled="Boolean(oauthStartingMode) || oauthBusy"
+                  class="px-1.5 py-0.5 rounded text-[10.5px] font-mono-num cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  :style="
+                    oauthCallbackHost === host
+                      ? { backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', boxShadow: 'var(--shadow-card)' }
+                      : { color: 'var(--text-muted)' }
+                  "
+                  @click="switchCallbackHost(host)"
+                >
+                  {{ host }}
+                </button>
+              </div>
+            </div>
+
+            <!-- 检测到浏览器对本地 HTTP 回调发起了 HTTPS/TLS 握手时的诊断提示 -->
+            <div
+              v-if="oauthTlsDetected"
+              class="px-2.5 py-2 rounded-lg border text-[11px] flex items-center justify-between gap-2"
+              style="background-color: var(--warning-soft); border-color: rgba(245, 158, 11, 0.35); color: var(--warning-text)"
+            >
+              <span class="inline-flex items-center gap-1.5 min-w-0">
+                <AlertTriangle class="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                <span>检测到浏览器尝试以 HTTPS 访问本地回调（可能受 HSTS 或安全扩展影响）。</span>
               </span>
+              <button
+                v-if="oauthCallbackHost !== '127.0.0.1'"
+                type="button"
+                :disabled="Boolean(oauthStartingMode) || oauthBusy"
+                class="px-2 py-0.5 rounded border text-[11px] font-medium shrink-0 cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50"
+                style="border-color: var(--warning); background-color: var(--bg-surface); color: var(--text-primary)"
+                @click="switchCallbackHost('127.0.0.1')"
+              >
+                改用 127.0.0.1
+              </button>
             </div>
 
             <!-- 授权链接只读预览栏，方便确认或直接复制 -->
@@ -719,6 +813,8 @@ async function handleImportTokens() {
                 aria-label="当前生成的 OAuth 授权链接"
                 class="w-full px-2.5 py-1.5 text-[11px] rounded-lg border font-mono-num select-all"
                 style="border-color: var(--border-subtle); background-color: var(--bg-surface); color: var(--text-secondary)"
+                @focus="markOAuthUserInitiated()"
+                @mousedown="markOAuthUserInitiated()"
                 @click="handleSelectAuthUrl"
                 @copy="markOAuthUserInitiated()"
               />
@@ -727,7 +823,7 @@ async function handleImportTokens() {
             <!-- 手动粘贴回调 URL 兜底 -->
             <div class="pt-2 border-t space-y-1.5" style="border-color: var(--border-subtle)">
               <label for="manual-callback-url" class="block text-[11px]" style="color: var(--text-muted)">
-                若跨环境或浏览器未能自动跳回，可复制地址栏中的完整回调 URL 粘贴至此处：
+                若代理拦截或跨环境导致浏览器页面一直转圈无法跳回，可切换上方回调地址（localhost / 127.0.0.1），或复制浏览器地址栏中的完整回调 URL 粘贴至此处：
               </label>
               <div class="flex gap-2">
                 <input

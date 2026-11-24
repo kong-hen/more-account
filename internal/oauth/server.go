@@ -6,14 +6,25 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+const (
+	// CallbackHostLocalhost 使用 localhost 作为 OAuth 本地回调域名，兼容常见 PAC 与本地代理规则的自动直连放行。
+	CallbackHostLocalhost = "localhost"
+	// CallbackHostLoopback 使用 IPv4 回环地址 127.0.0.1 作为 OAuth 本地回调地址，避免 Fake-IP DNS 或 localhost HSTS 干扰。
+	CallbackHostLoopback = "127.0.0.1"
+)
+
+var errTLSHandshakeOnHTTP = errors.New("收到 HTTPS TLS 握手请求，本地 OAuth 回调仅支持 HTTP")
 
 // ErrOAuthCanceled 表示用户主动取消或由新会话替代了旧的 OAuth 授权等待。
 var ErrOAuthCanceled = errors.New("已取消 OAuth 授权")
@@ -36,6 +47,7 @@ type LoginSession struct {
 	AuthURL      string `json:"authUrl"`
 	RedirectURI  string `json:"redirectUri"`
 	State        string `json:"state"`
+	CallbackHost string `json:"callbackHost,omitempty"`
 	Status       string `json:"status,omitempty"`
 	CodeVerifier string `json:"-"`
 }
@@ -44,6 +56,8 @@ type LoginSession struct {
 type SessionConfig struct {
 	// Silent 标识该会话为弹窗打开时的自动预监听（用户尚未主动点击授权、复制链接或提交回调）。
 	Silent bool
+	// CallbackHost 指定本地回调域名或地址（"localhost" / "127.0.0.1"，留空时自动探测最优回环地址）。
+	CallbackHost string
 }
 
 // SessionInfo 描述当前活跃 OAuth 会话的完整状态快照（waiting / processing）。
@@ -51,8 +65,10 @@ type SessionInfo struct {
 	AuthURL      string `json:"authUrl"`
 	RedirectURI  string `json:"redirectUri"`
 	State        string `json:"state"`
+	CallbackHost string `json:"callbackHost,omitempty"`
 	Status       string `json:"status"`
 	Silent       bool   `json:"silent,omitempty"`
+	TLSDetected  bool   `json:"tlsDetected,omitempty"`
 	CodeVerifier string `json:"-"`
 }
 
@@ -65,6 +81,7 @@ func (s *SessionInfo) ToLoginSession() LoginSession {
 		AuthURL:      s.AuthURL,
 		RedirectURI:  s.RedirectURI,
 		State:        s.State,
+		CallbackHost: s.CallbackHost,
 		Status:       s.Status,
 		CodeVerifier: s.CodeVerifier,
 	}
@@ -75,6 +92,7 @@ type activeSession struct {
 	state        string
 	codeVerifier string
 	redirectURI  string
+	callbackHost string
 	server       *http.Server
 	listeners    []net.Listener
 	codeCh       chan string
@@ -84,9 +102,14 @@ type activeSession struct {
 	status       string
 	silent       atomic.Bool
 	completed    atomic.Bool
+	tlsDetected  atomic.Bool
 	deliverOnce  sync.Once
 	cancelOnce   sync.Once
 	closeOnce    sync.Once
+	graceOnce    sync.Once
+	tlsOnce      sync.Once
+	graceTimerMu sync.Mutex
+	graceTimer   *time.Timer
 }
 
 func (a *activeSession) getStatus() string {
@@ -109,6 +132,7 @@ func (a *activeSession) toLoginSession() LoginSession {
 		AuthURL:      a.authURL,
 		RedirectURI:  a.redirectURI,
 		State:        a.state,
+		CallbackHost: a.callbackHost,
 		Status:       a.getStatus(),
 		CodeVerifier: a.codeVerifier,
 	}
@@ -119,8 +143,10 @@ func (a *activeSession) toSessionInfo() *SessionInfo {
 		AuthURL:      a.authURL,
 		RedirectURI:  a.redirectURI,
 		State:        a.state,
+		CallbackHost: a.callbackHost,
 		Status:       a.getStatus(),
 		Silent:       a.silent.Load(),
+		TLSDetected:  a.tlsDetected.Load(),
 		CodeVerifier: a.codeVerifier,
 	}
 }
@@ -157,7 +183,10 @@ func (a *activeSession) shutdownServer() {
 		if a.server != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			_ = a.server.Shutdown(ctx)
+			if err := a.server.Shutdown(ctx); err != nil {
+				// Shutdown 超时时强制关闭残留的活跃/挂起连接，防止监听句柄泄漏
+				_ = a.server.Close()
+			}
 		}
 		for _, ln := range a.listeners {
 			_ = ln.Close()
@@ -165,8 +194,31 @@ func (a *activeSession) shutdownServer() {
 	})
 }
 
+func (a *activeSession) scheduleGraceShutdown(grace time.Duration) {
+	if grace <= 0 {
+		a.shutdownServer()
+		return
+	}
+	a.graceOnce.Do(func() {
+		t := time.AfterFunc(grace, a.shutdownServer)
+		a.graceTimerMu.Lock()
+		a.graceTimer = t
+		a.graceTimerMu.Unlock()
+	})
+}
+
+func (a *activeSession) stopGraceTimer() {
+	a.graceTimerMu.Lock()
+	if a.graceTimer != nil {
+		a.graceTimer.Stop()
+		a.graceTimer = nil
+	}
+	a.graceTimerMu.Unlock()
+}
+
 func (a *activeSession) close() {
 	a.signalCancel()
+	a.stopGraceTimer()
 	a.shutdownServer()
 }
 
@@ -178,6 +230,8 @@ type LoginManager struct {
 	current             *activeSession
 	endedSilent         map[string]bool
 	CredentialsProvider func() (clientID, clientSecret string)
+	// OnTLSDetected 当本地纯 HTTP 回调端口收到浏览器发起的 TLS 握手字节（0x16）时触发，便于前端提示 HTTPS 升级冲突。
+	OnTLSDetected func(state, callbackHost string)
 	// PostCallbackGrace 收到合法回调并向浏览器写出成功页面后，额外保留本地监听的短暂缓冲时长，
 	// 防止浏览器二次刷新或重定向重试时立即遇到连接断开。
 	PostCallbackGrace time.Duration
@@ -234,9 +288,157 @@ func (m *LoginManager) CurrentSessionInfo() (*SessionInfo, bool) {
 	return m.current.toSessionInfo(), true
 }
 
-// EnsureSession 原子检查并复用已有活跃会话（waiting 或 processing）；若无活跃会话则创建新会话。
+var lookupHostIPs = func(ctx context.Context, host string) ([]net.IP, error) {
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	ips := make([]net.IP, 0, len(addrs))
+	for _, a := range addrs {
+		ips = append(ips, a.IP)
+	}
+	return ips, nil
+}
+
+func normalizeCallbackHost(raw string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	switch trimmed {
+	case "":
+		return "", nil
+	case CallbackHostLocalhost:
+		return CallbackHostLocalhost, nil
+	case CallbackHostLoopback:
+		return CallbackHostLoopback, nil
+	default:
+		return "", fmt.Errorf("不支持的回调主机 %q（仅支持 localhost 或 127.0.0.1）", raw)
+	}
+}
+
+func canUseLocalhostCallback(hasIPv6 bool) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	ips, err := lookupHostIPs(ctx, CallbackHostLocalhost)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	hasV4Loopback := false
+	for _, ip := range ips {
+		if !ip.IsLoopback() {
+			// 若 localhost 被 Fake-IP DNS 或异常 hosts 解析为非回环地址，自动回退 127.0.0.1
+			return false
+		}
+		if ip.To4() != nil {
+			hasV4Loopback = true
+		} else if !hasIPv6 {
+			// localhost 解析包含 ::1 但本机未成功绑定 IPv6 回环监听时，回退 127.0.0.1 避免浏览器命中空端口
+			return false
+		}
+	}
+	return hasV4Loopback || hasIPv6
+}
+
+func resolveCallbackHost(requested string, hasIPv6 bool) (string, error) {
+	norm, err := normalizeCallbackHost(requested)
+	if err != nil {
+		return "", err
+	}
+	if norm != "" {
+		return norm, nil
+	}
+	if canUseLocalhostCallback(hasIPv6) {
+		return CallbackHostLocalhost, nil
+	}
+	return CallbackHostLoopback, nil
+}
+
+func supportsIPv6Loopback() bool {
+	ln, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
+}
+
+// listenLoopbackDualStack 原子尝试在同一随机端口同时绑定 127.0.0.1 与 [::1]，避免 localhost 解析到 ::1 时端口未就绪。
+func listenLoopbackDualStack() ([]net.Listener, int, bool, error) {
+	hasIPv6Support := supportsIPv6Loopback()
+	const maxAttempts = 8
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		ipv4Listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			ipv4Listener, err = net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				return nil, 0, false, fmt.Errorf("无法监听本地回调端口: %w", err)
+			}
+		}
+		addr, ok := ipv4Listener.Addr().(*net.TCPAddr)
+		if !ok || addr.Port <= 0 {
+			_ = ipv4Listener.Close()
+			return nil, 0, false, fmt.Errorf("无法获取有效的本地回调监听端口")
+		}
+		if !hasIPv6Support {
+			return []net.Listener{ipv4Listener}, addr.Port, false, nil
+		}
+		ipv6Listener, v6Err := net.Listen("tcp6", fmt.Sprintf("[::1]:%d", addr.Port))
+		if v6Err == nil {
+			return []net.Listener{ipv4Listener, ipv6Listener}, addr.Port, true, nil
+		}
+		if attempt+1 < maxAttempts {
+			_ = ipv4Listener.Close()
+			continue
+		}
+		return []net.Listener{ipv4Listener}, addr.Port, false, nil
+	}
+	return nil, 0, false, fmt.Errorf("无法绑定本地回调端口")
+}
+
+type tlsSniffListener struct {
+	net.Listener
+	onTLS func()
+}
+
+func (l *tlsSniffListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &tlsSniffConn{
+		Conn:  conn,
+		onTLS: l.onTLS,
+	}, nil
+}
+
+type tlsSniffConn struct {
+	net.Conn
+	onTLS       func()
+	checkedHead bool
+}
+
+func (c *tlsSniffConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if !c.checkedHead && n > 0 {
+		c.checkedHead = true
+		if p[0] == 0x16 {
+			if c.onTLS != nil {
+				c.onTLS()
+			}
+			_ = c.Conn.Close()
+			return 0, errTLSHandshakeOnHTTP
+		}
+	}
+	return n, err
+}
+
+// EnsureSession 原子检查并复用已有活跃会话（waiting 或 processing）；若无活跃会话或明确要求更换等待中的回调主机则创建新会话。
 // 第二个返回值 created 为 true 时表示本次新建了监听会话，调用方需为其启动后台等待协程。
 func (m *LoginManager) EnsureSession(cfg SessionConfig) (*SessionInfo, bool, error) {
+	wantHost, err := normalizeCallbackHost(cfg.CallbackHost)
+	if err != nil {
+		return nil, false, err
+	}
+	cfg.CallbackHost = wantHost
+
 	m.startMu.Lock()
 	defer m.startMu.Unlock()
 
@@ -246,9 +448,13 @@ func (m *LoginManager) EnsureSession(cfg SessionConfig) (*SessionInfo, bool, err
 		if !cfg.Silent {
 			m.current.silent.Store(false)
 		}
-		info := m.current.toSessionInfo()
-		m.mu.Unlock()
-		return info, false, nil
+		isProcessing := m.current.getStatus() == SessionStatusProcessing || m.current.completed.Load()
+		sameHost := wantHost == "" || strings.EqualFold(m.current.callbackHost, wantHost)
+		if isProcessing || sameHost {
+			info := m.current.toSessionInfo()
+			m.mu.Unlock()
+			return info, false, nil
+		}
 	}
 	m.mu.Unlock()
 
@@ -259,12 +465,44 @@ func (m *LoginManager) EnsureSession(cfg SessionConfig) (*SessionInfo, bool, err
 	return sess.toSessionInfo(), true, nil
 }
 
-// StartSession 启动新的本地回调监听服务并返回授权页链接（会立即关闭旧的未完成会话）。
-func (m *LoginManager) StartSession() (LoginSession, error) {
+// RestartSessionIfWaiting 原子替换仍处于 waiting 状态的旧会话并按新配置重建本地监听（例如切换 localhost / 127.0.0.1）。
+// 若当前已有会话处于 processing 阶段，返回 ErrOAuthProcessing，绝不中断正在换取令牌的流程。
+func (m *LoginManager) RestartSessionIfWaiting(cfg SessionConfig) (*SessionInfo, error) {
+	wantHost, err := normalizeCallbackHost(cfg.CallbackHost)
+	if err != nil {
+		return nil, err
+	}
+	cfg.CallbackHost = wantHost
+
 	m.startMu.Lock()
 	defer m.startMu.Unlock()
 
-	sess, err := m.createAndActivateSessionLocked(SessionConfig{Silent: false})
+	m.mu.Lock()
+	if m.current != nil && (m.current.getStatus() == SessionStatusProcessing || m.current.completed.Load()) {
+		m.mu.Unlock()
+		return nil, ErrOAuthProcessing
+	}
+	m.mu.Unlock()
+
+	sess, err := m.createAndActivateSessionLocked(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return sess.toSessionInfo(), nil
+}
+
+// StartSession 启动新的本地回调监听服务并返回授权页链接（会立即关闭旧的未完成会话）。
+func (m *LoginManager) StartSession() (LoginSession, error) {
+	return m.StartSessionWithConfig(SessionConfig{Silent: false})
+}
+
+// StartSessionWithConfig 按指定会话配置启动新的本地回调监听服务并返回授权页链接。
+func (m *LoginManager) StartSessionWithConfig(cfg SessionConfig) (LoginSession, error) {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+
+	cfg.Silent = false
+	sess, err := m.createAndActivateSessionLocked(cfg)
 	if err != nil {
 		return LoginSession{}, err
 	}
@@ -278,22 +516,19 @@ func (m *LoginManager) createAndActivateSessionLocked(cfg SessionConfig) (*activ
 		return nil, err
 	}
 
-	ipv4Listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	listeners, port, hasIPv6, err := listenLoopbackDualStack()
 	if err != nil {
-		ipv4Listener, err = net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			return nil, fmt.Errorf("无法监听本地回调端口: %w", err)
+		return nil, err
+	}
+	callbackHost, err := resolveCallbackHost(cfg.CallbackHost, hasIPv6)
+	if err != nil {
+		for _, ln := range listeners {
+			_ = ln.Close()
 		}
+		return nil, err
 	}
 
-	addr := ipv4Listener.Addr().(*net.TCPAddr)
-	listeners := []net.Listener{ipv4Listener}
-	// 同时尽力绑定同端口 IPv6 回环 [::1]，确保浏览器无论访问 127.0.0.1 还是 localhost 均可命中回调服务
-	if ipv6Listener, v6Err := net.Listen("tcp6", fmt.Sprintf("[::1]:%d", addr.Port)); v6Err == nil {
-		listeners = append(listeners, ipv6Listener)
-	}
-
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/oauth-callback", addr.Port)
+	redirectURI := fmt.Sprintf("http://%s:%d/oauth-callback", callbackHost, port)
 	state := randomState()
 	verifier, challenge := GeneratePKCE()
 	authURL := BuildAuthURLWithClientAndPKCE(clientID, redirectURI, state, challenge)
@@ -303,6 +538,7 @@ func (m *LoginManager) createAndActivateSessionLocked(cfg SessionConfig) (*activ
 		state:        state,
 		codeVerifier: verifier,
 		redirectURI:  redirectURI,
+		callbackHost: callbackHost,
 		listeners:    listeners,
 		codeCh:       make(chan string, 1),
 		errCh:        make(chan error, 1),
@@ -316,6 +552,7 @@ func (m *LoginManager) createAndActivateSessionLocked(cfg SessionConfig) (*activ
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Connection", "close")
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -356,6 +593,7 @@ func (m *LoginManager) createAndActivateSessionLocked(cfg SessionConfig) (*activ
 	mux.HandleFunc("/oauth-callback", handleCallback)
 	mux.HandleFunc("/oauth-callback/", handleCallback)
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close")
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -363,6 +601,7 @@ func (m *LoginManager) createAndActivateSessionLocked(cfg SessionConfig) (*activ
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Connection", "close")
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -385,22 +624,37 @@ func (m *LoginManager) createAndActivateSessionLocked(cfg SessionConfig) (*activ
 
 	sess.server = &http.Server{
 		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	// 关闭 HTTP Keep-Alive，避免浏览器复用或悬空持久连接拖延关停及引发二次重定向竞态
+	sess.server.SetKeepAlivesEnabled(false)
+
+	onTLS := func() {
+		sess.tlsDetected.Store(true)
+		sess.tlsOnce.Do(func() {
+			if m.OnTLSDetected != nil {
+				go m.OnTLSDetected(sess.state, sess.callbackHost)
+			}
+		})
 	}
 
 	m.mu.Lock()
 	prev := m.current
 	m.current = sess
 	m.mu.Unlock()
-	if prev != nil {
-		prev.close()
-	}
 
 	for _, ln := range listeners {
-		listener := ln
+		listener := &tlsSniffListener{Listener: ln, onTLS: onTLS}
 		go func() {
 			_ = sess.server.Serve(listener)
 		}()
+	}
+
+	if prev != nil {
+		// 先同步发出取消信号使旧等待协程立即退出，再异步关闭旧服务，避免旧挂起连接阻塞新监听启动
+		prev.signalCancel()
+		prev.stopGraceTimer()
+		go prev.shutdownServer()
 	}
 
 	return sess, nil
@@ -431,9 +685,16 @@ func (m *LoginManager) FinishProcessing(state string) {
 	if state != "" && m.endedSilent != nil {
 		delete(m.endedSilent, state)
 	}
+	grace := m.PostCallbackGrace
 	m.mu.Unlock()
 
 	if target != nil {
+		target.signalCancel()
+		if target.completed.Load() && grace > 0 {
+			// 已通过回调或手动提交进入收尾时保留缓冲窗口，避免快速完成/失败时过早断开浏览器并发请求
+			target.scheduleGraceShutdown(grace)
+			return
+		}
 		target.close()
 	}
 }
@@ -495,11 +756,7 @@ func (m *LoginManager) WaitForState(ctx context.Context, expectedState string) (
 	case code := <-sess.codeCh:
 		// 保持 m.current 处于 processing 状态，防止重开弹窗另起会话或重复提交误报“没有等待中的会话”
 		sess.setStatus(SessionStatusProcessing)
-		if grace > 0 {
-			time.AfterFunc(grace, sess.shutdownServer)
-		} else {
-			sess.shutdownServer()
-		}
+		sess.scheduleGraceShutdown(grace)
 		return code, nil
 	case err := <-sess.errCh:
 		m.recordEndedSilent(sess)
@@ -683,10 +940,14 @@ func (m *LoginManager) CancelIfSilent() bool {
 }
 
 func writeCallbackHTML(w http.ResponseWriter, statusCode int, ok bool, message string) {
+	body := []byte(callbackHTML(ok, message))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Connection", "close")
 	w.WriteHeader(statusCode)
-	_, _ = w.Write([]byte(callbackHTML(ok, message)))
+	_, _ = w.Write(body)
 	if flusher, okFlush := w.(http.Flusher); okFlush {
 		flusher.Flush()
 	}
@@ -699,6 +960,8 @@ func callbackHTML(ok bool, message string) string {
 		color = "#EF4444"
 		title = "授权未完成"
 	}
+	safeTitle := html.EscapeString(title)
+	safeMsg := html.EscapeString(message)
 	return fmt.Sprintf(`<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -717,5 +980,5 @@ func callbackHTML(ok bool, message string) string {
     <p>%s</p>
   </div>
 </body>
-</html>`, title, color, title, message)
+</html>`, safeTitle, color, safeTitle, safeMsg)
 }

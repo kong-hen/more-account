@@ -9,6 +9,7 @@ import type {
   BootstrapState,
   ClientInstallInfo,
   ConversationDetail,
+  OAuthCallbackHost,
   OAuthLoginSession,
   RefreshStats,
   SwitchHistoryItem,
@@ -48,7 +49,10 @@ interface WailsAppBridge {
   GenerateTOTP(secret: string): Promise<TotpCodeResult>
 
   StartOAuthLogin(groupId: string): Promise<OAuthLoginSession>
+  StartOAuthLoginWithHost(groupId: string, callbackHost: OAuthCallbackHost): Promise<OAuthLoginSession>
   PrepareOAuthLogin(groupId: string): Promise<OAuthLoginSession>
+  PrepareOAuthLoginWithHost(groupId: string, callbackHost: OAuthCallbackHost): Promise<OAuthLoginSession>
+  SwitchOAuthCallbackHost(groupId: string, callbackHost: OAuthCallbackHost | ''): Promise<OAuthLoginSession>
   GetActiveOAuthSession(): Promise<OAuthLoginSession | null>
   SetOAuthTargetGroup(groupId: string): Promise<void>
   SubmitOAuthCallbackURL(rawURL: string): Promise<void>
@@ -155,7 +159,13 @@ export const api = {
   generateTOTP: (secret: string) => getBridge().GenerateTOTP(secret),
 
   startOAuthLogin: (groupId: string) => getBridge().StartOAuthLogin(groupId),
+  startOAuthLoginWithHost: (groupId: string, callbackHost: OAuthCallbackHost) =>
+    getBridge().StartOAuthLoginWithHost(groupId, callbackHost),
   prepareOAuthLogin: (groupId: string) => getBridge().PrepareOAuthLogin(groupId),
+  prepareOAuthLoginWithHost: (groupId: string, callbackHost: OAuthCallbackHost) =>
+    getBridge().PrepareOAuthLoginWithHost(groupId, callbackHost),
+  switchOAuthCallbackHost: (groupId: string, callbackHost: OAuthCallbackHost | '') =>
+    getBridge().SwitchOAuthCallbackHost(groupId, callbackHost),
   getActiveOAuthSession: () => getBridge().GetActiveOAuthSession(),
   setOAuthTargetGroup: (groupId: string) => getBridge().SetOAuthTargetGroup(groupId),
   submitOAuthCallbackURL: (rawURL: string) => getBridge().SubmitOAuthCallbackURL(rawURL),

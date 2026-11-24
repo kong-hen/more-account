@@ -185,10 +185,13 @@ export interface TotpCodeResult {
   validUntilUnix: number
 }
 
+export type OAuthCallbackHost = 'localhost' | '127.0.0.1'
+
 export interface OAuthLoginSession {
   authUrl: string
   redirectUri: string
   state: string
+  callbackHost?: OAuthCallbackHost
   status?: string
 }
 

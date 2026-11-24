@@ -118,6 +118,13 @@ func NewApp() *App {
 		usageService:    usageSvc,
 	}
 
+	oauthMgr.OnTLSDetected = func(state, callbackHost string) {
+		app.emitEvent("oauth:tls_detected", map[string]any{
+			"state":        state,
+			"callbackHost": callbackHost,
+		})
+	}
+
 	app.autoRefresher = quota.NewAutoRefresher(
 		store,
 		quotaSvc,
@@ -787,10 +794,34 @@ func (a *App) openOAuthBrowser(authURL string) {
 }
 
 func (a *App) beginOAuthSession(groupID string, openBrowser bool) (oauth.LoginSession, error) {
+	return a.beginOAuthSessionWithHost(groupID, openBrowser, "", false)
+}
+
+func (a *App) beginOAuthSessionWithHost(groupID string, openBrowser bool, callbackHost string, forceRestart bool) (oauth.LoginSession, error) {
 	a.SetOAuthTargetGroup(groupID)
 
-	// 原子复用已有活跃监听/处理中会话或启动全新本地回调服务，避免并发双监听与误杀旧会话
-	info, created, err := a.oauthManager.EnsureSession(oauth.SessionConfig{Silent: !openBrowser})
+	var (
+		info    *oauth.SessionInfo
+		created bool
+		err     error
+	)
+	if forceRestart {
+		silent := !openBrowser
+		if cur, ok := a.oauthManager.CurrentSessionInfo(); ok {
+			silent = cur.Silent && !openBrowser
+		}
+		info, err = a.oauthManager.RestartSessionIfWaiting(oauth.SessionConfig{
+			Silent:       silent,
+			CallbackHost: callbackHost,
+		})
+		created = err == nil
+	} else {
+		// 原子复用已有活跃监听/处理中会话或启动全新本地回调服务，避免并发双监听与误杀旧会话
+		info, created, err = a.oauthManager.EnsureSession(oauth.SessionConfig{
+			Silent:       !openBrowser,
+			CallbackHost: callbackHost,
+		})
+	}
 	if err != nil {
 		return oauth.LoginSession{}, err
 	}
@@ -806,93 +837,110 @@ func (a *App) beginOAuthSession(groupID string, openBrowser bool) (oauth.LoginSe
 		return info.ToLoginSession(), nil
 	}
 
-	go func(sessionState, redirectURI, codeVerifier string) {
-		defer a.oauthManager.FinishProcessing(sessionState)
-
-		// 等待浏览器回跳或手动提交回调 URL（最多 10 分钟，测试可覆盖超时时长）
-		waitTimeout := 10 * time.Minute
-		if a.oauthWaitTimeout > 0 {
-			waitTimeout = a.oauthWaitTimeout
-		}
-		waitCtx, waitCancel := context.WithTimeout(a.baseCtx(), waitTimeout)
-		defer waitCancel()
-
-		code, waitErr := a.oauthManager.WaitForState(waitCtx, sessionState)
-		if waitErr != nil {
-			// 用户主动取消或被新会话替代时静默结束，不再误报 oauth:failed 打断界面或弹出错误条
-			if errors.Is(waitErr, oauth.ErrOAuthCanceled) {
-				return
-			}
-			payload := map[string]any{
-				"error": waitErr.Error(),
-				"state": sessionState,
-			}
-			// 仅当未主动发起的静默预监听等待超时才附带 silent: true；真实浏览器回调报错（如 access_denied）永不静默
-			if errors.Is(waitErr, oauth.ErrOAuthTimeout) && a.oauthManager.IsSessionSilent(sessionState) {
-				payload["silent"] = true
-			}
-			a.emitEvent("oauth:failed", payload)
-			return
-		}
-
-		// 收到授权码后立刻标记处理中并推送事件，确保前端实时锁定输入并展示“验证并导入中...”反馈
-		a.oauthManager.MarkProcessing(sessionState)
-		a.emitEvent("oauth:processing", map[string]any{"state": sessionState})
-
-		// 令牌换取、用户信息拉取与首次配额刷新使用独立 60 秒上下文，避免受前序等待剩余时间挤压
-		exchangeCtx, exchangeCancel := context.WithTimeout(a.baseCtx(), 60*time.Second)
-		defer exchangeCancel()
-
-		tokenResp, exErr := a.oauthClient.ExchangeCode(exchangeCtx, code, redirectURI, codeVerifier)
-		if exErr != nil {
-			a.emitEvent("oauth:failed", map[string]any{
-				"error": exErr.Error(),
-				"state": sessionState,
-			})
-			return
-		}
-		if strings.TrimSpace(tokenResp.RefreshToken) == "" {
-			a.emitEvent("oauth:failed", map[string]any{
-				"error": "Google 未返回 refresh_token，请在 Google 账号安全页撤销旧授权后重试",
-				"state": sessionState,
-			})
-			return
-		}
-
-		targetGroupID := a.getOAuthTargetGroup()
-		acc, addErr := a.importerService.AddByTokenResponse(exchangeCtx, tokenResp, targetGroupID, nil)
-		if addErr != nil {
-			a.emitEvent("oauth:failed", map[string]any{
-				"error": addErr.Error(),
-				"state": sessionState,
-			})
-			return
-		}
-
-		if a.activeDetector != nil {
-			a.activeDetector.TriggerCheck()
-		}
-		if a.autoRefresher != nil {
-			a.autoRefresher.TriggerCheck()
-		}
-		a.syncStatusBar()
-		a.emitEvent("oauth:completed", map[string]any{
-			"account": acc,
-			"state":   sessionState,
-		})
-	}(info.State, info.RedirectURI, info.CodeVerifier)
+	go a.runOAuthWaitLoop(info.State, info.RedirectURI, info.CodeVerifier)
 
 	return info.ToLoginSession(), nil
 }
 
+func (a *App) runOAuthWaitLoop(sessionState, redirectURI, codeVerifier string) {
+	defer a.oauthManager.FinishProcessing(sessionState)
+
+	// 等待浏览器回跳或手动提交回调 URL（最多 10 分钟，测试可覆盖超时时长）
+	waitTimeout := 10 * time.Minute
+	if a.oauthWaitTimeout > 0 {
+		waitTimeout = a.oauthWaitTimeout
+	}
+	waitCtx, waitCancel := context.WithTimeout(a.baseCtx(), waitTimeout)
+	defer waitCancel()
+
+	code, waitErr := a.oauthManager.WaitForState(waitCtx, sessionState)
+	if waitErr != nil {
+		// 用户主动取消或被新会话替代时静默结束，不再误报 oauth:failed 打断界面或弹出错误条
+		if errors.Is(waitErr, oauth.ErrOAuthCanceled) {
+			return
+		}
+		payload := map[string]any{
+			"error": waitErr.Error(),
+			"state": sessionState,
+		}
+		// 仅当未主动发起的静默预监听等待超时才附带 silent: true；真实浏览器回调报错（如 access_denied）永不静默
+		if errors.Is(waitErr, oauth.ErrOAuthTimeout) && a.oauthManager.IsSessionSilent(sessionState) {
+			payload["silent"] = true
+		}
+		a.emitEvent("oauth:failed", payload)
+		return
+	}
+
+	// 收到授权码后立刻标记处理中并推送事件，确保前端实时锁定输入并展示“验证并导入中...”反馈
+	a.oauthManager.MarkProcessing(sessionState)
+	a.emitEvent("oauth:processing", map[string]any{"state": sessionState})
+
+	// 令牌换取、用户信息拉取与首次配额刷新使用独立 60 秒上下文，避免受前序等待剩余时间挤压
+	exchangeCtx, exchangeCancel := context.WithTimeout(a.baseCtx(), 60*time.Second)
+	defer exchangeCancel()
+
+	tokenResp, exErr := a.oauthClient.ExchangeCode(exchangeCtx, code, redirectURI, codeVerifier)
+	if exErr != nil {
+		a.emitEvent("oauth:failed", map[string]any{
+			"error": exErr.Error(),
+			"state": sessionState,
+		})
+		return
+	}
+	if strings.TrimSpace(tokenResp.RefreshToken) == "" {
+		a.emitEvent("oauth:failed", map[string]any{
+			"error": "Google 未返回 refresh_token，请在 Google 账号安全页撤销旧授权后重试",
+			"state": sessionState,
+		})
+		return
+	}
+
+	targetGroupID := a.getOAuthTargetGroup()
+	acc, addErr := a.importerService.AddByTokenResponse(exchangeCtx, tokenResp, targetGroupID, nil)
+	if addErr != nil {
+		a.emitEvent("oauth:failed", map[string]any{
+			"error": addErr.Error(),
+			"state": sessionState,
+		})
+		return
+	}
+
+	if a.activeDetector != nil {
+		a.activeDetector.TriggerCheck()
+	}
+	if a.autoRefresher != nil {
+		a.autoRefresher.TriggerCheck()
+	}
+	a.syncStatusBar()
+	a.emitEvent("oauth:completed", map[string]any{
+		"account": acc,
+		"state":   sessionState,
+	})
+}
+
 // StartOAuthLogin 启动本地回调监听并立即打开系统浏览器跳转到网页验证授权。
 func (a *App) StartOAuthLogin(groupID string) (oauth.LoginSession, error) {
-	return a.beginOAuthSession(groupID, true)
+	return a.beginOAuthSessionWithHost(groupID, true, "", false)
+}
+
+// StartOAuthLoginWithHost 使用指定回调主机（localhost / 127.0.0.1）启动本地回调监听并拉起系统浏览器授权。
+func (a *App) StartOAuthLoginWithHost(groupID, callbackHost string) (oauth.LoginSession, error) {
+	return a.beginOAuthSessionWithHost(groupID, true, callbackHost, false)
 }
 
 // PrepareOAuthLogin 仅启动本地回调监听并生成授权链接（不自动拉起默认浏览器，供用户直接复制授权链接到指定浏览器验证）。
 func (a *App) PrepareOAuthLogin(groupID string) (oauth.LoginSession, error) {
-	return a.beginOAuthSession(groupID, false)
+	return a.beginOAuthSessionWithHost(groupID, false, "", false)
+}
+
+// PrepareOAuthLoginWithHost 使用指定回调主机（localhost / 127.0.0.1）启动或复用本地回调监听并生成授权链接。
+func (a *App) PrepareOAuthLoginWithHost(groupID, callbackHost string) (oauth.LoginSession, error) {
+	return a.beginOAuthSessionWithHost(groupID, false, callbackHost, false)
+}
+
+// SwitchOAuthCallbackHost 在等待阶段切换本地回调地址主机（localhost / 127.0.0.1）并重建监听端口，绕过部分代理或 HSTS 拦截。
+func (a *App) SwitchOAuthCallbackHost(groupID, callbackHost string) (oauth.LoginSession, error) {
+	return a.beginOAuthSessionWithHost(groupID, false, callbackHost, true)
 }
 
 // SubmitOAuthCallbackURL 允许用户手动粘贴回调 URL 完成 OAuth 授权。
